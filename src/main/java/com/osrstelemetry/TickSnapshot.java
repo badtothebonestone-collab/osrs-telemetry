@@ -22,6 +22,7 @@ public class TickSnapshot
 
     public LocalPlayer localPlayer;
     public InventorySlot[] inventory;
+    public String inventoryCaptureSource;
     public InventorySlot[] equipment;
     public SkillSnapshot[] skills;
     public NpcSnapshot[] npcs;

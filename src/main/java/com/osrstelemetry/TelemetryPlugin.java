@@ -737,10 +737,12 @@ public class TelemetryPlugin extends Plugin
 		return payload;
 	}
 
-	private Map<String, Object> inventoryPayload(TickSnapshot snapshot)
+	static Map<String, Object> inventoryPayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("inventory", itemContainerSnapshot(snapshot.inventory));
+		Map<String, Object> inventory = itemContainerSnapshot(snapshot.inventory);
+		inventory.put("source", snapshot.inventoryCaptureSource);
+		payload.put("inventory", inventory);
 		return payload;
 	}
 
@@ -795,17 +797,17 @@ public class TelemetryPlugin extends Plugin
 		return payload;
 	}
 
-	private Map<String, Object> itemContainerSnapshot(TickSnapshot.InventorySlot[] slots)
+	private static Map<String, Object> itemContainerSnapshot(TickSnapshot.InventorySlot[] slots)
 	{
 		return itemContainerPayload(slots, true);
 	}
 
-	private Map<String, Object> itemContainerSummary(TickSnapshot.InventorySlot[] slots)
+	private static Map<String, Object> itemContainerSummary(TickSnapshot.InventorySlot[] slots)
 	{
 		return itemContainerPayload(slots, false);
 	}
 
-	private Map<String, Object> itemContainerPayload(TickSnapshot.InventorySlot[] slots, boolean includeItems)
+	private static Map<String, Object> itemContainerPayload(TickSnapshot.InventorySlot[] slots, boolean includeItems)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		List<Map<String, Object>> items = new ArrayList<>();
@@ -1232,24 +1234,10 @@ public class TelemetryPlugin extends Plugin
 			return new TickSnapshot.InventorySlotWidgetSnapshot[0];
 		}
 
-		Widget[] children = inventoryItems.getDynamicChildren();
-		if (children == null || children.length == 0)
-		{
-			children = inventoryItems.getChildren();
-		}
-		if (children == null || children.length == 0)
-		{
-			children = inventoryItems.getNestedChildren();
-		}
-		if (children == null || children.length == 0)
-		{
-			return new TickSnapshot.InventorySlotWidgetSnapshot[0];
-		}
-
 		List<TickSnapshot.InventorySlotWidgetSnapshot> snapshots = new ArrayList<>();
-		for (int i = 0; i < children.length && i < INVENTORY_SLOT_COUNT; i++)
+		for (int i = 0; i < INVENTORY_SLOT_COUNT; i++)
 		{
-			Widget child = children[i];
+			Widget child = inventoryItems.getChild(i);
 			if (child == null)
 			{
 				continue;
@@ -1637,27 +1625,22 @@ public class TelemetryPlugin extends Plugin
 	private void captureInventory(TickSnapshot snapshot)
 	{
 		ItemContainer inventory = client.getItemContainer(InventoryID.INVENTORY);
-
-		if (inventory == null)
-		{
-			return;
-		}
-
-		Item[] items = inventory.getItems();
-		int slotCount = Math.max(INVENTORY_SLOT_COUNT, items.length);
-		snapshot.inventory = new TickSnapshot.InventorySlot[slotCount];
-
-		for (int i = 0; i < slotCount; i++)
-		{
-			Item item = i < items.length ? items[i] : null;
-
-			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
-			slot.slot = i;
-			slot.itemId = item == null ? -1 : item.getId();
-			slot.quantity = item == null ? 0 : item.getQuantity();
-
-			snapshot.inventory[i] = slot;
-		}
+		InventoryCapture capture = selectInventoryCapture(
+				itemContainerSlots(inventory, INVENTORY_SLOT_COUNT),
+				inventory == null
+						? visibleInventoryWidgetSlots(
+								client.getWidget(InterfaceID.Inventory.ITEMS))
+						: null,
+				inventory == null
+						? visibleInventoryWidgetSlots(
+								client.getWidget(InterfaceID.Bankside.ITEMS))
+						: null,
+				inventory == null
+						? visibleInventoryWidgetSlots(
+								client.getWidget(InterfaceID.BankDepositbox.INVENTORY))
+						: null);
+		snapshot.inventory = capture == null ? null : capture.slots;
+		snapshot.inventoryCaptureSource = capture == null ? null : capture.source;
 	}
 
 	private TickSnapshot.InventorySlot[] itemContainerSlots(ItemContainer container, int minSlotCount)
@@ -2271,7 +2254,7 @@ public class TelemetryPlugin extends Plugin
 		return e == null ? "unknown" : e.getClass().getSimpleName();
 	}
 
-	private String hashName(String name)
+	private static String hashName(String name)
 	{
 		if (name == null || name.isBlank())
 		{
@@ -2694,6 +2677,124 @@ public class TelemetryPlugin extends Plugin
 		{
 			return null;
 		}
+	}
+
+	private TickSnapshot.InventorySlot[] visibleInventoryWidgetSlots(Widget inventoryItems)
+	{
+		if (!widgetVisible(inventoryItems) || !inventoryItems.isIf3())
+		{
+			return null;
+		}
+		Widget[] children = inventoryItems.getDynamicChildren();
+		if (children == null || children.length != INVENTORY_SLOT_COUNT)
+		{
+			return null;
+		}
+		int[] slotIndexes = new int[children.length];
+		int[] itemIds = new int[children.length];
+		int[] quantities = new int[children.length];
+		for (int i = 0; i < children.length; i++)
+		{
+			Widget child = children[i];
+			if (child == null)
+			{
+				return null;
+			}
+			slotIndexes[i] = child.getIndex();
+			itemIds[i] = child.getItemId();
+			quantities[i] = child.getItemQuantity();
+		}
+		return inventorySlotsFromVisibleWidgetEvidence(
+				true, children.length, slotIndexes, itemIds, quantities);
+	}
+
+	static TickSnapshot.InventorySlot[] inventorySlotsFromVisibleWidgetEvidence(
+			boolean visible,
+			int directChildCount,
+			int[] slotIndexes,
+			int[] itemIds,
+			int[] quantities)
+	{
+		if (!visible
+				|| directChildCount != INVENTORY_SLOT_COUNT
+				|| slotIndexes == null
+				|| itemIds == null
+				|| quantities == null
+				|| slotIndexes.length != INVENTORY_SLOT_COUNT
+				|| itemIds.length != INVENTORY_SLOT_COUNT
+				|| quantities.length != INVENTORY_SLOT_COUNT)
+		{
+			return null;
+		}
+		TickSnapshot.InventorySlot[] slots = new TickSnapshot.InventorySlot[INVENTORY_SLOT_COUNT];
+		boolean[] seen = new boolean[INVENTORY_SLOT_COUNT];
+		for (int i = 0; i < itemIds.length; i++)
+		{
+			int slotIndex = slotIndexes[i];
+			int itemId = itemIds[i];
+			int quantity = quantities[i];
+			boolean empty = itemId == -1 && quantity == 0;
+			boolean filled = itemId > 0 && quantity > 0;
+			if (slotIndex < 0
+					|| slotIndex >= INVENTORY_SLOT_COUNT
+					|| seen[slotIndex]
+					|| (!empty && !filled))
+			{
+				return null;
+			}
+			seen[slotIndex] = true;
+			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
+			slot.slot = slotIndex;
+			slot.itemId = itemId;
+			slot.quantity = quantity;
+			slots[slotIndex] = slot;
+		}
+		for (int i = 0; i < INVENTORY_SLOT_COUNT; i++)
+		{
+			if (!seen[i] || slots[i] == null)
+			{
+				return null;
+			}
+		}
+		return slots;
+	}
+
+	static final class InventoryCapture
+	{
+		final TickSnapshot.InventorySlot[] slots;
+		final String source;
+
+		InventoryCapture(TickSnapshot.InventorySlot[] slots, String source)
+		{
+			this.slots = slots;
+			this.source = source;
+		}
+	}
+
+	static InventoryCapture selectInventoryCapture(
+			TickSnapshot.InventorySlot[] itemContainerSlots,
+			TickSnapshot.InventorySlot[] inventoryWidgetSlots,
+			TickSnapshot.InventorySlot[] bankSideWidgetSlots,
+			TickSnapshot.InventorySlot[] depositInventoryWidgetSlots)
+	{
+		if (itemContainerSlots != null)
+		{
+			return new InventoryCapture(itemContainerSlots, "item_container");
+		}
+		if (inventoryWidgetSlots != null)
+		{
+			return new InventoryCapture(inventoryWidgetSlots, "inventory_widget");
+		}
+		if (bankSideWidgetSlots != null)
+		{
+			return new InventoryCapture(bankSideWidgetSlots, "bank_side_widget");
+		}
+		if (depositInventoryWidgetSlots != null)
+		{
+			return new InventoryCapture(
+					depositInventoryWidgetSlots, "deposit_inventory_widget");
+		}
+		return null;
 	}
 
 	static boolean shouldRefreshOpenMenu(Boolean menuOpen)

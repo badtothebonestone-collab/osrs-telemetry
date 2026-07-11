@@ -2,6 +2,7 @@ package com.osrstelemetry;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.google.gson.Gson;
@@ -140,6 +141,167 @@ public class TelemetryPluginSensorContractTest
 
 		assertFalse(TelemetryPlugin.bankUiKnown(missing));
 		assertTrue(TelemetryPlugin.bankUiKnown(captured));
+	}
+
+	@Test
+	public void visibleEmptyInventoryWidgetProvesKnownEmptySlots()
+	{
+		int[] indexes = inventoryIndexes();
+		int[] itemIds = emptyInventoryItemIds();
+		TickSnapshot.InventorySlot[] slots =
+				TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+						true, 28, indexes, itemIds, new int[28]);
+
+		assertEquals(28, slots.length);
+		for (int i = 0; i < slots.length; i++)
+		{
+			assertEquals(i, slots[i].slot);
+			assertEquals(-1, slots[i].itemId);
+			assertEquals(0, slots[i].quantity);
+		}
+	}
+
+	@Test
+	public void visibleInventoryWidgetRetainsPositiveItemEvidence()
+	{
+		int[] indexes = inventoryIndexes();
+		int[] itemIds = emptyInventoryItemIds();
+		int[] quantities = new int[28];
+		itemIds[7] = 1351;
+		quantities[7] = 1;
+		TickSnapshot.InventorySlot[] slots =
+				TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+						true, 28, indexes, itemIds, quantities);
+
+		assertEquals(1351, slots[7].itemId);
+		assertEquals(1, slots[7].quantity);
+	}
+
+	@Test
+	public void hiddenOrIncoherentInventoryWidgetEvidenceRemainsUnavailable()
+	{
+		int[] indexes = inventoryIndexes();
+		int[] itemIds = emptyInventoryItemIds();
+		int[] quantities = new int[28];
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				false, 28, indexes, itemIds, quantities));
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 29, indexes, itemIds, quantities));
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 0, new int[0], new int[0], new int[0]));
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 27, new int[27], new int[27], new int[27]));
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 29, new int[29], new int[29], new int[29]));
+
+		int[] zeroItemIds = itemIds.clone();
+		zeroItemIds[0] = 0;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, indexes, zeroItemIds, quantities));
+		int[] emptyWithQuantity = quantities.clone();
+		emptyWithQuantity[0] = 1;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, indexes, itemIds, emptyWithQuantity));
+		int[] positiveWithoutQuantity = itemIds.clone();
+		positiveWithoutQuantity[0] = 1351;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, indexes, positiveWithoutQuantity, quantities));
+
+		int[] duplicateIndexes = indexes.clone();
+		duplicateIndexes[27] = 0;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, duplicateIndexes, itemIds, quantities));
+		int[] outOfRangeIndexes = indexes.clone();
+		outOfRangeIndexes[27] = 28;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, outOfRangeIndexes, itemIds, quantities));
+	}
+
+	@Test
+	public void inventoryCaptureSelectionPreservesAuthorityAndEvidenceSource()
+	{
+		TickSnapshot.InventorySlot[] itemContainer = inventorySlots(10);
+		TickSnapshot.InventorySlot[] inventoryWidget = inventorySlots(20);
+		TickSnapshot.InventorySlot[] bankSideWidget = inventorySlots(30);
+		TickSnapshot.InventorySlot[] depositWidget = inventorySlots(40);
+
+		TelemetryPlugin.InventoryCapture capture =
+				TelemetryPlugin.selectInventoryCapture(
+						itemContainer,
+						inventoryWidget,
+						bankSideWidget,
+						depositWidget);
+		assertEquals("item_container", capture.source);
+		assertTrue(capture.slots == itemContainer);
+
+		capture = TelemetryPlugin.selectInventoryCapture(
+				null, inventoryWidget, bankSideWidget, depositWidget);
+		assertEquals("inventory_widget", capture.source);
+		assertTrue(capture.slots == inventoryWidget);
+
+		capture = TelemetryPlugin.selectInventoryCapture(
+				null, null, bankSideWidget, depositWidget);
+		assertEquals("bank_side_widget", capture.source);
+		assertTrue(capture.slots == bankSideWidget);
+
+		capture = TelemetryPlugin.selectInventoryCapture(
+				null, null, null, depositWidget);
+		assertEquals("deposit_inventory_widget", capture.source);
+		assertTrue(capture.slots == depositWidget);
+
+		assertNull(TelemetryPlugin.selectInventoryCapture(
+				null, null, null, null));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void inventoryFactEmitsKnownEmptyWidgetSource()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.inventory =
+				TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+						true,
+						28,
+						inventoryIndexes(),
+						emptyInventoryItemIds(),
+						new int[28]);
+		snapshot.inventoryCaptureSource = "inventory_widget";
+
+		Map<String, Object> fact = TelemetryPlugin.inventoryPayload(snapshot);
+		Map<String, Object> inventory =
+				(Map<String, Object>) fact.get("inventory");
+
+		assertEquals(Boolean.TRUE, inventory.get("known"));
+		assertEquals(28, inventory.get("slotCount"));
+		assertEquals(28, inventory.get("freeSlots"));
+		assertEquals(0, inventory.get("occupiedSlots"));
+		assertEquals("inventory_widget", inventory.get("source"));
+	}
+
+	private static TickSnapshot.InventorySlot[] inventorySlots(int itemId)
+	{
+		TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
+		slot.slot = 0;
+		slot.itemId = itemId;
+		slot.quantity = 1;
+		return new TickSnapshot.InventorySlot[]{slot};
+	}
+
+	private static int[] inventoryIndexes()
+	{
+		int[] indexes = new int[28];
+		for (int i = 0; i < indexes.length; i++)
+		{
+			indexes[i] = i;
+		}
+		return indexes;
+	}
+
+	private static int[] emptyInventoryItemIds()
+	{
+		int[] itemIds = new int[28];
+		java.util.Arrays.fill(itemIds, -1);
+		return itemIds;
 	}
 
 	@Test

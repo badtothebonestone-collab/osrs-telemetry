@@ -38,6 +38,23 @@ captured frame. A missing, mixed-tick, incomplete, future-dated, or stale frame
 produces explicit warnings/missing capabilities and cannot produce a `PASS`
 loaded-scene observation.
 
+### Inventory evidence
+
+RuneLite's `ItemContainer` is authoritative whenever it exists. When it is
+null, the plugin may recover inventory evidence only from the first exact
+visible IF3 inventory view in this order: ordinary inventory, bank-side
+inventory, then deposit-box inventory. A widget fallback is available only
+when its direct dynamic-child array contains exactly 28 non-null slots with
+unique indexes `0..27`. Every slot must be either the exact empty sentinel
+`itemId=-1, quantity=0` or a positive item ID with positive quantity. Missing,
+extra, duplicate, out-of-range, or malformed slot evidence leaves the inventory
+fact unavailable; absence is never synthesized as an empty inventory.
+
+The inventory fact records its selected source as `item_container`,
+`inventory_widget`, `bank_side_widget`, or `deposit_inventory_widget`. A
+visible 28-slot empty widget can therefore prove known-empty inventory without
+weakening the coherent loaded-scene gate.
+
 ## Dynamic geometry and menu evidence
 
 `input_geometry.v1` publishes actionable screen geometry only in Win32 virtual
