@@ -13,6 +13,7 @@ Read in this order:
 7. `docs/TASK_CONTRACT.md`
 8. `docs/DEFINITIONS_AND_PROFILES.md`
 9. `docs/INPUT_COORDINATOR.md`
+10. `docs/ENGINE_FRAME.md`
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.
@@ -83,6 +84,8 @@ login/recovery surfaces fail closed.
   not read plugin caches or raw response dictionaries elsewhere.
 - Keep task logic, safety, RuneLite parsing, Arduino control, verification, and
   state ownership out of future GUI/overlay code.
+- Overlay and status readers may only render immutable `EngineFrame` evidence.
+  They must suppress stale geometry and never rerun selection or safety checks.
 - Runtime control may use task contracts but must not know concrete task phases,
   item IDs, route facts, or mutable progress internals.
 - Demonstrations and historical runs are append-only evidence. They may suggest

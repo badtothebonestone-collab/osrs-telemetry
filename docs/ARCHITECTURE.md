@@ -35,7 +35,7 @@ task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
 The architecture is being migrated in bounded checkpoints. The current column
-describes the Phase 5 implementation; the target column names only contracts
+describes the Phase 6 implementation; the target column names only contracts
 still owned by later phases.
 
 | Layer | Current baseline | Governing target |
@@ -44,12 +44,12 @@ still owned by later phases.
 | Observation | immutable source-coherent `Observation` | preserve the same single truth for task-neutral seams |
 | Definition/profile | one immutable `LUMBRIDGE_WEST_TREES_V1` plus one validated one-cycle default profile | preserve typed validation; add no dynamic loader during this mission |
 | Task | minimal `Task` protocol plus definition-bound concrete `WoodcutBankTask` FSM | preserve the protocol and explicit task-specific transitions |
-| Decision | opaque `Decision.state` + `Action` + `VerificationSpec` + typed task constraints | stable task-neutral intent contracts consumed by diagnostics/frontends |
+| Decision | opaque state/action plus immutable selected/eligible/rejected evidence from the actual task path | preserve this task-neutral evidence contract for frontends |
 | Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
 | Runtime configuration | immutable endpoint/Arduino/poll/bound values with engine caps | same contract consumed by the future facade |
 | Input | one `InputCoordinator`, deterministic pointer policy, private Arduino transport, immutable wire receipts | preserve the sole-owner boundary for every future caller |
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
-| Diagnostics | CLI result dictionaries and traces | one immutable `EngineFrame` |
+| Diagnostics | one immutable latest `EngineFrame` plus optional passive click-through overlay | preserve one no-authority status contract for recorder/frontend readers |
 | Frontend | `run.cmd` | thin application facade and future GUI consuming the same contracts |
 
 ## Ownership boundaries
@@ -165,6 +165,12 @@ The task emits an `Action` and a generic `VerificationSpec`. It never sends the
 action and never evaluates its own verification. It consumes only typed
 outcomes from the shared verifier.
 
+The same concrete selection/classification path also emits immutable
+`DecisionEvidence`: exact selected target, eligible candidates, and rejected
+candidates with stable codes. `TaskSnapshot` publishes the bound definition and
+profile plus route/cycle progress. Runtime reads only these task-contract values
+and never inspects mutable FSM progress.
+
 ### Safety and action
 
 `SafetyGate` first checks non-overridable engine invariants: coherent/fresh
@@ -174,6 +180,10 @@ checks immutable task constraints carried by the action: expected interface
 state/plane/readability, exact dialogue choice, and permitted inventory. These
 constraints can only narrow an action. Bank plane and staircase wording are not
 shared safety constants.
+
+Each public safety evaluation records its actual ordered subchecks. The action
+layer carries those values, including bounded retry attempts, in
+`ExecutionResult`; diagnostics do not rerun SafetyGate.
 
 `CoordinatedActionInterface` and the saved-session login helper submit typed
 approved intents to the sole `InputCoordinator`. The coordinator then:
@@ -244,18 +254,27 @@ provenance records hashes of the bounded live component traces and explicitly
 states that those traces were stitched and do not contain complete raw sensor
 or SafetyGate evidence.
 
-## EngineFrame and diagnostics target
+## EngineFrame and passive diagnostics
 
-The real runtime will publish one immutable `EngineFrame` containing task/state,
-definition/profile IDs, route progress, selected target identity and geometry,
-eligible and rejected candidates with codes, ordered safety checks, pending and
-last verification, typed outcome, execution receipt, final cleanup state, and
-current blocker.
+The real runtime publishes one immutable `EngineFrame` after observation,
+decision, execution, verification, and terminal boundaries. It contains
+task/state, definition/profile IDs, route progress, selected target identity
+and geometry, eligible and rejected candidates with codes, ordered safety
+checks, pending and last verification, typed outcome, execution receipt, final
+cleanup state, and current blocker. The atomic publisher retains only the
+latest monotonic frame; it is not a history store.
 
-The recorder, passive overlay, CLI, and future GUI consume this exact frame.
-They may format or filter it but may not reselect a target, recalculate safety,
-mutate the FSM, import Arduino control, or authorize input. The overlay is
-click-through, non-focusable, and optional.
+The optional overlay consumes this exact frame. It uses green for the selected
+target, amber for eligible alternatives, and optional red for rejected
+candidates. It suppresses rectangles when source tick/geometry provenance no
+longer matches the displayed Observation. Its verified Win32 extended styles
+make it click-through, non-focusable, layered, and tool-window-only. It has no
+input handlers, target selection, SafetyGate calls, or Arduino imports, and an
+overlay failure cannot alter runtime control.
+
+The future recorder, CLI facade, and GUI consume the same frame. Readers may
+format or filter it but may not reselect a target, recalculate safety, mutate
+the FSM, import Arduino control, or authorize input.
 
 ## Demonstration and frontend targets
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 
 from osrs_bot.model import (
@@ -25,7 +25,12 @@ from osrs_bot.model import (
     WidgetTarget,
     WorldPoint,
 )
-from osrs_bot.safety import SafetyGate
+from osrs_bot.safety import (
+    SafetyCheck,
+    SafetyEvaluation,
+    SafetyGate,
+    SafetyResult,
+)
 
 
 TREE_POINT = ScreenPoint(320, 240)
@@ -197,6 +202,76 @@ class SafetyGateTest(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual(result.reason, "post_move_safe")
+
+    def test_pre_move_evaluation_records_stable_order_and_drives_wrapper(self) -> None:
+        action = tree_action()
+        sample = observation()
+
+        evaluation = self.gate.evaluate_pre_move(action, sample)
+
+        self.assertIsInstance(evaluation, SafetyEvaluation)
+        self.assertEqual(
+            [
+                ("pre_move.observation", "observation_safe", True),
+                ("pre_move.session", "session_bound", True),
+                ("pre_move.source_tick", "tick_bound", True),
+                ("pre_move.source_menu_sample", "menu_sample_bound", True),
+                ("pre_move.action_invariants", "screen_point_safe", True),
+                (
+                    "pre_move.task_constraints",
+                    "task_constraints_satisfied",
+                    True,
+                ),
+                ("pre_move.complete", "pre_move_safe", True),
+            ],
+            [(check.stage, check.code, check.allowed) for check in evaluation.checks],
+        )
+        self.assertEqual(evaluation.result, self.gate.validate_pre_move(action, sample))
+
+    def test_evaluation_stops_at_the_exact_failed_check(self) -> None:
+        evaluation = self.gate.evaluate_pre_move(
+            tree_action(), replace(observation(), source_coherent=False)
+        )
+
+        self.assertEqual(SafetyResult(False, "source_incoherent"), evaluation.result)
+        self.assertEqual(
+            (SafetyCheck("pre_move.observation", "source_incoherent", False),),
+            evaluation.checks,
+        )
+
+    def test_post_and_context_evaluations_use_distinct_stable_stages(self) -> None:
+        action = tree_action()
+        post = observation(tick=101, menus=(exact_hover(),))
+        post_evaluation = self.gate.evaluate_post_move(action, post)
+        context_evaluation = self.gate.evaluate_context_candidate(action, post)
+
+        self.assertEqual("post_move_safe", post_evaluation.result.reason)
+        self.assertEqual("post_move.observation", post_evaluation.checks[0].stage)
+        self.assertEqual("post_move.complete", post_evaluation.checks[-1].stage)
+        self.assertEqual(
+            "context_candidate.observation", context_evaluation.checks[0].stage
+        )
+        self.assertEqual(
+            "context_candidate.exact_lower_entry",
+            context_evaluation.checks[-1].stage,
+        )
+        self.assertEqual(
+            "context_option_not_unique_lower_entry",
+            context_evaluation.result.reason,
+        )
+
+    def test_safety_evidence_is_deeply_immutable_and_validated(self) -> None:
+        evaluation = self.gate.evaluate_pre_move(tree_action(), observation())
+
+        self.assertFalse(hasattr(evaluation, "__dict__"))
+        self.assertFalse(hasattr(evaluation.checks[0], "__dict__"))
+        with self.assertRaises(FrozenInstanceError):
+            evaluation.checks[0].allowed = False  # type: ignore[misc]
+        with self.assertRaises(ValueError):
+            SafetyEvaluation(
+                SafetyResult(True, "safe"),
+                (SafetyCheck("test", "different", True),),
+            )
 
     def test_context_menu_requires_one_exact_bounded_lower_row(self) -> None:
         generic = MenuEntry(

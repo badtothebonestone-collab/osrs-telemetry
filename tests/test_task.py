@@ -249,7 +249,20 @@ class WoodcutBankTaskTests(unittest.TestCase):
 
         self.assertIs(task.binding, DEFAULT_BINDING)
         self.assertIs(task.definition, DEFINITION)
-        self.assertEqual("woodcut_bank", task.snapshot().task_id)
+        snapshot = task.snapshot()
+        self.assertEqual("woodcut_bank", snapshot.task_id)
+        self.assertEqual(DEFINITION.definition_id, snapshot.definition_id)
+        self.assertEqual(DEFAULT_BINDING.profile.profile_id, snapshot.profile_id)
+        self.assertEqual("cycles", snapshot.progress.label)
+        self.assertEqual(0, snapshot.progress.current)
+        self.assertEqual(DEFAULT_BINDING.profile.cycle_goal, snapshot.progress.total)
+
+        task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
+        task.progress.route_index = 2
+        route_snapshot = task.snapshot()
+        self.assertEqual(DEFINITION.route_to_bank.route_id, route_snapshot.progress.label)
+        self.assertEqual(2, route_snapshot.progress.current)
+        self.assertEqual(len(ROUTE_TO_BANK), route_snapshot.progress.total)
 
     def test_find_tree_requires_exact_name_action_and_screen_geometry(self) -> None:
         invalid_geometry = TargetGeometry(
@@ -280,6 +293,41 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(tree().key, task.progress.target_key)
         self.assertFalse(tree().resource_candidate)
 
+    def test_tree_rejection_codes_are_stable_and_geometry_is_exact(self) -> None:
+        bad = tree(
+            key="tree:bad",
+            object_id=1278,
+            name="Oak tree",
+            action="Chop",
+            geometry=TargetGeometry(),
+        )
+        state = observation(objects=(bad,), tick=42)
+
+        decision = WoodcutBankTask().decide(state)
+
+        self.assertIsNone(decision.evidence.selected)
+        self.assertEqual((), decision.evidence.eligible)
+        self.assertEqual(1, len(decision.evidence.rejected))
+        rejected = decision.evidence.rejected[0]
+        self.assertEqual("tree:bad", rejected.target.key)
+        self.assertEqual(42, rejected.target.source_tick)
+        self.assertEqual("test-frame-42", rejected.target.geometry_frame_id)
+        self.assertIsNone(rejected.target.point)
+        self.assertIsNone(rejected.target.bounds)
+        self.assertEqual(
+            (
+                "object_id_not_supported",
+                "name_mismatch",
+                "action_unavailable",
+                "geometry_unavailable",
+                "off_screen",
+                "not_visible",
+                "not_actionable",
+                "screen_point_unavailable",
+            ),
+            rejected.rejection_codes,
+        )
+
     def test_find_tree_skips_aim_point_occluded_by_another_tree(self) -> None:
         occluded = tree(
             key="tree:occluded",
@@ -301,10 +349,29 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
 
         task = WoodcutBankTask()
-        task.decide(observation(objects=(occluded, clear)))
+        decision = task.decide(observation(objects=(occluded, clear), tick=37))
 
         self.assertEqual("tree:clear", task.progress.target_key)
         self.assertEqual(TaskPhase.CHOP, task.progress.phase)
+        self.assertEqual("tree:clear", decision.evidence.selected.key)
+        self.assertEqual(
+            ("tree:clear",),
+            tuple(target.key for target in decision.evidence.eligible),
+        )
+        self.assertEqual(
+            ("tree:occluded",),
+            tuple(item.target.key for item in decision.evidence.rejected),
+        )
+        self.assertEqual(
+            ("aim_point_occluded",),
+            decision.evidence.rejected[0].rejection_codes,
+        )
+        selected = decision.evidence.selected
+        self.assertEqual(DEFINITION.resource.selector.action, selected.action)
+        self.assertEqual(37, selected.source_tick)
+        self.assertEqual("test-frame-37", selected.geometry_frame_id)
+        self.assertEqual(clear.geometry.screen_point, selected.point)
+        self.assertEqual(clear.geometry.screen_bounds, selected.bounds)
 
     def test_stale_scene_and_unknown_inventory_never_emit_actions(self) -> None:
         task = WoodcutBankTask()
@@ -404,6 +471,15 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(TaskPhase.BLOCKED.value, blocked.state)
         self.assertEqual(ActionKind.WAIT, blocked.action.kind)
+        self.assertEqual(step.target_key, blocked.evidence.rejected[0].target.key)
+        self.assertEqual(
+            ("object_id_mismatch",),
+            blocked.evidence.rejected[0].rejection_codes,
+        )
+        blocked_progress = task.snapshot().progress
+        self.assertEqual(DEFINITION.route_to_bank.route_id, blocked_progress.label)
+        self.assertEqual(0, blocked_progress.current)
+        self.assertEqual(len(ROUTE_TO_BANK), blocked_progress.total)
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
@@ -417,6 +493,16 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(TaskPhase.NAVIGATE_TO_BANK.value, waiting.state)
         self.assertEqual(ActionKind.WAIT, waiting.action.kind)
+        self.assertEqual(
+            (
+                "geometry_unavailable",
+                "off_screen",
+                "not_visible",
+                "not_actionable",
+                "screen_point_unavailable",
+            ),
+            waiting.evidence.rejected[0].rejection_codes,
+        )
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
@@ -429,6 +515,13 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.WALK, decision.action.kind)
         self.assertEqual(SCREEN, decision.action.screen_point)
+        self.assertEqual(step.target_key, decision.evidence.selected.key)
+        self.assertEqual((step.target_key,), tuple(
+            target.key for target in decision.evidence.eligible
+        ))
+        self.assertEqual("Walk here", decision.evidence.selected.action)
+        self.assertEqual(SCREEN, decision.evidence.selected.point)
+        self.assertEqual("test-frame-10", decision.evidence.selected.geometry_frame_id)
         self.assertEqual(VerificationKind.MOVED_CLOSER, task.progress.pending.kind)
         task.apply_verification(verification_pass(OutcomeKind.MOVED_CLOSER))
         self.assertEqual(0, task.progress.route_index)
@@ -451,6 +544,49 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.WAIT, settled.action.kind)
         self.assertEqual(1, task.progress.route_index)
+
+    def test_route_object_evidence_uses_the_actual_ranked_selection(self) -> None:
+        index = next(
+            index for index, step in enumerate(ROUTE_TO_BANK) if not step.is_walk
+        )
+        step = ROUTE_TO_BANK[index]
+        invalid = route_object(
+            step,
+            key="route:invalid",
+            object_id=step.object_id + 1,
+        )
+        selected = route_object(step, key="route:selected")
+        task = WoodcutBankTask()
+        task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
+        task.progress.route_index = index
+
+        decision = task.decide(
+            observation(
+                location=step.location,
+                inv=inventory(logs=28, full=True),
+                objects=(invalid, selected),
+                tick=51,
+            )
+        )
+
+        self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
+        self.assertEqual("route:selected", decision.action.target_key)
+        self.assertEqual("route:selected", decision.evidence.selected.key)
+        self.assertEqual(
+            ("route:selected",),
+            tuple(target.key for target in decision.evidence.eligible),
+        )
+        self.assertEqual(
+            ("route:invalid",),
+            tuple(item.target.key for item in decision.evidence.rejected),
+        )
+        self.assertEqual(
+            ("object_id_mismatch",),
+            decision.evidence.rejected[0].rejection_codes,
+        )
+        self.assertEqual(decision.action.option, decision.evidence.selected.action)
+        self.assertEqual(51, decision.evidence.selected.source_tick)
+        self.assertEqual(SCREEN, decision.evidence.selected.point)
 
     def test_stairs_require_exact_id_action_plane_and_external_plane_proof(self) -> None:
         stair_index = next(index for index, item in enumerate(ROUTE_TO_BANK) if not item.is_walk)
@@ -539,6 +675,19 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(ActionKind.PRESS_KEY, choice.action.kind)
         self.assertEqual("1", choice.action.key)
         self.assertEqual("Climb up the stairs.", choice.action.target_name)
+        self.assertEqual("dialogue:1", choice.evidence.selected.key)
+        self.assertEqual("Climb up the stairs.", choice.evidence.selected.action)
+        self.assertEqual(
+            ("dialogue:1",),
+            tuple(target.key for target in choice.evidence.eligible),
+        )
+        self.assertEqual(
+            ("dialogue:2",),
+            tuple(item.target.key for item in choice.evidence.rejected),
+        )
+        self.assertEqual(
+            ("text_mismatch",), choice.evidence.rejected[0].rejection_codes
+        )
         self.assertEqual(
             "Climb up the stairs.",
             choice.action.task_constraints.dialogue.option_text,
@@ -558,6 +707,10 @@ class WoodcutBankTaskTests(unittest.TestCase):
             )
         )
         self.assertEqual(TaskPhase.BLOCKED.value, invalid.state)
+        self.assertEqual(
+            ("object_id_not_supported",),
+            invalid.evidence.rejected[0].rejection_codes,
+        )
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.OPEN_BANK
@@ -570,6 +723,9 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
         self.assertEqual(BANK_OBJECT_ID, decision.action.target_id)
+        self.assertEqual("live:bank-booth", decision.evidence.selected.key)
+        self.assertEqual(DEFINITION.bank.selector.action, decision.evidence.selected.action)
+        self.assertEqual(SCREEN, decision.evidence.selected.point)
         self.assertFalse(decision.action.task_constraints.interface.expected_open)
         self.assertEqual(
             VerificationKind.INTERFACE_OPENED,
@@ -616,6 +772,9 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.VERIFY_DEPOSIT.value, decision.state)
         self.assertEqual(ActionKind.CLICK_WIDGET, decision.action.kind)
         self.assertEqual(DEPOSIT_WIDGET_NAME, decision.action.target_key)
+        self.assertEqual(DEPOSIT_WIDGET_NAME, decision.evidence.selected.key)
+        self.assertEqual("Deposit inventory", decision.evidence.selected.action)
+        self.assertEqual(SCREEN, decision.evidence.selected.point)
         self.assertEqual(
             frozenset({LOG_ITEM_ID}),
             decision.action.task_constraints.inventory.allowed_item_ids,
@@ -677,6 +836,17 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual("close_bank_keyboard", decision.action.target_key)
         self.assertTrue(
             decision.action.task_constraints.interface.require_keyboard_close
+        )
+        self.assertEqual("close_bank_keyboard", decision.evidence.selected.key)
+        self.assertEqual(("close_bank_keyboard",), tuple(
+            target.key for target in decision.evidence.eligible
+        ))
+        self.assertEqual((CLOSE_WIDGET_NAME,), tuple(
+            item.target.key for item in decision.evidence.rejected
+        ))
+        self.assertEqual(
+            ("screen_point_unavailable",),
+            decision.evidence.rejected[0].rejection_codes,
         )
         self.assertEqual(
             VerificationKind.INTERFACE_CLOSED,

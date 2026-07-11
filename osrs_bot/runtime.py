@@ -6,8 +6,14 @@ from typing import Callable, Protocol
 
 from .action import CoordinatedActionInterface, ExecutionResult
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
+from .engine_frame import (
+    EngineFrame,
+    EngineFramePublisher,
+    EngineStage,
+    ObservationReference,
+)
 from .input_coordinator import InputCoordinator
-from .model import Action, ActionKind, Observation
+from .model import Action, ActionKind, Observation, VerificationSpec
 from .observation import ObservationClient
 from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
 from .verification import VerificationResult, VerificationStatus, Verifier
@@ -30,6 +36,7 @@ class RuntimeResult:
     last_tick: int | None
     decision: Decision | None = None
     execution: ExecutionResult | None = None
+    engine_frame: EngineFrame | None = None
 
     @property
     def successful(self) -> bool:
@@ -89,6 +96,9 @@ class RuntimeResult:
                     else None
                 ),
             }
+        payload["engineFrame"] = (
+            self.engine_frame.to_dict() if self.engine_frame is not None else None
+        )
         return payload
 
 
@@ -103,6 +113,7 @@ class TaskRuntime:
         action_interface: _ActionInterface | None = None,
         *,
         configuration: RuntimeConfig = DEFAULT_RUNTIME_CONFIG,
+        frame_publisher: EngineFramePublisher | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -122,8 +133,25 @@ class TaskRuntime:
         )
         self._sleep = sleep
         self._clock = clock
+        if frame_publisher is not None and not isinstance(
+            frame_publisher, EngineFramePublisher
+        ):
+            raise TypeError("frame_publisher must be EngineFramePublisher or None")
+        self._frame_publisher = frame_publisher or EngineFramePublisher()
+        self._frame_observation: Observation | None = None
+        self._frame_decision: Decision | None = None
+        self._frame_execution: ExecutionResult | None = None
+        self._frame_verification: VerificationResult | None = None
+        self._frame_pending: VerificationSpec | None = None
+        self._frame_publish_error: str | None = None
+
+    @property
+    def frame_publisher(self) -> EngineFramePublisher:
+        return self._frame_publisher
 
     def run(self, *, execute: bool = False) -> RuntimeResult:
+        self._reset_frame_state()
+        self._publish_frame(EngineStage.STARTING)
         if execute and self._action_interface is None:
             return self._result(
                 "ERROR", "live execution requires an action interface", 0, 0, None
@@ -150,6 +178,8 @@ class TaskRuntime:
                 )
             observations += 1
             last_tick = observation.tick
+            self._frame_observation = observation
+            self._publish_frame(EngineStage.OBSERVED)
             if execute and (
                 not observation.client_focused
                 or observation.client_process_id is None
@@ -178,6 +208,8 @@ class TaskRuntime:
                     last_decision,
                 )
             last_decision = decision
+            self._frame_decision = decision
+            self._frame_pending = decision.action.verification
 
             task_snapshot, snapshot_error = self._read_task_snapshot()
             if snapshot_error is not None:
@@ -191,6 +223,7 @@ class TaskRuntime:
                     task_snapshot=self._snapshot_failure(snapshot_error),
                 )
             assert task_snapshot is not None
+            self._publish_frame(EngineStage.DECIDED, task_snapshot=task_snapshot)
             if task_snapshot.status is TaskStatus.COMPLETE:
                 return self._result(
                     "COMPLETE",
@@ -270,6 +303,8 @@ class TaskRuntime:
                     decision,
                 )
             actions += 1
+            self._frame_execution = execution
+            self._publish_frame(EngineStage.EXECUTED, task_snapshot=task_snapshot)
             if not execution.sent:
                 failure_reason = (
                     f"execution {execution.status.lower()}: {execution.reason}"
@@ -320,6 +355,8 @@ class TaskRuntime:
                     )
                 observations += 1
                 last_tick = candidate.tick
+                self._frame_observation = candidate
+                self._publish_frame(EngineStage.OBSERVED)
                 try:
                     result = self._verifier.evaluate(
                         decision.action.verification, candidate
@@ -358,6 +395,8 @@ class TaskRuntime:
                         decision,
                         execution,
                     )
+                self._frame_verification = result
+                self._publish_frame(EngineStage.VERIFYING)
                 if result.status is VerificationStatus.PENDING:
                     continue
                 if result.status is VerificationStatus.PASS and not result.passed:
@@ -391,6 +430,8 @@ class TaskRuntime:
                         decision,
                         execution,
                     )
+                self._frame_pending = None
+                self._publish_frame(EngineStage.VERIFIED)
                 verification_done = True
                 if result.failed:
                     return self._result(
@@ -429,6 +470,61 @@ class TaskRuntime:
             "LIMIT", reason, observations, actions, last_tick, last_decision
         )
 
+    def _reset_frame_state(self) -> None:
+        self._frame_observation = None
+        self._frame_decision = None
+        self._frame_execution = None
+        self._frame_verification = None
+        self._frame_pending = None
+        self._frame_publish_error = None
+
+    def _publish_frame(
+        self,
+        stage: EngineStage,
+        *,
+        task_snapshot: TaskSnapshot | None = None,
+        blocker: str | None = None,
+    ) -> EngineFrame | None:
+        try:
+            snapshot = task_snapshot
+            if snapshot is None:
+                snapshot, snapshot_error = self._read_task_snapshot()
+                if snapshot_error is not None:
+                    snapshot = self._snapshot_failure(snapshot_error)
+            assert snapshot is not None
+            execution = self._frame_execution
+            receipt = execution.receipt if execution is not None else None
+            checks = (
+                tuple(getattr(execution, "safety_checks", ()))
+                if execution is not None
+                else ()
+            )
+            observation = (
+                ObservationReference.from_observation(self._frame_observation)
+                if self._frame_observation is not None
+                else None
+            )
+            return self._frame_publisher.publish(
+                stage=stage,
+                task=snapshot,
+                observation=observation,
+                decision=self._frame_decision,
+                safety_checks=checks,
+                pending_verification=self._frame_pending,
+                last_verification=self._frame_verification,
+                last_execution_status=(
+                    execution.status if execution is not None else None
+                ),
+                last_execution_reason=(
+                    execution.reason if execution is not None else None
+                ),
+                last_execution_receipt=receipt,
+                blocker=blocker if blocker is not None else snapshot.blocker,
+            )
+        except Exception as error:  # diagnostics never gain control authority
+            self._frame_publish_error = f"{type(error).__name__}: {error}"
+            return None
+
     def _fetch(self) -> Observation:
         request = self._task.observation_request()
         return self._client.fetch(request.tile_projections)
@@ -439,6 +535,8 @@ class TaskRuntime:
             self._task.apply_verification(result)
         except Exception as error:
             return f"{type(error).__name__}: {error}"
+        self._frame_verification = result
+        self._frame_pending = None
         return None
 
     def _read_task_snapshot(self) -> tuple[TaskSnapshot | None, str | None]:
@@ -479,6 +577,20 @@ class TaskRuntime:
                 status = "ERROR"
                 reason = f"{reason}; task snapshot failed: {snapshot_error}"
         assert snapshot is not None
+        if decision is not None:
+            self._frame_decision = decision
+        if execution is not None:
+            self._frame_execution = execution
+        blocker = snapshot.blocker
+        if blocker is None and status in {"ERROR", "BLOCKED", "LIMIT"}:
+            blocker = reason
+        terminal_frame = self._publish_frame(
+            EngineStage.TERMINAL,
+            task_snapshot=snapshot,
+            blocker=blocker,
+        )
+        if terminal_frame is None:
+            terminal_frame = self._frame_publisher.latest()
         return RuntimeResult(
             status=status,
             reason=reason,
@@ -487,7 +599,8 @@ class TaskRuntime:
             actions=actions,
             last_tick=last_tick,
             decision=decision,
-            execution=execution,
+            execution=self._frame_execution,
+            engine_frame=terminal_frame,
         )
 
 

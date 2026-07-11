@@ -40,7 +40,7 @@ from osrs_bot.model import (
     WidgetTarget,
     WorldPoint,
 )
-from osrs_bot.safety import SafetyGate
+from osrs_bot.safety import SafetyCheck, SafetyGate
 
 
 POINT = ScreenPoint(110, 110)
@@ -394,6 +394,23 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(CANVAS, intent.movement_bounds)
         self.assertEqual(ScreenBounds(100, 100, 30, 30), intent.target_bounds)
         self.assertEqual(1234, intent.expected_pid)
+        self.assertEqual("pre_move.observation", result.safety_checks[0].stage)
+        self.assertIn(
+            SafetyCheck("pre_move.complete", "pre_move_safe", True),
+            result.safety_checks,
+        )
+        self.assertIn(
+            SafetyCheck("post_move.complete", "post_move_safe", True),
+            result.safety_checks,
+        )
+        self.assertEqual(
+            SafetyCheck(
+                "context_candidate.exact_lower_entry",
+                "context_option_not_unique_lower_entry",
+                False,
+            ),
+            result.safety_checks[-1],
+        )
 
     def test_fresh_hover_mismatch_denies_activation_but_preserves_cleanup_proof(self) -> None:
         coordinator = FakeCoordinator()
@@ -424,6 +441,22 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual("SENT", result.status)
         self.assertEqual(11, result.post_move_tick)
         self.assertEqual(PointerActivation.DIRECT_LEFT, coordinator.decisions[0].activation)
+        hover_checks = [
+            check
+            for check in result.safety_checks
+            if check.stage == "post_move.hover_menu"
+        ]
+        self.assertEqual(
+            [
+                SafetyCheck(
+                    "post_move.hover_menu", "hover_menu_mismatch", False
+                ),
+                SafetyCheck(
+                    "post_move.hover_menu", "hover_menu_exact", True
+                ),
+            ],
+            hover_checks,
+        )
 
     def test_context_row_is_resolved_then_revalidated_from_new_exact_evidence(self) -> None:
         coordinator = FakeCoordinator()
@@ -468,6 +501,14 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(row_bounds.center, row_intent.target)
         self.assertEqual(row_bounds, row_intent.target_bounds)
         self.assertEqual(2, len(result.receipt.intent_ids if result.receipt else ()))
+        self.assertEqual(
+            ["context_menu_open_safe", "context_row_safe"],
+            [
+                check.code
+                for check in result.safety_checks
+                if check.stage == "context_menu.complete"
+            ],
+        )
 
     def test_context_row_pointer_mismatch_blocks_left_activation_and_records_cancel(self) -> None:
         coordinator = FakeCoordinator()
@@ -609,6 +650,11 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual("NO_ACTION", no_action.status)
         self.assertIsNone(no_action.receipt)
         self.assertEqual([], coordinator.calls)
+        self.assertEqual(
+            (SafetyCheck("pre_move.observation", "observation_stale", False),),
+            blocked.safety_checks,
+        )
+        self.assertEqual("pre_move_safe", no_action.safety_checks[-1].code)
 
     def test_dialogue_key_rechecks_fresh_option_and_submits_typed_key_intent(self) -> None:
         widgets = WidgetObservation(
@@ -774,8 +820,12 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertFalse(hasattr(result, "backend_status"))
         self.assertIsInstance(result.receipt, InputReceipt)
         self.assertFalse(hasattr(result.receipt, "__dict__"))
+        self.assertIsInstance(result.safety_checks, tuple)
+        self.assertFalse(hasattr(result.safety_checks[0], "__dict__"))
         with self.assertRaises(FrozenInstanceError):
             result.receipt = None  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            result.safety_checks[0].allowed = False  # type: ignore[misc]
 
     def test_action_module_cannot_import_or_call_raw_input_boundary(self) -> None:
         source = inspect.getsource(action_module)

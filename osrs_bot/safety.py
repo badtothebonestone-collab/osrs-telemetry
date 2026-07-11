@@ -26,6 +26,47 @@ class SafetyResult:
     allowed: bool
     reason: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.allowed, bool):
+            raise TypeError("allowed must be bool")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("reason must be a non-empty string")
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyCheck:
+    stage: str
+    code: str
+    allowed: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stage, str) or not self.stage.strip():
+            raise ValueError("stage must be a non-empty string")
+        if not isinstance(self.code, str) or not self.code.strip():
+            raise ValueError("code must be a non-empty string")
+        if not isinstance(self.allowed, bool):
+            raise TypeError("allowed must be bool")
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyEvaluation:
+    result: SafetyResult
+    checks: tuple[SafetyCheck, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, SafetyResult):
+            raise TypeError("result must be SafetyResult")
+        if not isinstance(self.checks, tuple) or not self.checks:
+            raise ValueError("checks must be a non-empty tuple")
+        if not all(isinstance(check, SafetyCheck) for check in self.checks):
+            raise TypeError("checks must contain only SafetyCheck values")
+        final = self.checks[-1]
+        if (
+            final.allowed is not self.result.allowed
+            or final.code != self.result.reason
+        ):
+            raise ValueError("the final safety check must match the evaluation result")
+
 
 @dataclass(frozen=True, slots=True)
 class SafetyGate:
@@ -41,22 +82,47 @@ class SafetyGate:
     def validate_pre_move(
         self, action: Action, observation: Observation
     ) -> SafetyResult:
-        common = self._validate_observation(observation)
+        return self.evaluate_pre_move(action, observation).result
+
+    def evaluate_pre_move(
+        self, action: Action, observation: Observation
+    ) -> SafetyEvaluation:
+        checks: list[SafetyCheck] = []
+        common = _record(
+            checks,
+            "pre_move.observation",
+            self._validate_observation(observation),
+        )
         if not common.allowed:
-            return common
-        session = self._validate_session(action, observation)
+            return _evaluation(common, checks)
+        session = _record(
+            checks,
+            "pre_move.session",
+            self._validate_session(action, observation),
+        )
         if not session.allowed:
-            return session
-        if action.source_tick != observation.tick:
-            return _reject("tick_mismatch")
+            return _evaluation(session, checks)
+        tick = _record(
+            checks,
+            "pre_move.source_tick",
+            _allow("tick_bound")
+            if action.source_tick == observation.tick
+            else _reject("tick_mismatch"),
+        )
+        if not tick.allowed:
+            return _evaluation(tick, checks)
         if action.kind in {
             ActionKind.INTERACT_OBJECT,
             ActionKind.WALK,
             ActionKind.CLICK_WIDGET,
         }:
-            sample = self._validate_source_menu_sample(action, observation)
+            sample = _record(
+                checks,
+                "pre_move.source_menu_sample",
+                self._validate_source_menu_sample(action, observation),
+            )
             if not sample.allowed:
-                return sample
+                return _evaluation(sample, checks)
         if (
             action.kind is ActionKind.PRESS_KEY
             and action.task_constraints.dialogue is not None
@@ -65,41 +131,108 @@ class SafetyGate:
                 action.source_dialogue_client_tick is None
                 or observation.widgets.dialogue_client_tick is None
             ):
-                return _reject("dialogue_sample_missing")
-            if action.source_dialogue_client_tick != observation.widgets.dialogue_client_tick:
-                return _reject("dialogue_sample_mismatch")
-        action_result = self._validate_engine_action_invariants(action, observation)
+                dialogue_sample = _reject("dialogue_sample_missing")
+            elif (
+                action.source_dialogue_client_tick
+                != observation.widgets.dialogue_client_tick
+            ):
+                dialogue_sample = _reject("dialogue_sample_mismatch")
+            else:
+                dialogue_sample = _allow("dialogue_sample_bound")
+            dialogue_sample = _record(
+                checks,
+                "pre_move.source_dialogue_sample",
+                dialogue_sample,
+            )
+            if not dialogue_sample.allowed:
+                return _evaluation(dialogue_sample, checks)
+        action_result = _record(
+            checks,
+            "pre_move.action_invariants",
+            self._validate_engine_action_invariants(action, observation),
+        )
         if not action_result.allowed:
-            return action_result
-        constraint_result = self._validate_task_constraints(action, observation)
+            return _evaluation(action_result, checks)
+        constraint_result = _record(
+            checks,
+            "pre_move.task_constraints",
+            self._validate_task_constraints(action, observation),
+        )
         if not constraint_result.allowed:
-            return constraint_result
-        return _allow("pre_move_safe")
+            return _evaluation(constraint_result, checks)
+        complete = _record(
+            checks, "pre_move.complete", _allow("pre_move_safe")
+        )
+        return _evaluation(complete, checks)
 
     def validate_post_move(
         self, action: Action, observation: Observation
     ) -> SafetyResult:
-        base = self._validate_post_move_base(action, observation)
+        return self.evaluate_post_move(action, observation).result
+
+    def evaluate_post_move(
+        self, action: Action, observation: Observation
+    ) -> SafetyEvaluation:
+        base_evaluation = self._evaluate_post_move_base(
+            action, observation, stage="post_move"
+        )
+        checks = list(base_evaluation.checks)
+        base = base_evaluation.result
         if not base.allowed:
-            return base
+            return base_evaluation
         if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
-            hover_result = self._validate_hover_menu(action, observation)
+            hover_result = _record(
+                checks,
+                "post_move.hover_menu",
+                self._validate_hover_menu(action, observation),
+            )
             if not hover_result.allowed:
-                return hover_result
-        return _allow("post_move_safe")
+                return _evaluation(hover_result, checks)
+        complete = _record(
+            checks, "post_move.complete", _allow("post_move_safe")
+        )
+        return _evaluation(complete, checks)
 
     def validate_context_candidate(
         self, action: Action, observation: Observation
     ) -> SafetyResult:
-        base = self._validate_post_move_base(action, observation)
+        return self.evaluate_context_candidate(action, observation).result
+
+    def evaluate_context_candidate(
+        self, action: Action, observation: Observation
+    ) -> SafetyEvaluation:
+        base_evaluation = self._evaluate_post_move_base(
+            action, observation, stage="context_candidate"
+        )
+        checks = list(base_evaluation.checks)
+        base = base_evaluation.result
         if not base.allowed:
-            return base
-        if action.kind is not ActionKind.INTERACT_OBJECT:
-            return _reject("context_selection_unsupported")
+            return base_evaluation
+        supported = _record(
+            checks,
+            "context_candidate.action_kind",
+            _allow("context_selection_supported")
+            if action.kind is ActionKind.INTERACT_OBJECT
+            else _reject("context_selection_unsupported"),
+        )
+        if not supported.allowed:
+            return _evaluation(supported, checks)
         matches = _matching_menu_entries(action, observation)
-        if len(matches) != 1 or matches[0] is observation.menus[0]:
-            return _reject("context_option_not_unique_lower_entry")
-        return _allow("context_candidate_safe")
+        candidate = _record(
+            checks,
+            "context_candidate.exact_lower_entry",
+            _allow("context_option_unique_lower_entry")
+            if len(matches) == 1 and matches[0] is not observation.menus[0]
+            else _reject("context_option_not_unique_lower_entry"),
+        )
+        if not candidate.allowed:
+            return _evaluation(candidate, checks)
+        complete = _record(
+            checks,
+            "context_candidate.complete",
+            _allow("context_candidate_safe"),
+        )
+        return _evaluation(complete, checks)
 
     def validate_context_menu(
         self,
@@ -109,97 +242,295 @@ class SafetyGate:
         minimum_menu_client_tick: int,
         row_point: ScreenPoint | None = None,
     ) -> SafetyResult:
-        common = self._validate_observation(observation)
+        return self.evaluate_context_menu(
+            action,
+            observation,
+            minimum_menu_client_tick=minimum_menu_client_tick,
+            row_point=row_point,
+        ).result
+
+    def evaluate_context_menu(
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        minimum_menu_client_tick: int,
+        row_point: ScreenPoint | None = None,
+    ) -> SafetyEvaluation:
+        checks: list[SafetyCheck] = []
+        common = _record(
+            checks,
+            "context_menu.observation",
+            self._validate_observation(observation),
+        )
         if not common.allowed:
-            return common
-        session = self._validate_session(action, observation)
+            return _evaluation(common, checks)
+        session = _record(
+            checks,
+            "context_menu.session",
+            self._validate_session(action, observation),
+        )
         if not session.allowed:
-            return session
-        if observation.tick < action.source_tick:
-            return _reject("tick_mismatch")
-        menu_source = self._validate_menu_source(action, observation)
+            return _evaluation(session, checks)
+        tick = _record(
+            checks,
+            "context_menu.source_tick",
+            _allow("tick_not_regressed")
+            if observation.tick >= action.source_tick
+            else _reject("tick_mismatch"),
+        )
+        if not tick.allowed:
+            return _evaluation(tick, checks)
+        menu_source = _record(
+            checks,
+            "context_menu.menu_source",
+            self._validate_menu_source(action, observation),
+        )
         if not menu_source.allowed:
-            return menu_source
-        if action.kind is not ActionKind.INTERACT_OBJECT:
-            return _reject("context_selection_unsupported")
+            return _evaluation(menu_source, checks)
+        supported = _record(
+            checks,
+            "context_menu.action_kind",
+            _allow("context_selection_supported")
+            if action.kind is ActionKind.INTERACT_OBJECT
+            else _reject("context_selection_unsupported"),
+        )
+        if not supported.allowed:
+            return _evaluation(supported, checks)
         if observation.menu_client_tick is None:
-            return _reject("menu_sample_missing")
-        if observation.menu_client_tick <= minimum_menu_client_tick:
-            return _reject("menu_sample_not_newer")
-        if not observation.menu_open:
-            return _reject("context_menu_not_open")
-        action_result = self._validate_engine_action_invariants(action, observation)
+            menu_sample = _reject("menu_sample_missing")
+        elif observation.menu_client_tick <= minimum_menu_client_tick:
+            menu_sample = _reject("menu_sample_not_newer")
+        else:
+            menu_sample = _allow("menu_sample_newer")
+        menu_sample = _record(
+            checks, "context_menu.menu_sample", menu_sample
+        )
+        if not menu_sample.allowed:
+            return _evaluation(menu_sample, checks)
+        menu_open = _record(
+            checks,
+            "context_menu.open_state",
+            _allow("context_menu_open")
+            if observation.menu_open
+            else _reject("context_menu_not_open"),
+        )
+        if not menu_open.allowed:
+            return _evaluation(menu_open, checks)
+        action_result = _record(
+            checks,
+            "context_menu.action_invariants",
+            self._validate_engine_action_invariants(action, observation),
+        )
         if not action_result.allowed:
-            return action_result
-        constraint_result = self._validate_task_constraints(action, observation)
+            return _evaluation(action_result, checks)
+        constraint_result = _record(
+            checks,
+            "context_menu.task_constraints",
+            self._validate_task_constraints(action, observation),
+        )
         if not constraint_result.allowed:
-            return constraint_result
+            return _evaluation(constraint_result, checks)
         matches = _matching_menu_entries(action, observation)
-        if len(matches) != 1:
-            return _reject("context_option_not_unique")
+        unique = _record(
+            checks,
+            "context_menu.exact_option",
+            _allow("context_option_unique")
+            if len(matches) == 1
+            else _reject("context_option_not_unique"),
+        )
+        if not unique.allowed:
+            return _evaluation(unique, checks)
         entry = matches[0]
         bounds = entry.row_bounds
         menu_bounds = observation.menu_bounds
-        if bounds is None or not _valid_bounds(bounds):
-            return _reject("context_row_bounds_missing")
-        if menu_bounds is None or not _valid_bounds(menu_bounds):
-            return _reject("context_menu_bounds_missing")
-        if not menu_bounds.contains(bounds.center):
-            return _reject("context_row_outside_menu")
+        row_bounds = _record(
+            checks,
+            "context_menu.row_bounds",
+            _allow("context_row_bounds_valid")
+            if bounds is not None and _valid_bounds(bounds)
+            else _reject("context_row_bounds_missing"),
+        )
+        if not row_bounds.allowed:
+            return _evaluation(row_bounds, checks)
+        menu_geometry = _record(
+            checks,
+            "context_menu.menu_bounds",
+            _allow("context_menu_bounds_valid")
+            if menu_bounds is not None and _valid_bounds(menu_bounds)
+            else _reject("context_menu_bounds_missing"),
+        )
+        if not menu_geometry.allowed:
+            return _evaluation(menu_geometry, checks)
+        assert bounds is not None and menu_bounds is not None
+        row_inside = _record(
+            checks,
+            "context_menu.row_inside_menu",
+            _allow("context_row_inside_menu")
+            if menu_bounds.contains(bounds.center)
+            else _reject("context_row_outside_menu"),
+        )
+        if not row_inside.allowed:
+            return _evaluation(row_inside, checks)
         if row_point is None:
-            return _allow("context_menu_open_safe")
-        if not bounds.contains(row_point) or not menu_bounds.contains(row_point):
-            return _reject("context_row_pointer_outside")
-        if not _points_close(observation.menu_mouse_screen_point, row_point):
-            return _reject("context_row_pointer_mismatch")
-        return _allow("context_row_safe")
+            complete = _record(
+                checks,
+                "context_menu.complete",
+                _allow("context_menu_open_safe"),
+            )
+            return _evaluation(complete, checks)
+        pointer_inside = _record(
+            checks,
+            "context_menu.row_pointer_bounds",
+            _allow("context_row_pointer_inside")
+            if bounds.contains(row_point) and menu_bounds.contains(row_point)
+            else _reject("context_row_pointer_outside"),
+        )
+        if not pointer_inside.allowed:
+            return _evaluation(pointer_inside, checks)
+        pointer_match = _record(
+            checks,
+            "context_menu.row_pointer_match",
+            _allow("context_row_pointer_exact")
+            if _points_close(observation.menu_mouse_screen_point, row_point)
+            else _reject("context_row_pointer_mismatch"),
+        )
+        if not pointer_match.allowed:
+            return _evaluation(pointer_match, checks)
+        complete = _record(
+            checks, "context_menu.complete", _allow("context_row_safe")
+        )
+        return _evaluation(complete, checks)
 
     def _validate_post_move_base(
         self, action: Action, observation: Observation
     ) -> SafetyResult:
-        common = self._validate_observation(observation)
+        return self._evaluate_post_move_base(
+            action, observation, stage="post_move_base"
+        ).result
+
+    def _evaluate_post_move_base(
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        stage: str,
+    ) -> SafetyEvaluation:
+        checks: list[SafetyCheck] = []
+        common = _record(
+            checks,
+            f"{stage}.observation",
+            self._validate_observation(observation),
+        )
         if not common.allowed:
-            return common
-        session = self._validate_session(action, observation)
+            return _evaluation(common, checks)
+        session = _record(
+            checks,
+            f"{stage}.session",
+            self._validate_session(action, observation),
+        )
         if not session.allowed:
-            return session
-        if observation.tick < action.source_tick:
-            return _reject("tick_mismatch")
+            return _evaluation(session, checks)
+        tick = _record(
+            checks,
+            f"{stage}.source_tick",
+            _allow("tick_not_regressed")
+            if observation.tick >= action.source_tick
+            else _reject("tick_mismatch"),
+        )
+        if not tick.allowed:
+            return _evaluation(tick, checks)
         if action.kind in {
             ActionKind.INTERACT_OBJECT,
             ActionKind.WALK,
             ActionKind.CLICK_WIDGET,
         }:
-            menu_source = self._validate_menu_source(action, observation)
+            menu_source = _record(
+                checks,
+                f"{stage}.menu_source",
+                self._validate_menu_source(action, observation),
+            )
             if not menu_source.allowed:
-                return menu_source
+                return _evaluation(menu_source, checks)
             if action.source_menu_client_tick is None or observation.menu_client_tick is None:
-                return _reject("menu_sample_missing")
-            if observation.menu_client_tick <= action.source_menu_client_tick:
-                return _reject("menu_sample_not_newer")
-            if observation.menu_open:
-                return _reject("context_menu_open")
-            if not _points_close(observation.menu_mouse_screen_point, action.screen_point):
-                return _reject("hover_pointer_mismatch")
+                menu_sample = _reject("menu_sample_missing")
+            elif observation.menu_client_tick <= action.source_menu_client_tick:
+                menu_sample = _reject("menu_sample_not_newer")
+            else:
+                menu_sample = _allow("menu_sample_newer")
+            menu_sample = _record(
+                checks, f"{stage}.menu_sample", menu_sample
+            )
+            if not menu_sample.allowed:
+                return _evaluation(menu_sample, checks)
+            closed = _record(
+                checks,
+                f"{stage}.menu_open_state",
+                _reject("context_menu_open")
+                if observation.menu_open
+                else _allow("context_menu_closed"),
+            )
+            if not closed.allowed:
+                return _evaluation(closed, checks)
+            pointer = _record(
+                checks,
+                f"{stage}.hover_pointer",
+                _allow("hover_pointer_exact")
+                if _points_close(
+                    observation.menu_mouse_screen_point, action.screen_point
+                )
+                else _reject("hover_pointer_mismatch"),
+            )
+            if not pointer.allowed:
+                return _evaluation(pointer, checks)
         if action.kind is ActionKind.PRESS_KEY:
             if _interface_close_constraint(action) is not None:
-                if observation.tick <= action.source_tick:
-                    return _reject("interface_sample_not_newer")
+                key_sample = (
+                    _allow("interface_sample_newer")
+                    if observation.tick > action.source_tick
+                    else _reject("interface_sample_not_newer")
+                )
+                key_sample = _record(
+                    checks, f"{stage}.interface_sample", key_sample
+                )
+                if not key_sample.allowed:
+                    return _evaluation(key_sample, checks)
             elif action.task_constraints.dialogue is not None:
                 if (
                     action.source_dialogue_client_tick is None
                     or observation.widgets.dialogue_client_tick is None
                 ):
-                    return _reject("dialogue_sample_missing")
-                if observation.widgets.dialogue_client_tick <= action.source_dialogue_client_tick:
-                    return _reject("dialogue_sample_not_newer")
-        action_result = self._validate_engine_action_invariants(action, observation)
+                    dialogue_sample = _reject("dialogue_sample_missing")
+                elif (
+                    observation.widgets.dialogue_client_tick
+                    <= action.source_dialogue_client_tick
+                ):
+                    dialogue_sample = _reject("dialogue_sample_not_newer")
+                else:
+                    dialogue_sample = _allow("dialogue_sample_newer")
+                dialogue_sample = _record(
+                    checks, f"{stage}.dialogue_sample", dialogue_sample
+                )
+                if not dialogue_sample.allowed:
+                    return _evaluation(dialogue_sample, checks)
+        action_result = _record(
+            checks,
+            f"{stage}.action_invariants",
+            self._validate_engine_action_invariants(action, observation),
+        )
         if not action_result.allowed:
-            return action_result
-        constraint_result = self._validate_task_constraints(action, observation)
+            return _evaluation(action_result, checks)
+        constraint_result = _record(
+            checks,
+            f"{stage}.task_constraints",
+            self._validate_task_constraints(action, observation),
+        )
         if not constraint_result.allowed:
-            return constraint_result
-        return _allow("post_move_base_safe")
+            return _evaluation(constraint_result, checks)
+        complete = _record(
+            checks, f"{stage}.base", _allow("post_move_base_safe")
+        )
+        return _evaluation(complete, checks)
 
     def _validate_observation(self, observation: Observation) -> SafetyResult:
         if not observation.source_coherent:
@@ -590,6 +921,19 @@ def _points_close(
         and abs(actual.x - expected.x) <= tolerance
         and abs(actual.y - expected.y) <= tolerance
     )
+
+
+def _record(
+    checks: list[SafetyCheck], stage: str, result: SafetyResult
+) -> SafetyResult:
+    checks.append(SafetyCheck(stage, result.reason, result.allowed))
+    return result
+
+
+def _evaluation(
+    result: SafetyResult, checks: list[SafetyCheck]
+) -> SafetyEvaluation:
+    return SafetyEvaluation(result, tuple(checks))
 
 
 def _allow(reason: str) -> SafetyResult:

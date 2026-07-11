@@ -10,6 +10,7 @@ from .model import (
     BANK_INTERFACE_NAME,
     CLOSE_BANK_WIDGET_KEY,
     DEPOSIT_INVENTORY_WIDGET_KEY,
+    DialogueOption,
     DialogueOptionConstraint,
     InterfaceConstraint,
     InventoryConstraint,
@@ -18,10 +19,20 @@ from .model import (
     TaskConstraints,
     VerificationKind,
     VerificationSpec,
+    WidgetTarget,
     WorldPoint,
 )
 from .profile import DEFAULT_BINDING, BoundProfile
-from .task_contract import Decision, ObservationRequest, TaskSnapshot, TaskStatus
+from .task_contract import (
+    Decision,
+    DecisionEvidence,
+    ObservationRequest,
+    RejectedCandidateEvidence,
+    TargetEvidence,
+    TaskProgressSnapshot,
+    TaskSnapshot,
+    TaskStatus,
+)
 from .verification import OutcomeKind, VerificationResult
 
 class TaskPhase(str, Enum):
@@ -48,6 +59,7 @@ class TaskProgress:
     cycles_completed: int = 0
     failures: list[str] = field(default_factory=list)
     resume_phase: TaskPhase | None = None
+    blocked_from_phase: TaskPhase | None = None
 
 class WoodcutBankTask:
     """Explicit woodcut/bank FSM bound to one validated task/site profile."""
@@ -94,6 +106,9 @@ class WoodcutBankTask:
             status=status,
             state=self.progress.phase.value,
             blocker=blocker,
+            definition_id=self.definition.definition_id,
+            profile_id=self.binding.profile.profile_id,
+            progress=self._progress_snapshot(),
         )
 
     def decide(self, observation: Observation) -> Decision:
@@ -164,8 +179,7 @@ class WoodcutBankTask:
         self.progress.pending = None
 
         if not result.passed or result.outcome is None:
-            self.progress.phase = TaskPhase.BLOCKED
-            self.progress.failures.append(f"verification failed: {result.reason}")
+            self._set_blocked(f"verification failed: {result.reason}")
             return
 
         outcome = result.outcome.kind
@@ -199,8 +213,7 @@ class WoodcutBankTask:
             if outcome is not OutcomeKind.PLANE_CHANGED:
                 return self._block_verification_outcome(pending, outcome)
             if self.progress.phase is not TaskPhase.STAIR_DIALOGUE or self.progress.resume_phase is None:
-                self.progress.phase = TaskPhase.BLOCKED
-                self.progress.failures.append("plane proof arrived outside stair dialogue")
+                self._set_blocked("plane proof arrived outside stair dialogue")
                 return
             self.progress.phase = self.progress.resume_phase
             self.progress.resume_phase = None
@@ -225,14 +238,12 @@ class WoodcutBankTask:
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
             return
-        self.progress.phase = TaskPhase.BLOCKED
-        self.progress.failures.append(f"unsupported verification result: {pending.kind.value}")
+        self._set_blocked(f"unsupported verification result: {pending.kind.value}")
 
     def _block_verification_outcome(
         self, pending: VerificationSpec, outcome: OutcomeKind
     ) -> None:
-        self.progress.phase = TaskPhase.BLOCKED
-        self.progress.failures.append(
+        self._set_blocked(
             f"unexpected {outcome.value} outcome for {pending.kind.value}"
         )
 
@@ -259,22 +270,32 @@ class WoodcutBankTask:
         ):
             return self._block(observation, "player is outside the supported work area")
 
-        actionable = [
-            item for item in observation.nearby_objects if self._is_actionable_tree(item)
-        ]
-        candidates = [
-            item for item in actionable
-            if self._tree_aim_is_unambiguous(item, actionable)
-        ]
+        candidates, rejected = self._classify_trees(observation)
+        evidence = self._object_decision_evidence(
+            observation,
+            action=self.definition.resource.selector.action,
+            eligible=candidates,
+            rejected=rejected,
+        )
         if not candidates:
             return self._wait(
                 observation,
                 "no geometrically unambiguous configured resource is observed",
+                evidence=evidence,
             )
-        candidates.sort(key=lambda item: (observation.location.distance_to(item.location), item.key))
         self.progress.target_key = candidates[0].key
         self.progress.phase = TaskPhase.CHOP
-        return self._wait(observation, "selected nearest exact configured resource")
+        return self._wait(
+            observation,
+            "selected nearest exact configured resource",
+            evidence=self._object_decision_evidence(
+                observation,
+                action=self.definition.resource.selector.action,
+                selected=candidates[0],
+                eligible=candidates,
+                rejected=rejected,
+            ),
+        )
 
     def _chop(self, observation: Observation) -> Decision:
         if observation.inventory.full:
@@ -284,11 +305,25 @@ class WoodcutBankTask:
             return self._wait(observation, "inventory filled before the chop")
 
         target = observation.object_by_key(self.progress.target_key)
-        if target is None or not self._is_actionable_tree(target):
+        target_rejections = (
+            self._tree_rejection_codes(target) if target is not None else ()
+        )
+        if target is None or target_rejections:
+            evidence = (
+                self._object_decision_evidence(
+                    observation,
+                    action=self.definition.resource.selector.action,
+                    rejected=((target, target_rejections),),
+                )
+                if target is not None
+                else DecisionEvidence()
+            )
             self.progress.target_key = None
             self.progress.phase = TaskPhase.FIND_TREE
             return self._wait(
-                observation, "selected resource is no longer exactly actionable"
+                observation,
+                "selected resource is no longer exactly actionable",
+                evidence=evidence,
             )
 
         verification = VerificationSpec(
@@ -311,6 +346,12 @@ class WoodcutBankTask:
             self.definition.resource.selector.action,
             verification,
             target=target,
+            evidence=self._object_decision_evidence(
+                observation,
+                action=self.definition.resource.selector.action,
+                selected=target,
+                eligible=(target,),
+            ),
         )
 
     def _navigate(
@@ -355,11 +396,21 @@ class WoodcutBankTask:
                 return self._block(
                     observation,
                     f"route projection identity mismatch for {step.step_id}",
+                    evidence=self._object_decision_evidence(
+                        observation,
+                        action=step.action,
+                        rejected=((target, self._walk_projection_rejection_codes(target, step)),),
+                    ),
                 )
             if not self._has_geometry(target):
                 return self._wait(
                     observation,
                     f"waiting for actionable route projection {step.step_id}",
+                    evidence=self._object_decision_evidence(
+                        observation,
+                        action=step.action,
+                        rejected=((target, self._geometry_rejection_codes(target)),),
+                    ),
                 )
             verification = VerificationSpec(
                 VerificationKind.MOVED_CLOSER,
@@ -377,24 +428,40 @@ class WoodcutBankTask:
                 observation, ActionKind.WALK, f"Walk to {step.step_id}",
                 f"walk fixed route step {step.step_id}", "Walk here",
                 verification, target=target,
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=step.action,
+                    selected=target,
+                    eligible=(target,),
+                ),
             )
 
-        target = self._strict_route_object(observation, step)
-        if target is None:
+        route_targets, rejected, route_actions = self._classify_route_objects(
+            observation, step
+        )
+        if not route_targets:
             return self._wait(
                 observation,
                 f"waiting for strict route object {step.step_id}",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=step.action,
+                    rejected=rejected,
+                    candidate_actions=route_actions,
+                ),
             )
-        route_option = (
-            step.action
-            if target.supports(step.action)
-            else next(
-                (option for option in target.actions if option in step.allowed_actions),
-                None,
-            )
-        )
+        target = route_targets[0]
+        route_option = route_actions.get(target.key)
         if route_option is None:
-            return self._block(observation, f"route action unavailable for {step.step_id}")
+            return self._block(
+                observation,
+                f"route action unavailable for {step.step_id}",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=step.action,
+                    rejected=((target, ("action_unavailable",)), *rejected),
+                ),
+            )
         verification = VerificationSpec(
             VerificationKind.ROUTE_TRANSITION,
             before_tick=observation.tick,
@@ -418,6 +485,14 @@ class WoodcutBankTask:
             f"{route_option} {step.object_name}",
             f"interact with fixed route step {step.step_id}", route_option,
             verification, target=target,
+            evidence=self._object_decision_evidence(
+                observation,
+                action=route_option,
+                selected=target,
+                eligible=route_targets,
+                rejected=rejected,
+                candidate_actions=route_actions,
+            ),
         )
 
     def _choose_stair_direction(self, observation: Observation) -> Decision:
@@ -446,18 +521,38 @@ class WoodcutBankTask:
             if direction == "up"
             else expectations.transition_down_option_contains
         )
-        matches = [
-            option for option in widgets.dialogue_options
-            if option.visible
-            and option_contains.lower() in option.text.lower()
-            and option.key in {str(value) for value in range(1, 10)}
-        ]
+        matches = []
+        eligible_evidence = []
+        rejected_evidence = []
+        allowed_keys = {str(value) for value in range(1, 10)}
+        for option in widgets.dialogue_options:
+            codes = []
+            if not option.visible:
+                codes.append("not_visible")
+            if option_contains.lower() not in option.text.lower():
+                codes.append("text_mismatch")
+            if option.key not in allowed_keys:
+                codes.append("key_unavailable")
+            target_evidence = self._dialogue_target_evidence(observation, option)
+            if codes:
+                rejected_evidence.append(
+                    RejectedCandidateEvidence(target_evidence, tuple(codes))
+                )
+            else:
+                matches.append(option)
+                eligible_evidence.append(target_evidence)
+        dialogue_evidence = DecisionEvidence(
+            eligible=tuple(eligible_evidence),
+            rejected=tuple(rejected_evidence),
+        )
         if len(matches) != 1:
             return self._block(
                 observation,
                 f"exact {direction} route-transition option is unavailable",
+                evidence=dialogue_evidence,
             )
         selected = matches[0]
+        selected_evidence = self._dialogue_target_evidence(observation, selected)
         verification = VerificationSpec(
             VerificationKind.PLANE_CHANGED,
             before_tick=observation.tick,
@@ -495,6 +590,11 @@ class WoodcutBankTask:
                     )
                 ),
             ),
+            DecisionEvidence(
+                selected=selected_evidence,
+                eligible=tuple(eligible_evidence),
+                rejected=tuple(rejected_evidence),
+            ),
         )
 
     def _open_bank(self, observation: Observation) -> Decision:
@@ -514,20 +614,18 @@ class WoodcutBankTask:
                 observation, "bank may only be opened on its configured plane"
             )
 
-        targets = [
-            item
-            for item in observation.nearby_objects
-            if item.object_id in selector.object_ids
-            and item.name == selector.name
-            and item.location == bank.anchor
-            and item.supports(selector.action)
-            and self._has_geometry(item)
-            and observation.location.distance_to(item.location)
-            <= bank.interaction_radius
-        ]
+        targets, rejected = self._classify_bank_objects(observation)
         if not targets:
-            return self._block(observation, "exact configured bank is unavailable")
-        target = sorted(targets, key=lambda item: item.key)[0]
+            return self._block(
+                observation,
+                "exact configured bank is unavailable",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=selector.action,
+                    rejected=rejected,
+                ),
+            )
+        target = targets[0]
         verification = VerificationSpec(
             VerificationKind.INTERFACE_OPENED,
             before_tick=observation.tick,
@@ -548,6 +646,13 @@ class WoodcutBankTask:
             selector.action,
             verification,
             target=target,
+            evidence=self._object_decision_evidence(
+                observation,
+                action=selector.action,
+                selected=target,
+                eligible=targets,
+                rejected=rejected,
+            ),
             task_constraints=TaskConstraints(
                 interface=InterfaceConstraint(
                     BANK_INTERFACE_NAME, bank.anchor.plane, False
@@ -593,10 +698,42 @@ class WoodcutBankTask:
             or target.name != DEPOSIT_INVENTORY_WIDGET_KEY
             or not target.visible
         ):
-            return self._block(observation, "deposit-inventory widget is unavailable")
+            evidence = DecisionEvidence()
+            if target is not None:
+                codes = []
+                if target.name != DEPOSIT_INVENTORY_WIDGET_KEY:
+                    codes.append("name_mismatch")
+                if not target.visible:
+                    codes.append("not_visible")
+                evidence = self._single_rejected_evidence(
+                    self._widget_target_evidence(
+                        observation,
+                        DEPOSIT_INVENTORY_WIDGET_KEY,
+                        target,
+                        "Deposit inventory",
+                    ),
+                    tuple(codes),
+                )
+            return self._block(
+                observation,
+                "deposit-inventory widget is unavailable",
+                evidence=evidence,
+            )
         point = target.screen_point
         if point is None:
-            return self._block(observation, "deposit-inventory widget has no geometry")
+            return self._block(
+                observation,
+                "deposit-inventory widget has no geometry",
+                evidence=self._single_rejected_evidence(
+                    self._widget_target_evidence(
+                        observation,
+                        DEPOSIT_INVENTORY_WIDGET_KEY,
+                        target,
+                        "Deposit inventory",
+                    ),
+                    ("screen_point_unavailable",),
+                ),
+            )
 
         verification = VerificationSpec(
             VerificationKind.ITEM_QUANTITY_EQUALS,
@@ -622,6 +759,14 @@ class WoodcutBankTask:
             target_key=DEPOSIT_INVENTORY_WIDGET_KEY,
             target_name=target.name,
             screen_point=point,
+            evidence=self._single_selected_evidence(
+                self._widget_target_evidence(
+                    observation,
+                    DEPOSIT_INVENTORY_WIDGET_KEY,
+                    target,
+                    "Deposit inventory",
+                )
+            ),
             task_constraints=TaskConstraints(
                 inventory=InventoryConstraint(inventory_rule.deposit_item_ids),
                 interface=InterfaceConstraint(
@@ -667,9 +812,43 @@ class WoodcutBankTask:
             else None
         )
         if point is None:
+            rejected_widget: tuple[RejectedCandidateEvidence, ...] = ()
+            if target is not None:
+                codes = []
+                if target.name != CLOSE_BANK_WIDGET_KEY:
+                    codes.append("name_mismatch")
+                if not target.visible:
+                    codes.append("not_visible")
+                if target.screen_point is None:
+                    codes.append("screen_point_unavailable")
+                rejected_widget = (
+                    RejectedCandidateEvidence(
+                        self._widget_target_evidence(
+                            observation,
+                            CLOSE_BANK_WIDGET_KEY,
+                            target,
+                            "Close bank",
+                        ),
+                        tuple(codes or ("input_unavailable",)),
+                    ),
+                )
             if not observation.widgets.keyboard_close_possible:
-                return self._block(observation, "close-bank input is unavailable")
+                return self._block(
+                    observation,
+                    "close-bank input is unavailable",
+                    evidence=DecisionEvidence(rejected=rejected_widget),
+                )
             self.progress.pending = verification
+            target_evidence = TargetEvidence(
+                key="close_bank_keyboard",
+                name="Close bank",
+                object_id=0,
+                action="Escape",
+                source_tick=observation.tick,
+                geometry_frame_id=observation.geometry_frame_id,
+                point=None,
+                bounds=None,
+            )
             return Decision(
                 self.progress.phase.value,
                 "close bank with verified Escape support",
@@ -693,6 +872,11 @@ class WoodcutBankTask:
                         )
                     ),
                 ),
+                DecisionEvidence(
+                    selected=target_evidence,
+                    eligible=(target_evidence,),
+                    rejected=rejected_widget,
+                ),
             )
 
         return self._emit_action(
@@ -703,6 +887,14 @@ class WoodcutBankTask:
             target_key=CLOSE_BANK_WIDGET_KEY,
             target_name=target.name,
             screen_point=point,
+            evidence=self._single_selected_evidence(
+                self._widget_target_evidence(
+                    observation,
+                    CLOSE_BANK_WIDGET_KEY,
+                    target,
+                    "Close bank",
+                )
+            ),
             task_constraints=TaskConstraints(
                 interface=InterfaceConstraint(BANK_INTERFACE_NAME, bank_plane, True)
             ),
@@ -721,6 +913,7 @@ class WoodcutBankTask:
         target_key: str | None = None,
         target_name: str | None = None,
         screen_point=None,
+        evidence: DecisionEvidence | None = None,
         task_constraints: TaskConstraints | None = None,
     ) -> Decision:
         self.progress.pending = verification
@@ -738,7 +931,19 @@ class WoodcutBankTask:
             source_session_id=observation.session_id,
             task_constraints=task_constraints or TaskConstraints(),
         )
-        return Decision(self.progress.phase.value, reason, action)
+        if evidence is None and target is not None:
+            evidence = self._object_decision_evidence(
+                observation,
+                action=option,
+                selected=target,
+                eligible=(target,),
+            )
+        return Decision(
+            self.progress.phase.value,
+            reason,
+            action,
+            evidence or DecisionEvidence(),
+        )
 
     def _current_route(self) -> tuple[FixedRouteStep, ...] | None:
         phase = self.progress.resume_phase if self.progress.phase is TaskPhase.STAIR_DIALOGUE else self.progress.phase
@@ -759,24 +964,244 @@ class WoodcutBankTask:
                 else TaskPhase.FIND_TREE
             )
 
-    def _strict_route_object(
+    def _progress_snapshot(self) -> TaskProgressSnapshot:
+        phase = (
+            self.progress.resume_phase
+            if self.progress.phase is TaskPhase.STAIR_DIALOGUE
+            else (
+                self.progress.blocked_from_phase
+                if self.progress.phase is TaskPhase.BLOCKED
+                and self.progress.blocked_from_phase is not None
+                else self.progress.phase
+            )
+        )
+        if phase is TaskPhase.NAVIGATE_TO_BANK:
+            route = self.definition.route_to_bank
+            return TaskProgressSnapshot(
+                route.route_id,
+                self.progress.route_index,
+                len(route.steps),
+            )
+        if phase is TaskPhase.NAVIGATE_TO_TREES:
+            route = self.definition.route_to_resource
+            return TaskProgressSnapshot(
+                route.route_id,
+                self.progress.route_index,
+                len(route.steps),
+            )
+        return TaskProgressSnapshot(
+            "cycles",
+            self.progress.cycles_completed,
+            self.binding.profile.cycle_goal,
+        )
+
+    @staticmethod
+    def _target_evidence(
+        observation: Observation,
+        target: NearbyObject,
+        action: str | None,
+    ) -> TargetEvidence:
+        return TargetEvidence(
+            key=target.key,
+            name=target.name,
+            object_id=target.object_id,
+            action=action,
+            source_tick=observation.tick,
+            geometry_frame_id=observation.geometry_frame_id,
+            point=target.geometry.screen_point,
+            bounds=target.geometry.screen_bounds,
+        )
+
+    def _object_decision_evidence(
+        self,
+        observation: Observation,
+        *,
+        action: str,
+        selected: NearbyObject | None = None,
+        eligible: tuple[NearbyObject, ...] = (),
+        rejected: tuple[tuple[NearbyObject, tuple[str, ...]], ...] = (),
+        candidate_actions: dict[str, str] | None = None,
+    ) -> DecisionEvidence:
+        actions = candidate_actions or {}
+
+        def target_evidence(target: NearbyObject) -> TargetEvidence:
+            return self._target_evidence(
+                observation,
+                target,
+                actions.get(target.key, action),
+            )
+
+        eligible_evidence = tuple(target_evidence(target) for target in eligible)
+        selected_evidence = target_evidence(selected) if selected is not None else None
+        rejected_evidence = tuple(
+            RejectedCandidateEvidence(target_evidence(target), codes)
+            for target, codes in sorted(rejected, key=lambda item: item[0].key)
+        )
+        return DecisionEvidence(
+            selected=selected_evidence,
+            eligible=eligible_evidence,
+            rejected=rejected_evidence,
+        )
+
+    @staticmethod
+    def _widget_target_evidence(
+        observation: Observation,
+        key: str,
+        target: WidgetTarget,
+        action: str,
+    ) -> TargetEvidence:
+        return TargetEvidence(
+            key=key,
+            name=target.name,
+            object_id=None,
+            action=action,
+            source_tick=observation.tick,
+            geometry_frame_id=observation.geometry_frame_id,
+            point=target.screen_point,
+            bounds=target.screen_bounds,
+        )
+
+    @staticmethod
+    def _dialogue_target_evidence(
+        observation: Observation, option: DialogueOption
+    ) -> TargetEvidence:
+        return TargetEvidence(
+            key=f"dialogue:{option.index}",
+            name=option.text,
+            object_id=option.index,
+            action=option.text,
+            source_tick=observation.tick,
+            geometry_frame_id=observation.geometry_frame_id,
+            point=None,
+            bounds=None,
+        )
+
+    @staticmethod
+    def _single_selected_evidence(target: TargetEvidence) -> DecisionEvidence:
+        return DecisionEvidence(selected=target, eligible=(target,))
+
+    @staticmethod
+    def _single_rejected_evidence(
+        target: TargetEvidence, codes: tuple[str, ...]
+    ) -> DecisionEvidence:
+        return DecisionEvidence(
+            rejected=(RejectedCandidateEvidence(target, codes),)
+        )
+
+    def _classify_trees(
+        self, observation: Observation
+    ) -> tuple[
+        tuple[NearbyObject, ...],
+        tuple[tuple[NearbyObject, tuple[str, ...]], ...],
+    ]:
+        actionable: list[NearbyObject] = []
+        rejected: list[tuple[NearbyObject, tuple[str, ...]]] = []
+        for target in observation.nearby_objects:
+            codes = self._tree_rejection_codes(target)
+            if codes:
+                rejected.append((target, codes))
+            else:
+                actionable.append(target)
+
+        eligible: list[NearbyObject] = []
+        for target in actionable:
+            if self._tree_aim_is_unambiguous(target, actionable):
+                eligible.append(target)
+            else:
+                rejected.append((target, ("aim_point_occluded",)))
+        eligible.sort(
+            key=lambda target: (
+                observation.location.distance_to(target.location),
+                target.key,
+            )
+        )
+        return tuple(eligible), tuple(rejected)
+
+    def _classify_route_objects(
         self, observation: Observation, step: FixedRouteStep
-    ) -> NearbyObject | None:
-        matches = [
-            item
-            for item in observation.nearby_objects
-            if item.object_id == step.object_id
-            and item.name == step.object_name
-            and item.location is not None
-            and item.location.plane == step.location.plane
-            and item.location.distance_to(step.location) <= step.arrival_radius
-            and observation.location.distance_to(item.location) <= step.arrival_radius
-            and any(item.supports(option) for option in step.allowed_actions)
-            and self._has_geometry(item)
-        ]
-        if not matches:
-            return None
-        return sorted(matches, key=lambda item: (observation.location.distance_to(item.location), item.key))[0]
+    ) -> tuple[
+        tuple[NearbyObject, ...],
+        tuple[tuple[NearbyObject, tuple[str, ...]], ...],
+        dict[str, str],
+    ]:
+        eligible: list[NearbyObject] = []
+        rejected: list[tuple[NearbyObject, tuple[str, ...]]] = []
+        actions: dict[str, str] = {}
+        for target in observation.nearby_objects:
+            codes = []
+            if target.object_id != step.object_id:
+                codes.append("object_id_mismatch")
+            if target.name != step.object_name:
+                codes.append("name_mismatch")
+            if target.location is None:
+                codes.append("location_unavailable")
+            else:
+                if target.location.plane != step.location.plane:
+                    codes.append("wrong_plane")
+                elif target.location.distance_to(step.location) > step.arrival_radius:
+                    codes.append("outside_step_radius")
+                if observation.location.distance_to(target.location) > step.arrival_radius:
+                    codes.append("outside_interaction_radius")
+            route_option = self._route_option(target, step)
+            if route_option is None:
+                codes.append("action_unavailable")
+            codes.extend(self._geometry_rejection_codes(target))
+            if codes:
+                rejected.append((target, tuple(codes)))
+            else:
+                eligible.append(target)
+                assert route_option is not None
+                actions[target.key] = route_option
+        eligible.sort(
+            key=lambda target: (
+                observation.location.distance_to(target.location),
+                target.key,
+            )
+        )
+        return tuple(eligible), tuple(rejected), actions
+
+    def _classify_bank_objects(
+        self, observation: Observation
+    ) -> tuple[
+        tuple[NearbyObject, ...],
+        tuple[tuple[NearbyObject, tuple[str, ...]], ...],
+    ]:
+        bank = self.definition.bank
+        selector = bank.selector
+        eligible: list[NearbyObject] = []
+        rejected: list[tuple[NearbyObject, tuple[str, ...]]] = []
+        for target in observation.nearby_objects:
+            codes = []
+            if target.object_id not in selector.object_ids:
+                codes.append("object_id_not_supported")
+            if target.name != selector.name:
+                codes.append("name_mismatch")
+            if target.location != bank.anchor:
+                codes.append("location_mismatch")
+            if not target.supports(selector.action):
+                codes.append("action_unavailable")
+            codes.extend(self._geometry_rejection_codes(target))
+            if (
+                target.location is not None
+                and observation.location.distance_to(target.location)
+                > bank.interaction_radius
+            ):
+                codes.append("outside_interaction_radius")
+            if codes:
+                rejected.append((target, tuple(codes)))
+            else:
+                eligible.append(target)
+        eligible.sort(key=lambda target: target.key)
+        return tuple(eligible), tuple(rejected)
+
+    @staticmethod
+    def _route_option(target: NearbyObject, step: FixedRouteStep) -> str | None:
+        if target.supports(step.action):
+            return step.action
+        return next(
+            (option for option in target.actions if option in step.allowed_actions),
+            None,
+        )
 
     def _walk_projection_identity_matches(
         self, target: NearbyObject | None, step: FixedRouteStep
@@ -793,6 +1218,27 @@ class WoodcutBankTask:
             and target.scene_y is not None
         )
 
+    @staticmethod
+    def _walk_projection_rejection_codes(
+        target: NearbyObject, step: FixedRouteStep
+    ) -> tuple[str, ...]:
+        codes = []
+        if target.key != step.target_key:
+            codes.append("key_mismatch")
+        if target.object_id != 0:
+            codes.append("object_id_mismatch")
+        if target.name != step.target_key:
+            codes.append("name_mismatch")
+        if target.kind != "NAVIGATION_TILE":
+            codes.append("kind_mismatch")
+        if target.actions != ("Walk here",):
+            codes.append("actions_mismatch")
+        if target.location != step.location:
+            codes.append("location_mismatch")
+        if target.scene_x is None or target.scene_y is None:
+            codes.append("scene_coordinates_unavailable")
+        return tuple(codes)
+
     def _is_exact_walk_projection(
         self, target: NearbyObject | None, step: FixedRouteStep
     ) -> bool:
@@ -803,19 +1249,29 @@ class WoodcutBankTask:
         )
 
     def _is_actionable_tree(self, target: NearbyObject) -> bool:
+        return not self._tree_rejection_codes(target)
+
+    def _tree_rejection_codes(self, target: NearbyObject) -> tuple[str, ...]:
         selector = self.definition.resource.selector
         work_area = self.definition.resource.work_area
-        return bool(
-            target.object_id in selector.object_ids
-            and target.name == selector.name
-            and target.supports(selector.action)
-            and target.location is not None
-            and target.location.plane == work_area.anchor.plane
-            and target.location.distance_to(work_area.anchor) <= work_area.radius
-            and target.scene_x is not None
-            and target.scene_y is not None
-            and self._has_geometry(target)
-        )
+        codes = []
+        if target.object_id not in selector.object_ids:
+            codes.append("object_id_not_supported")
+        if target.name != selector.name:
+            codes.append("name_mismatch")
+        if not target.supports(selector.action):
+            codes.append("action_unavailable")
+        if target.location is None:
+            codes.append("location_unavailable")
+        else:
+            if target.location.plane != work_area.anchor.plane:
+                codes.append("wrong_plane")
+            elif target.location.distance_to(work_area.anchor) > work_area.radius:
+                codes.append("outside_work_area")
+        if target.scene_x is None or target.scene_y is None:
+            codes.append("scene_coordinates_unavailable")
+        codes.extend(self._geometry_rejection_codes(target))
+        return tuple(codes)
 
     @staticmethod
     def _tree_aim_is_unambiguous(
@@ -847,13 +1303,57 @@ class WoodcutBankTask:
             )
         )
 
-    def _block(self, observation: Observation, reason: str) -> Decision:
-        self.progress.phase = TaskPhase.BLOCKED
-        self.progress.pending = None
-        self.progress.failures.append(reason)
-        return self._wait(observation, reason)
+    @staticmethod
+    def _geometry_rejection_codes(target: NearbyObject) -> tuple[str, ...]:
+        geometry = target.geometry
+        codes = []
+        if not geometry.available:
+            codes.append("geometry_unavailable")
+        if not geometry.on_screen:
+            codes.append("off_screen")
+        if not geometry.visible:
+            codes.append("not_visible")
+        if not geometry.actionable:
+            codes.append("not_actionable")
+        if geometry.screen_point is None:
+            codes.append("screen_point_unavailable")
+        elif (
+            geometry.screen_bounds is not None
+            and not geometry.screen_bounds.contains(geometry.screen_point)
+        ):
+            codes.append("screen_point_outside_bounds")
+        return tuple(codes)
 
-    def _wait(self, observation: Observation, reason: str) -> Decision:
+    def _block(
+        self,
+        observation: Observation,
+        reason: str,
+        *,
+        evidence: DecisionEvidence | None = None,
+    ) -> Decision:
+        self._set_blocked(reason)
+        self.progress.pending = None
+        return self._wait(observation, reason, evidence=evidence)
+
+    def _set_blocked(self, reason: str) -> None:
+        source_phase = (
+            self.progress.resume_phase
+            if self.progress.phase is TaskPhase.STAIR_DIALOGUE
+            and self.progress.resume_phase is not None
+            else self.progress.phase
+        )
+        if source_phase is not TaskPhase.BLOCKED:
+            self.progress.blocked_from_phase = source_phase
+        self.progress.phase = TaskPhase.BLOCKED
+        self.progress.failures.append(reason)
+
+    def _wait(
+        self,
+        observation: Observation,
+        reason: str,
+        *,
+        evidence: DecisionEvidence | None = None,
+    ) -> Decision:
         return Decision(
             self.progress.phase.value,
             reason,
@@ -863,4 +1363,5 @@ class WoodcutBankTask:
                 observation.tick,
                 verification=self.progress.pending,
             ),
+            evidence or DecisionEvidence(),
         )

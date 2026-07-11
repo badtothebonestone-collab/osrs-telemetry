@@ -14,6 +14,7 @@ RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
                -> Task protocol -> explicit WoodcutBankTask FSM
                -> Action + typed constraints -> SafetyGate
                -> InputCoordinator -> Arduino -> Verifier -> typed Outcome
+               -> immutable EngineFrame -> optional passive overlay
 ```
 
 There is one command surface: `run.cmd`.
@@ -71,6 +72,13 @@ python -m pip install -r requirements.txt
 .\run.cmd execute COM6
 ```
 
+Add the passive, click-through diagnostics without changing engine control:
+
+```powershell
+.\run.cmd task --overlay
+.\run.cmd execute COM6 --overlay
+```
+
 No software mouse/keyboard fallback exists. The live runner is bounded, stops
 after one cycle, and fails closed when observation, geometry, target identity,
 hover menu, cleanup, or verification evidence is missing.
@@ -110,6 +118,8 @@ does not pretend that the ignored live traces contain full raw observations.
 - `osrs_bot/pointer.py`: pure deterministic bounded relative-motion policy.
 - `osrs_bot/verification.py`: the only post-action verifier and typed outcomes.
 - `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
+- `osrs_bot/engine_frame.py`: the immutable latest runtime diagnostic truth.
+- `osrs_bot/debug_overlay.py`: optional passive EngineFrame-only Windows overlay.
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
 - `arduino/ArduinoHIDBridge/`: retained HID firmware.
 - `tests/`: focused Python tests for the active baseline.
@@ -121,6 +131,7 @@ does not pretend that the ignored live traces contain full raw observations.
 - `docs/TASK_CONTRACT.md`: minimal task seam, typed outcomes, and safety ownership.
 - `docs/DEFINITIONS_AND_PROFILES.md`: definition/profile/configuration ownership.
 - `docs/INPUT_COORDINATOR.md`: sole input owner, pointer, receipt, and cleanup contract.
+- `docs/ENGINE_FRAME.md`: diagnostic publication and passive overlay contract.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.

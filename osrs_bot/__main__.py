@@ -30,6 +30,16 @@ def _parser() -> argparse.ArgumentParser:
         )
     task = subparsers.choices["task"]
     task.add_argument("--execute", action="store_true", help="send verified actions through Arduino HID")
+    task.add_argument(
+        "--overlay",
+        action="store_true",
+        help="show the passive read-only EngineFrame diagnostic overlay",
+    )
+    task.add_argument(
+        "--overlay-show-rejected",
+        action="store_true",
+        help="also outline rejected candidates (requires --overlay)",
+    )
     task.add_argument("--arduino-port", default=os.environ.get("OSRS_TELEMETRY_ARDUINO_PORT"))
     task.add_argument(
         "--poll-seconds", type=float, default=DEFAULT_RUNTIME_CONFIG.poll_seconds
@@ -134,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (TypeError, ValueError) as error:
         parser.error(str(error))
+    if command == "task" and args.overlay_show_rejected and not args.overlay:
+        parser.error("--overlay-show-rejected requires --overlay")
     client = ObservationClient(
         configuration.endpoint,
         auth_token=configuration.auth_token,
@@ -163,7 +175,33 @@ def main(argv: list[str] | None = None) -> int:
             client, task, Verifier(),
             configuration=configuration,
         )
-    result = runtime.run(execute=args.execute)
+    overlay = None
+    if args.overlay:
+        try:
+            from .debug_overlay import DebugOverlay
+
+            overlay = DebugOverlay(
+                runtime.frame_publisher,
+                show_rejected=args.overlay_show_rejected,
+            )
+            overlay.start()
+        except Exception as error:  # diagnostics never alter engine control
+            print(
+                f"Diagnostic overlay unavailable: {type(error).__name__}: {error}",
+                file=sys.stderr,
+            )
+            overlay = None
+    try:
+        result = runtime.run(execute=args.execute)
+    finally:
+        if overlay is not None:
+            try:
+                overlay.stop()
+            except Exception as error:
+                print(
+                    f"Diagnostic overlay cleanup warning: {type(error).__name__}: {error}",
+                    file=sys.stderr,
+                )
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.successful else 2
 

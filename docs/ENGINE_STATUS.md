@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 5 complete — one Arduino input owner and proof boundary established.**
+**Phase 6 complete — one immutable diagnostic truth and passive overlay established.**
 
-Current checkpoint subject: `input: centralize Arduino ownership and proof`
+Current checkpoint subject: `diagnostics: publish EngineFrame and passive overlay`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -63,6 +63,20 @@ Regression command:
 - The Arduino transport and raw operations are private. Recursive static
   boundary tests reject another production importer/caller and reject software
   input modules.
+- Task snapshots now expose the bound definition/profile and bounded route or
+  cycle progress without runtime reading mutable FSM internals.
+- Decisions carry the exact selected/eligible/rejected evidence produced by the
+  task's real selection path, including stable rejection codes and source
+  geometry provenance.
+- Safety evaluations record the ordered checks actually used. Execution results
+  retain those checks across bounded retries without diagnostic re-evaluation.
+- `TaskRuntime` publishes one monotonic latest `engine_frame.v1` at observation,
+  decision, execution, verification, and terminal boundaries. Terminal frames
+  retain the last receipt, typed outcome, derived cleanup state, and blocker.
+- The optional Windows overlay renders only EngineFrame: selected green,
+  alternatives amber, optional rejected red, plus compact status text. It
+  suppresses stale geometry and verifies click-through/no-activate window
+  styles before display. Overlay failure cannot alter engine control.
 
 ## Governing direction
 
@@ -73,8 +87,8 @@ Regression command:
 - Profiles and definitions can never weaken engine invariants.
 - RuneLite API facts remain authoritative. Vision may supplement or veto but
   cannot replace semantic API truth. No model dependency is active.
-- One implemented `InputCoordinator` owns every Arduino session. A future
-  `EngineFrame` still owns the next diagnostic-truth milestone.
+- One implemented `InputCoordinator` owns every Arduino session, and one
+  implemented `EngineFrame` owns read-only diagnostic truth.
 - A future LLM may read offline evidence but has no runtime control authority.
 - Static definitions, active FSM state, run history, and demonstration evidence
   remain separate; unsafe ephemeral state is never restored after restart.
@@ -103,6 +117,8 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   Java suite 71 passed across 8 suites with zero failures/errors/skips.
 - Phase 5 gate: golden replay 2 passed; 220 Python tests passed; forced fresh
   Java suite 71 passed across 8 suites with zero failures/errors/skips.
+- Phase 6 gate: golden replay 2 passed; 241 Python tests passed; forced fresh
+  Java suite 71 passed across 8 suites with zero failures/errors/skips.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -121,6 +137,8 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
 - The sole input boundary is implemented and fake-transport tested. The final
   bounded live regression must still retain a real successful receipt and safe
   firmware STATUS proof after live input.
-- Sensor, task, definition, profile, runtime-configuration, and input contracts
-  are implemented. **Phase 6 is next**; diagnostics, recorder, and facade work
-  remain phase-scoped.
+- The passive overlay is structurally and render-policy tested; final regression
+  must still compare its visible geometry/text with a fresh loaded EngineFrame.
+- Sensor, task, definition, profile, runtime-configuration, input, and
+  diagnostic contracts are implemented. **Phase 7 is next**; recorder and
+  facade work remain phase-scoped.

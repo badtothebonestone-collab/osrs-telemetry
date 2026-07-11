@@ -52,6 +52,10 @@ runtime logic.
   fresh validators but submit typed intents to one `InputCoordinator`. The
   Arduino transport is private; a receipt is successful only with ordered
   activation/ACK evidence and final `STOP_ALL -> DISARM -> STATUS` proof.
+- **D012 — Diagnostic authority:** runtime publishes one immutable latest
+  `EngineFrame` from the real decision path. Task selection and ordered safety
+  evidence are captured at their owners; overlay/readers may format that frame
+  but never reselect, revalidate, or authorize actions.
 
 ## Phases and acceptance
 
@@ -62,9 +66,9 @@ runtime logic.
 | 2. Coherent sensor truth | Complete (`b645d83`) | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
 | 3. Minimal task seam | Complete (`56b8b8b`) | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
 | 4. One task/site definition | Complete (`0c8ec9e`) | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
-| 5. Arduino boundary | Complete | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
-| 6. EngineFrame + overlay | Next | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
-| 7. Demonstration capture | Pending | Read-only record/inspect commands produce hashed JSONL, manifest, timeline, screenshots, and reviewed semantic suggestions. |
+| 5. Arduino boundary | Complete (`8b71ebc`) | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
+| 6. EngineFrame + overlay | Complete | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
+| 7. Demonstration capture | Next | Read-only record/inspect commands produce hashed JSONL, manifest, timeline, screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Pending | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
 | Final regression | Pending | Full suites/replay pass; bounded fresh live observation and safe default-cycle evidence; cleanup and audits confirmed. |
 
@@ -193,6 +197,30 @@ runtime logic.
   Python tests passed, a forced fresh 71-test Java suite passed, and
   `git diff --check` passed.
 
+## Phase 6 completed work
+
+- Extended the four-operation task seam with frozen diagnostic values carried
+  by `Decision` and `TaskSnapshot`; runtime still has no concrete task or
+  mutable progress dependency.
+- Made the concrete FSM expose definition/profile IDs and route/cycle progress,
+  then publish selected, eligible, and rejected target evidence from the same
+  selection/classification path that drives actions. Rejections use stable
+  codes and retain source tick plus geometry-frame provenance.
+- Added ordered `SafetyEvaluation` values and carried the exact checks used by
+  pre-move, post-move, context, and retry paths in immutable execution results.
+  Diagnostics never rerun the gate.
+- Added one atomic latest-only `EngineFramePublisher`. Terminal frames retain
+  task/binding/progress, observation identity, decision evidence, safety,
+  pending/last verification, typed outcome, real input receipt, derived cleanup
+  proof, and blocker.
+- Added the opt-in Windows overlay with verified click-through/no-activate
+  styles, required green/amber/optional-red rendering, stale-geometry
+  suppression, no input handlers, and failure isolation. Disabled mode creates
+  no overlay thread or window.
+- Added `docs/ENGINE_FRAME.md`. Final gate: golden replay 2 passed, all 241
+  Python tests passed, a forced fresh 71-test Java suite passed, and
+  `git diff --check` passed.
+
 ## Prohibited during this mission
 
 - A second gameplay task or site, multiple woodcut areas, a generic navigation
@@ -219,4 +247,6 @@ runtime logic.
   authoritative safe firmware STATUS after input.
 - There is intentionally no external/profile file loader or second definition;
   the one validated in-code default is the only supported choice.
-- No EngineFrame, overlay, demonstration recorder, or frontend facade exists.
+- No demonstration recorder or frontend facade exists yet; the overlay remains
+  intentionally diagnostic-only and still needs final loaded-scene visual
+  comparison against the live EngineFrame.

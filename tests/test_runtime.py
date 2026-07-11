@@ -8,6 +8,7 @@ from pathlib import Path
 
 from osrs_bot.action import ExecutionResult
 from osrs_bot.configuration import DEFAULT_RUNTIME_CONFIG
+from osrs_bot.engine_frame import EngineFramePublisher, EngineStage
 from osrs_bot.input_coordinator import (
     CommandEvidence,
     FirmwareSafetyStatus,
@@ -444,6 +445,17 @@ class _AlwaysSentInterface:
         return _sent_execution(action, observation.tick, observation.tick + 1)
 
 
+class _RecordingPublisher(EngineFramePublisher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames = []
+
+    def publish(self, **values):
+        frame = super().publish(**values)
+        self.frames.append(frame)
+        return frame
+
+
 def _wait(tick: int, state: str = "waiting") -> Decision:
     return Decision(state, "wait", Action(ActionKind.WAIT, "Wait", tick))
 
@@ -553,6 +565,8 @@ class TaskRuntimeTests(unittest.TestCase):
         )
         self.assertIsNone(task.applied[0].outcome)
         self.assertEqual(1, len(interface.calls))
+        self.assertIsNone(result.engine_frame.pending_verification)
+        self.assertIs(result.engine_frame.last_verification.status, VerificationStatus.FAIL)
 
     def test_action_interface_exception_applies_one_typed_failure(self) -> None:
         decision, _ = _executable(10)
@@ -647,6 +661,50 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(1, result.actions)
         self.assertEqual(3, result.observations)
         self.assertIs(result.task_snapshot.status, TaskStatus.COMPLETE)
+
+    def test_engine_frame_retains_real_receipt_outcome_and_terminal_state(self) -> None:
+        decision, verification = _executable(10)
+        complete = _wait(12, "complete")
+        task = _Task([decision, complete])
+        execution = _sent_execution(decision.action, 10, 11)
+        passed = VerificationResult(
+            VerificationStatus.PASS,
+            "log_gained",
+            Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 11),
+        )
+        publisher = _RecordingPublisher()
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11), _observation(12)),
+            task,
+            _Verifier(passed),
+            _ActionInterface(execution),
+            frame_publisher=publisher,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        stages = tuple(frame.stage for frame in publisher.frames)
+        self.assertIs(EngineStage.STARTING, stages[0])
+        self.assertIsNone(publisher.frames[0].observation)
+        self.assertIsNone(publisher.frames[0].decision)
+        self.assertIn(EngineStage.OBSERVED, stages)
+        self.assertIn(EngineStage.DECIDED, stages)
+        self.assertIn(EngineStage.EXECUTED, stages)
+        self.assertIn(EngineStage.VERIFYING, stages)
+        self.assertIn(EngineStage.VERIFIED, stages)
+        self.assertIs(EngineStage.TERMINAL, stages[-1])
+        self.assertIs(result.engine_frame, publisher.latest())
+        self.assertIs(result.execution, execution)
+        self.assertIs(result.engine_frame.last_execution_receipt, execution.receipt)
+        self.assertIs(result.engine_frame.last_verification, passed)
+        self.assertIsNone(result.engine_frame.pending_verification)
+        self.assertTrue(result.engine_frame.cleanup.safe)
+        self.assertEqual(12, result.engine_frame.observation.source_tick)
+        self.assertIs(result.engine_frame.task.status, TaskStatus.COMPLETE)
+        payload = result.to_dict()
+        self.assertTrue(payload["execution"]["receipt"]["wireProofComplete"])
+        self.assertEqual("terminal", payload["engineFrame"]["stage"])
 
     def test_failed_verification_is_applied_once_and_blocks(self) -> None:
         decision, _ = _executable(10)

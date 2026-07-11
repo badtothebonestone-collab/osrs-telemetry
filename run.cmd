@@ -13,7 +13,7 @@ if /I "%MODE%"=="execute" goto execute
 if /I "%MODE%"=="replay" goto replay
 if /I "%MODE%"=="test" goto test
 
-echo Usage: run.cmd [plugin^|observe^|task^|login COMx^|execute COMx^|replay^|test] 1>&2
+echo Usage: run.cmd [plugin^|observe^|task [--overlay]^|login COMx^|execute COMx [--overlay]^|replay^|test] 1>&2
 exit /b 2
 
 :plugin
@@ -25,7 +25,7 @@ python -m osrs_bot observe
 exit /b %ERRORLEVEL%
 
 :task
-python -m osrs_bot task
+python -m osrs_bot task %~2 %~3
 exit /b %ERRORLEVEL%
 
 :login
@@ -41,7 +41,7 @@ if "%~2"=="" (
     echo Live execution requires an Arduino port, for example: run.cmd execute COM6 1>&2
     exit /b 2
 )
-python -m osrs_bot task --execute --arduino-port "%~2"
+python -m osrs_bot task --execute --arduino-port "%~2" %~3 %~4
 exit /b %ERRORLEVEL%
 
 :replay

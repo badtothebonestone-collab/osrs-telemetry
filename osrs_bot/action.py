@@ -25,7 +25,7 @@ from .model import (
     ScreenPoint,
     WidgetTarget,
 )
-from .safety import SafetyGate, SafetyResult
+from .safety import SafetyCheck, SafetyEvaluation, SafetyGate, SafetyResult
 
 
 class _ActionBlocked(RuntimeError):
@@ -42,6 +42,7 @@ class ExecutionResult:
     local_reason: str
     post_move_tick: int | None = None
     receipt: InputReceipt | None = None
+    safety_checks: tuple[SafetyCheck, ...] = ()
 
     def __post_init__(self) -> None:
         if self.local_status not in {"BLOCKED", "ERROR", "NO_ACTION"}:
@@ -50,6 +51,10 @@ class ExecutionResult:
             raise ValueError("local_reason must be non-empty")
         if self.receipt is not None and not isinstance(self.receipt, InputReceipt):
             raise TypeError("receipt must be InputReceipt or None")
+        if not isinstance(self.safety_checks, tuple) or not all(
+            isinstance(check, SafetyCheck) for check in self.safety_checks
+        ):
+            raise TypeError("safety_checks must be a tuple of SafetyCheck values")
 
     @property
     def status(self) -> str:
@@ -135,13 +140,17 @@ class CoordinatedActionInterface:
         self._evidence_delay_seconds = max(0.0, evidence_delay_seconds)
 
     def execute(self, action: Action, observation: Observation) -> ExecutionResult:
-        preflight = self._safety.validate_pre_move(action, observation)
+        safety_checks: list[SafetyCheck] = []
+        preflight_evaluation = self._safety.evaluate_pre_move(action, observation)
+        self._extend_safety_checks(safety_checks, preflight_evaluation)
+        preflight = preflight_evaluation.result
         if not preflight.allowed:
             return self._local_result(
                 action,
                 observation,
                 "BLOCKED",
                 preflight.reason,
+                safety_checks,
             )
 
         if action.kind is ActionKind.WAIT:
@@ -150,6 +159,7 @@ class CoordinatedActionInterface:
                 observation,
                 "NO_ACTION",
                 "wait_action",
+                safety_checks,
             )
 
         last_observation: list[Observation | None] = [None]
@@ -159,18 +169,21 @@ class CoordinatedActionInterface:
                     action,
                     observation,
                     last_observation,
+                    safety_checks,
                 )
             elif action.kind in {ActionKind.WALK, ActionKind.CLICK_WIDGET}:
                 receipt = self._execute_direct_pointer(
                     action,
                     observation,
                     last_observation,
+                    safety_checks,
                 )
             elif action.kind is ActionKind.PRESS_KEY:
                 receipt = self._execute_key(
                     action,
                     observation,
                     last_observation,
+                    safety_checks,
                 )
             else:
                 raise ValueError(f"unsupported live action: {action.kind.value}")
@@ -187,6 +200,7 @@ class CoordinatedActionInterface:
                     if last_observation[0] is not None
                     else None
                 ),
+                safety_checks=tuple(safety_checks),
             )
 
         return ExecutionResult(
@@ -200,6 +214,7 @@ class CoordinatedActionInterface:
                 else None
             ),
             receipt=receipt,
+            safety_checks=tuple(safety_checks),
         )
 
     def _execute_direct_pointer(
@@ -207,6 +222,7 @@ class CoordinatedActionInterface:
         action: Action,
         observation: Observation,
         last_observation: list[Observation | None],
+        safety_checks: list[SafetyCheck],
     ) -> InputReceipt:
         intent = self._pointer_intent(action, observation)
 
@@ -218,6 +234,7 @@ class CoordinatedActionInterface:
                     "hover_pointer_mismatch",
                     "hover_menu_mismatch",
                 },
+                safety_checks,
             )
             last_observation[0] = post
             return self._input_validation(result)
@@ -229,6 +246,7 @@ class CoordinatedActionInterface:
         action: Action,
         observation: Observation,
         last_observation: list[Observation | None],
+        safety_checks: list[SafetyCheck],
     ) -> InputReceipt:
         intent = self._pointer_intent(action, observation)
         canvas = self._required_canvas(observation)
@@ -245,6 +263,7 @@ class CoordinatedActionInterface:
                     "hover_pointer_mismatch",
                     "hover_menu_mismatch",
                 },
+                safety_checks,
             )
             last_observation[0] = post
             if hover.allowed:
@@ -263,6 +282,7 @@ class CoordinatedActionInterface:
             opened, result = self._await_context_menu(
                 action,
                 minimum_tick=minimum_tick,
+                safety_checks=safety_checks,
             )
             last_observation[0] = opened
             if not result.allowed:
@@ -298,6 +318,7 @@ class CoordinatedActionInterface:
                 action,
                 minimum_tick=minimum_tick,
                 row_point=row_intent.target,
+                safety_checks=safety_checks,
             )
             last_observation[0] = row_observation
             return self._input_validation(result)
@@ -314,6 +335,7 @@ class CoordinatedActionInterface:
         action: Action,
         observation: Observation,
         last_observation: list[Observation | None],
+        safety_checks: list[SafetyCheck],
     ) -> InputReceipt:
         if not action.key:
             raise ValueError("press_key action has no key")
@@ -331,7 +353,9 @@ class CoordinatedActionInterface:
         )
 
         def validate(_intent: ApprovedKeyIntent) -> InputValidation:
-            post, result, _ = self._await_post_move(action, {retry_reason})
+            post, result, _ = self._await_post_move(
+                action, {retry_reason}, safety_checks
+            )
             last_observation[0] = post
             return self._input_validation(result)
 
@@ -450,17 +474,32 @@ class CoordinatedActionInterface:
         self,
         action: Action,
         retry_reasons: set[str],
+        safety_checks: list[SafetyCheck],
     ) -> tuple[Observation, SafetyResult, SafetyResult]:
         observation = self._observe()
-        result = self._safety.validate_post_move(action, observation)
-        context = self._safety.validate_context_candidate(action, observation)
+        result_evaluation = self._safety.evaluate_post_move(action, observation)
+        context_evaluation = self._safety.evaluate_context_candidate(
+            action, observation
+        )
+        self._extend_safety_checks(safety_checks, result_evaluation)
+        self._extend_safety_checks(safety_checks, context_evaluation)
+        result = result_evaluation.result
+        context = context_evaluation.result
         for _ in range(1, self._evidence_attempts):
             if result.allowed or context.allowed or result.reason not in retry_reasons:
                 break
             self._sleep(self._evidence_delay_seconds)
             observation = self._observe()
-            result = self._safety.validate_post_move(action, observation)
-            context = self._safety.validate_context_candidate(action, observation)
+            result_evaluation = self._safety.evaluate_post_move(
+                action, observation
+            )
+            context_evaluation = self._safety.evaluate_context_candidate(
+                action, observation
+            )
+            self._extend_safety_checks(safety_checks, result_evaluation)
+            self._extend_safety_checks(safety_checks, context_evaluation)
+            result = result_evaluation.result
+            context = context_evaluation.result
         return observation, result, context
 
     def _await_context_menu(
@@ -469,6 +508,7 @@ class CoordinatedActionInterface:
         *,
         minimum_tick: int,
         row_point: ScreenPoint | None = None,
+        safety_checks: list[SafetyCheck],
     ) -> tuple[Observation, SafetyResult]:
         retry_reasons = {
             "menu_sample_not_newer",
@@ -476,23 +516,27 @@ class CoordinatedActionInterface:
             "context_row_pointer_mismatch",
         }
         observation = self._observe()
-        result = self._safety.validate_context_menu(
+        evaluation = self._safety.evaluate_context_menu(
             action,
             observation,
             minimum_menu_client_tick=minimum_tick,
             row_point=row_point,
         )
+        self._extend_safety_checks(safety_checks, evaluation)
+        result = evaluation.result
         for _ in range(1, self._evidence_attempts):
             if result.allowed or result.reason not in retry_reasons:
                 break
             self._sleep(self._evidence_delay_seconds)
             observation = self._observe()
-            result = self._safety.validate_context_menu(
+            evaluation = self._safety.evaluate_context_menu(
                 action,
                 observation,
                 minimum_menu_client_tick=minimum_tick,
                 row_point=row_point,
             )
+            self._extend_safety_checks(safety_checks, evaluation)
+            result = evaluation.result
         return observation, result
 
     @staticmethod
@@ -512,15 +556,23 @@ class CoordinatedActionInterface:
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
+    def _extend_safety_checks(
+        destination: list[SafetyCheck], evaluation: SafetyEvaluation
+    ) -> None:
+        destination.extend(evaluation.checks)
+
+    @staticmethod
     def _local_result(
         action: Action,
         observation: Observation,
         status: str,
         reason: str,
+        safety_checks: list[SafetyCheck],
     ) -> ExecutionResult:
         return ExecutionResult(
             action=action,
             pre_move_tick=observation.tick,
             local_status=status,
             local_reason=reason,
+            safety_checks=tuple(safety_checks),
         )
