@@ -449,6 +449,25 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertIn("hover_pointer_mismatch", result.reason)
         self.assertIsNone(coordinator.decisions[0].activation)
 
+    def test_settled_pointer_inside_verified_region_preserves_canonical_aim(self) -> None:
+        actual = ScreenPoint(POINT.x + 3, POINT.y)
+        coordinator = FakeCoordinator(actual_pointer=actual)
+        post = observation(
+            menus=self.hover.menus,
+            tick=11,
+            menu_point=actual,
+        )
+
+        result = self.interface(coordinator, post).execute(
+            tree_action(), self.pre
+        )
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(
+            PointerActivation.DIRECT_LEFT,
+            coordinator.decisions[0].activation,
+        )
+
     def test_fresh_hover_polling_is_bounded_before_direct_activation(self) -> None:
         coordinator = FakeCoordinator()
         samples = iter((observation(menus=(), tick=11), self.hover))

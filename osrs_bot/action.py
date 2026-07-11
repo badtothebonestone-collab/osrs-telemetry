@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Callable
 
 from .input_coordinator import (
@@ -236,15 +236,15 @@ class CoordinatedActionInterface:
             _intent: ApprovedPointerIntent,
             actual_point: ScreenPoint,
         ) -> InputValidation:
-            actual_action = replace(action, screen_point=actual_point)
             post, result, _ = self._await_post_move(
-                actual_action,
+                action,
                 {
                     "menu_sample_not_newer",
                     "hover_pointer_mismatch",
                     "hover_menu_mismatch",
                 },
                 safety_checks,
+                settled_pointer=actual_point,
             )
             last_observation[0] = post
             return self._input_validation(result)
@@ -262,22 +262,22 @@ class CoordinatedActionInterface:
         canvas = self._required_canvas(observation)
         context_minimum_tick: list[int | None] = [None]
         row_minimum_tick: list[int | None] = [None]
-        actual_action: list[Action | None] = [None]
+        validated_action: list[Action | None] = [None]
 
         def decide_activation(
             _intent: ApprovedPointerIntent,
             actual_point: ScreenPoint,
         ) -> PointerActivationDecision:
-            moved_action = replace(action, screen_point=actual_point)
-            actual_action[0] = moved_action
+            validated_action[0] = action
             post, hover, context = self._await_post_move(
-                moved_action,
+                action,
                 {
                     "menu_sample_not_newer",
                     "hover_pointer_mismatch",
                     "hover_menu_mismatch",
                 },
                 safety_checks,
+                settled_pointer=actual_point,
             )
             last_observation[0] = post
             if hover.allowed:
@@ -293,18 +293,18 @@ class CoordinatedActionInterface:
             minimum_tick = context_minimum_tick[0]
             if minimum_tick is None:
                 raise _ActionBlocked("menu_sample_missing")
-            moved_action = actual_action[0]
-            if moved_action is None:
+            canonical_action = validated_action[0]
+            if canonical_action is None:
                 raise _ActionBlocked("actual_pointer_sample_missing")
             opened, result = self._await_context_menu(
-                moved_action,
+                canonical_action,
                 minimum_tick=minimum_tick,
                 safety_checks=safety_checks,
             )
             last_observation[0] = opened
             if not result.allowed:
                 raise _ActionBlocked(result.reason)
-            entry = self._exact_context_entry(moved_action, opened)
+            entry = self._exact_context_entry(canonical_action, opened)
             if entry is None or entry.row_bounds is None:
                 raise _ActionBlocked("context_row_bounds_missing")
             if opened.menu_client_tick is None:
@@ -334,11 +334,11 @@ class CoordinatedActionInterface:
             minimum_tick = row_minimum_tick[0]
             if minimum_tick is None:
                 return InputValidation.deny("menu_sample_missing")
-            moved_action = actual_action[0]
-            if moved_action is None:
+            canonical_action = validated_action[0]
+            if canonical_action is None:
                 return InputValidation.deny("actual_pointer_sample_missing")
             row_observation, result = self._await_context_menu(
-                moved_action,
+                canonical_action,
                 minimum_tick=minimum_tick,
                 row_point=actual_point,
                 safety_checks=safety_checks,
@@ -508,11 +508,15 @@ class CoordinatedActionInterface:
         action: Action,
         retry_reasons: set[str],
         safety_checks: list[SafetyCheck],
+        *,
+        settled_pointer: ScreenPoint | None = None,
     ) -> tuple[Observation, SafetyResult, SafetyResult]:
         observation = self._observe()
-        result_evaluation = self._safety.evaluate_post_move(action, observation)
+        result_evaluation = self._safety.evaluate_post_move(
+            action, observation, settled_pointer=settled_pointer
+        )
         context_evaluation = self._safety.evaluate_context_candidate(
-            action, observation
+            action, observation, settled_pointer=settled_pointer
         )
         self._extend_safety_checks(safety_checks, result_evaluation)
         self._extend_safety_checks(safety_checks, context_evaluation)
@@ -524,10 +528,10 @@ class CoordinatedActionInterface:
             self._sleep(self._evidence_delay_seconds)
             observation = self._observe()
             result_evaluation = self._safety.evaluate_post_move(
-                action, observation
+                action, observation, settled_pointer=settled_pointer
             )
             context_evaluation = self._safety.evaluate_context_candidate(
-                action, observation
+                action, observation, settled_pointer=settled_pointer
             )
             self._extend_safety_checks(safety_checks, result_evaluation)
             self._extend_safety_checks(safety_checks, context_evaluation)

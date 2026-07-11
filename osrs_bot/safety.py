@@ -169,15 +169,28 @@ class SafetyGate:
         return _evaluation(complete, checks)
 
     def validate_post_move(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        settled_pointer: ScreenPoint | None = None,
     ) -> SafetyResult:
-        return self.evaluate_post_move(action, observation).result
+        return self.evaluate_post_move(
+            action, observation, settled_pointer=settled_pointer
+        ).result
 
     def evaluate_post_move(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        settled_pointer: ScreenPoint | None = None,
     ) -> SafetyEvaluation:
         base_evaluation = self._evaluate_post_move_base(
-            action, observation, stage="post_move"
+            action,
+            observation,
+            stage="post_move",
+            settled_pointer=settled_pointer,
         )
         checks = list(base_evaluation.checks)
         base = base_evaluation.result
@@ -197,15 +210,28 @@ class SafetyGate:
         return _evaluation(complete, checks)
 
     def validate_context_candidate(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        settled_pointer: ScreenPoint | None = None,
     ) -> SafetyResult:
-        return self.evaluate_context_candidate(action, observation).result
+        return self.evaluate_context_candidate(
+            action, observation, settled_pointer=settled_pointer
+        ).result
 
     def evaluate_context_candidate(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        settled_pointer: ScreenPoint | None = None,
     ) -> SafetyEvaluation:
         base_evaluation = self._evaluate_post_move_base(
-            action, observation, stage="context_candidate"
+            action,
+            observation,
+            stage="context_candidate",
+            settled_pointer=settled_pointer,
         )
         checks = list(base_evaluation.checks)
         base = base_evaluation.result
@@ -418,6 +444,7 @@ class SafetyGate:
         observation: Observation,
         *,
         stage: str,
+        settled_pointer: ScreenPoint | None = None,
     ) -> SafetyEvaluation:
         checks: list[SafetyCheck] = []
         common = _record(
@@ -448,6 +475,11 @@ class SafetyGate:
             ActionKind.WALK,
             ActionKind.CLICK_WIDGET,
         }:
+            actual_pointer = (
+                action.screen_point
+                if settled_pointer is None
+                else settled_pointer
+            )
             menu_source = _record(
                 checks,
                 f"{stage}.menu_source",
@@ -480,12 +512,21 @@ class SafetyGate:
                 f"{stage}.hover_pointer",
                 _allow("hover_pointer_exact")
                 if _points_close(
-                    observation.menu_mouse_screen_point, action.screen_point
+                    observation.menu_mouse_screen_point, actual_pointer
                 )
                 else _reject("hover_pointer_mismatch"),
             )
             if not pointer.allowed:
                 return _evaluation(pointer, checks)
+            settled = _record(
+                checks,
+                f"{stage}.settled_pointer",
+                self._validate_settled_pointer(
+                    action, observation, actual_pointer
+                ),
+            )
+            if not settled.allowed:
+                return _evaluation(settled, checks)
         if action.kind is ActionKind.PRESS_KEY:
             if _interface_close_constraint(action) is not None:
                 key_sample = (
@@ -534,6 +575,43 @@ class SafetyGate:
             checks, f"{stage}.base", _allow("post_move_base_safe")
         )
         return _evaluation(complete, checks)
+
+    @staticmethod
+    def _validate_settled_pointer(
+        action: Action,
+        observation: Observation,
+        point: ScreenPoint | None,
+    ) -> SafetyResult:
+        if not _points_close(point, action.screen_point):
+            return _reject("settled_pointer_outside_verified_region")
+        target_bounds: ScreenBounds | None
+        if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
+            if not action.target_key:
+                return _reject("target_missing")
+            target = observation.object_by_key(action.target_key)
+            if target is None:
+                return _reject("target_missing")
+            target_bounds = target.geometry.screen_bounds
+        elif action.kind is ActionKind.CLICK_WIDGET:
+            selected = _select_widget(action, observation)
+            if selected is None:
+                return _reject("target_missing")
+            target_bounds = selected[1].screen_bounds
+        else:
+            return _reject("settled_pointer_unsupported")
+        if target_bounds is None and point != action.screen_point:
+            # A fresh canonical point without a rectangle is usable only as
+            # an exact 1x1 region, matching the coordinator's point-only
+            # target contract. It cannot inherit the +/- tolerance.
+            return _reject("target_bounds_missing")
+        result = _validate_point(
+            point, observation.canvas_bounds, target_bounds
+        )
+        return (
+            _allow("settled_pointer_safe")
+            if result.allowed
+            else result
+        )
 
     def _validate_observation(self, observation: Observation) -> SafetyResult:
         if not observation.source_coherent:

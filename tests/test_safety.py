@@ -203,6 +203,149 @@ class SafetyGateTest(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.reason, "post_move_safe")
 
+    def test_post_move_separates_canonical_aim_from_settled_pointer(self) -> None:
+        settled = ScreenPoint(TREE_POINT.x + 3, TREE_POINT.y)
+        post = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            menu_point=settled,
+        )
+
+        evaluation = self.gate.evaluate_post_move(
+            tree_action(), post, settled_pointer=settled
+        )
+
+        self.assertTrue(evaluation.result.allowed)
+        self.assertIn(
+            SafetyCheck(
+                "post_move.settled_pointer", "settled_pointer_safe", True
+            ),
+            evaluation.checks,
+        )
+        self.assertIn(
+            SafetyCheck(
+                "post_move.action_invariants", "screen_point_safe", True
+            ),
+            evaluation.checks,
+        )
+
+    def test_settled_pointer_must_remain_inside_fresh_target_bounds(self) -> None:
+        outside = ScreenPoint(TREE_POINT.x + 3, TREE_POINT.y)
+        narrow = replace(
+            tree(),
+            geometry=replace(
+                tree().geometry,
+                screen_bounds=ScreenBounds(300, 220, 21, 40),
+            ),
+        )
+        post = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            menu_point=outside,
+            nearby_objects=(narrow,),
+        )
+
+        result = self.gate.validate_post_move(
+            tree_action(), post, settled_pointer=outside
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("screen_point_outside_target", result.reason)
+
+    def test_settled_pointer_cannot_exceed_verified_coordinator_region(self) -> None:
+        outside = ScreenPoint(TREE_POINT.x + 4, TREE_POINT.y)
+        post = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            menu_point=outside,
+        )
+
+        result = self.gate.validate_post_move(
+            tree_action(), post, settled_pointer=outside
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            "settled_pointer_outside_verified_region", result.reason
+        )
+
+    def test_missing_object_bounds_allow_only_the_exact_canonical_point(self) -> None:
+        offset = ScreenPoint(TREE_POINT.x + 1, TREE_POINT.y)
+        point_only = replace(
+            tree(),
+            geometry=replace(tree().geometry, screen_bounds=None),
+        )
+        post = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            menu_point=offset,
+            nearby_objects=(point_only,),
+        )
+
+        result = self.gate.validate_post_move(
+            tree_action(), post, settled_pointer=offset
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("target_bounds_missing", result.reason)
+
+    def test_missing_widget_bounds_allow_only_the_exact_canonical_point(self) -> None:
+        point = ScreenPoint(700, 40)
+        offset = ScreenPoint(point.x + 1, point.y)
+        close = WidgetTarget("Close bank", True, point)
+        widgets = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            close_bank=close,
+        )
+        action = Action(
+            kind=ActionKind.CLICK_WIDGET,
+            label="Close bank",
+            source_tick=100,
+            target_key="close_bank",
+            option="Close bank",
+            target_name="Close bank",
+            screen_point=point,
+            source_menu_client_tick=1100,
+            source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint("bank", 2, True)
+            ),
+        )
+        post = replace(
+            observation(tick=101, widgets=widgets, menu_point=offset),
+            location=WorldPoint(3208, 3220, 2),
+            plane=2,
+        )
+
+        result = self.gate.validate_post_move(
+            action, post, settled_pointer=offset
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("target_bounds_missing", result.reason)
+
+    def test_settled_pointer_tolerance_does_not_allow_canonical_aim_drift(self) -> None:
+        settled = ScreenPoint(TREE_POINT.x + 1, TREE_POINT.y)
+        drifted = replace(
+            tree(),
+            geometry=replace(tree().geometry, screen_point=settled),
+        )
+        post = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            menu_point=settled,
+            nearby_objects=(drifted,),
+        )
+
+        result = self.gate.validate_post_move(
+            tree_action(), post, settled_pointer=settled
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("screen_point_not_verified", result.reason)
+
     def test_pre_move_evaluation_records_stable_order_and_drives_wrapper(self) -> None:
         action = tree_action()
         sample = observation()
