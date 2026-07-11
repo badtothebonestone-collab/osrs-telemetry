@@ -1368,6 +1368,8 @@ class InputCoordinator:
         y_calibrated = False
         x_no_effect_retries = 0
         y_no_effect_retries = 0
+        x_delayed_command = 0
+        y_delayed_command = 0
         for plan_index in range(self._max_correction_plans + 1):
             if transaction.pointer_plan_count >= self._max_correction_plans + 1:
                 raise _TransactionAbort(
@@ -1452,10 +1454,20 @@ class InputCoordinator:
                 self._assert_foreground(backend, intent.expected_pid)
                 if not intent.movement_bounds.contains(actual):
                     raise _TransactionAbort("cursor_left_verified_movement_bounds")
+                self._assert_delayed_command_compatible(
+                    delayed=x_delayed_command,
+                    commanded=step.dx,
+                    axis="x",
+                )
+                self._assert_delayed_command_compatible(
+                    delayed=y_delayed_command,
+                    commanded=step.dy,
+                    axis="y",
+                )
                 self._assert_transfer_headroom(
                     actual,
-                    step.dx,
-                    step.dy,
+                    step.dx + x_delayed_command,
+                    step.dy + y_delayed_command,
                     intent.movement_bounds,
                 )
                 before = actual
@@ -1473,20 +1485,30 @@ class InputCoordinator:
                 self._assert_foreground(backend, intent.expected_pid)
                 if not intent.movement_bounds.contains(actual):
                     raise _TransactionAbort("cursor_left_verified_movement_bounds")
-                x_calibrated, x_no_effect_retries = self._validate_axis_transfer(
+                (
+                    x_calibrated,
+                    x_no_effect_retries,
+                    x_delayed_command,
+                ) = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=step.dx,
                     observed=actual.x - before.x,
                     calibrated=x_calibrated,
                     no_effect_retries=x_no_effect_retries,
+                    delayed_command=x_delayed_command,
                     axis="x",
                 )
-                y_calibrated, y_no_effect_retries = self._validate_axis_transfer(
+                (
+                    y_calibrated,
+                    y_no_effect_retries,
+                    y_delayed_command,
+                ) = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=step.dy,
                     observed=actual.y - before.y,
                     calibrated=y_calibrated,
                     no_effect_retries=y_no_effect_retries,
+                    delayed_command=y_delayed_command,
                     axis="y",
                 )
 
@@ -1497,7 +1519,32 @@ class InputCoordinator:
             settled = self._current_position(backend)
             self._assert_foreground(backend, intent.expected_pid)
             if settled != actual:
-                raise _TransactionAbort("cursor_changed_during_plan_settle")
+                (
+                    x_calibrated,
+                    x_no_effect_retries,
+                    x_delayed_command,
+                ) = self._validate_axis_transfer(
+                    transaction=transaction,
+                    commanded=0,
+                    observed=settled.x - actual.x,
+                    calibrated=x_calibrated,
+                    no_effect_retries=x_no_effect_retries,
+                    delayed_command=x_delayed_command,
+                    axis="x",
+                )
+                (
+                    y_calibrated,
+                    y_no_effect_retries,
+                    y_delayed_command,
+                ) = self._validate_axis_transfer(
+                    transaction=transaction,
+                    commanded=0,
+                    observed=settled.y - actual.y,
+                    calibrated=y_calibrated,
+                    no_effect_retries=y_no_effect_retries,
+                    delayed_command=y_delayed_command,
+                    axis="y",
+                )
             actual = settled
             if not intent.movement_bounds.contains(actual):
                 raise _TransactionAbort("cursor_left_verified_movement_bounds")
@@ -1507,6 +1554,10 @@ class InputCoordinator:
             # pre-verified target region. A zero-step plan can prove an already
             # stable point; a transient mid-trajectory crossing cannot.
             if intent.target_bounds.contains(actual):
+                if x_delayed_command != 0 or y_delayed_command != 0:
+                    raise _TransactionAbort(
+                        "cursor_feedback_unresolved_delayed_command"
+                    )
                 break
             if plan_index >= self._max_correction_plans:
                 raise _TransactionAbort(
@@ -1632,6 +1683,22 @@ class InputCoordinator:
             )
 
     @staticmethod
+    def _assert_delayed_command_compatible(
+        *,
+        delayed: int,
+        commanded: int,
+        axis: str,
+    ) -> None:
+        if (
+            delayed != 0
+            and commanded != 0
+            and (delayed > 0) != (commanded > 0)
+        ):
+            raise _TransactionAbort(
+                f"cursor_feedback_delayed_direction_mismatch_{axis}"
+            )
+
+    @staticmethod
     def _validate_axis_transfer(
         *,
         transaction: _Transaction,
@@ -1639,14 +1706,34 @@ class InputCoordinator:
         observed: int,
         calibrated: bool,
         no_effect_retries: int,
+        delayed_command: int,
         axis: str,
-    ) -> tuple[bool, int]:
+    ) -> tuple[bool, int, int]:
         if commanded == 0:
-            if observed != 0:
+            if delayed_command == 0:
+                if observed != 0:
+                    raise _TransactionAbort(
+                        f"cursor_feedback_uncommanded_axis_{axis}"
+                    )
+                return calibrated, no_effect_retries, 0
+            if observed == 0:
+                return calibrated, no_effect_retries, delayed_command
+            if (delayed_command > 0) != (observed > 0):
                 raise _TransactionAbort(
-                    f"cursor_feedback_uncommanded_axis_{axis}"
+                    f"cursor_feedback_delayed_direction_mismatch_{axis}"
                 )
-            return calibrated, no_effect_retries
+            if (
+                abs(observed)
+                > abs(delayed_command) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+            ):
+                raise _TransactionAbort(
+                    f"cursor_transfer_gain_exceeded_{axis}:"
+                    f"commanded=0:observed={observed}:"
+                    f"delayed={delayed_command}:"
+                    f"plan={transaction.pointer_plan_count}:"
+                    f"step={transaction.pointer_step_count}"
+                )
+            return True, 0, 0
         if observed == 0:
             transaction.pointer_no_effect_count += 1
             if (
@@ -1657,23 +1744,29 @@ class InputCoordinator:
                     "cursor_feedback_no_effect_transaction_limit_exceeded"
                 )
             if no_effect_retries < MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES:
-                return False, no_effect_retries + 1
+                return False, no_effect_retries + 1, commanded
             raise _TransactionAbort(f"cursor_feedback_no_effect_{axis}")
         if (commanded > 0) != (observed > 0):
             raise _TransactionAbort(
                 f"cursor_feedback_direction_mismatch_{axis}"
             )
+        if delayed_command != 0 and (delayed_command > 0) != (commanded > 0):
+            raise _TransactionAbort(
+                f"cursor_feedback_delayed_direction_mismatch_{axis}"
+            )
+        supported_command = abs(commanded) + abs(delayed_command)
         if (
             abs(observed)
-            > abs(commanded) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+            > supported_command * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
         ):
             raise _TransactionAbort(
                 f"cursor_transfer_gain_exceeded_{axis}:"
                 f"commanded={commanded}:observed={observed}:"
+                f"delayed={delayed_command}:"
                 f"plan={transaction.pointer_plan_count}:"
                 f"step={transaction.pointer_step_count}"
             )
-        return True, 0
+        return True, 0, 0
 
     def _validate_pointer(
         self,
