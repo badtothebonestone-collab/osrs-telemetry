@@ -710,6 +710,51 @@ class SafetyGateTest(unittest.TestCase):
             ).allowed
         )
 
+    def test_walk_context_requires_one_unique_walk_here_row(self) -> None:
+        intercepting_tree = exact_hover()
+        walk = walk_hover()
+        candidate = observation(
+            tick=101,
+            menus=(intercepting_tree, walk),
+            nearby_objects=(walk_target(),),
+        )
+
+        result = self.gate.validate_context_candidate(walk_action(), candidate)
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("context_candidate_safe", result.reason)
+
+        row_bounds = ScreenBounds(100, 120, 180, 24)
+        open_menu = observation(
+            tick=102,
+            menus=(
+                replace(intercepting_tree, row_bounds=ScreenBounds(100, 96, 180, 24)),
+                replace(walk, row_bounds=row_bounds),
+            ),
+            nearby_objects=(walk_target(),),
+            menu_open=True,
+            menu_bounds=ScreenBounds(90, 80, 200, 100),
+        )
+
+        self.assertTrue(
+            self.gate.validate_context_menu(
+                walk_action(), open_menu, minimum_menu_client_tick=1101
+            ).allowed
+        )
+
+    def test_walk_context_rejects_ambiguous_walk_here_entries(self) -> None:
+        walk = walk_hover()
+        candidate = observation(
+            tick=101,
+            menus=(exact_hover(), walk, replace(walk, param0=355, param1=314)),
+            nearby_objects=(walk_target(),),
+        )
+
+        result = self.gate.validate_context_candidate(walk_action(), candidate)
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("context_option_not_unique_lower_entry", result.reason)
+
     def test_rejects_unusable_observations(self) -> None:
         base = observation()
         cases = {

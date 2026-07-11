@@ -243,7 +243,7 @@ class SafetyGate:
             checks,
             "context_candidate.action_kind",
             _allow("context_selection_supported")
-            if action.kind is ActionKind.INTERACT_OBJECT
+            if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}
             else _reject("context_selection_unsupported"),
         )
         if not supported.allowed:
@@ -323,7 +323,7 @@ class SafetyGate:
             checks,
             "context_menu.action_kind",
             _allow("context_selection_supported")
-            if action.kind is ActionKind.INTERACT_OBJECT
+            if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}
             else _reject("context_selection_unsupported"),
         )
         if not supported.allowed:
@@ -1049,6 +1049,12 @@ def _interface_close_constraint(action: Action) -> InterfaceConstraint | None:
 def _matching_menu_entries(
     action: Action, observation: Observation
 ) -> list[MenuEntry]:
+    if action.kind is ActionKind.WALK:
+        return [
+            entry
+            for entry in observation.menus
+            if entry.option == action.option and entry.entry_type == "WALK"
+        ]
     return [entry for entry in observation.menus if _menu_entry_matches(action, entry)]
 
 

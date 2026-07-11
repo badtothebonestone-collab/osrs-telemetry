@@ -141,6 +141,47 @@ def tree_action() -> Action:
     )
 
 
+def route_target() -> NearbyObject:
+    return NearbyObject(
+        key="route:west_wall_descent_4",
+        object_id=0,
+        name="route:west_wall_descent_4",
+        kind="NAVIGATION_TILE",
+        actions=("Walk here",),
+        location=WorldPoint(3197, 3222, 0),
+        distance=3,
+        geometry=TargetGeometry(
+            available=True,
+            on_screen=True,
+            visible=True,
+            actionable=True,
+            canvas_point=ScreenPoint(60, 60),
+            screen_point=POINT,
+            screen_bounds=ScreenBounds(100, 100, 30, 30),
+        ),
+        scene_x=49,
+        scene_y=52,
+        route_candidate=True,
+    )
+
+
+def walk_action() -> Action:
+    return Action(
+        kind=ActionKind.WALK,
+        label="walk fixed route step",
+        source_tick=10,
+        option="Walk here",
+        target_key="route:west_wall_descent_4",
+        target_name="route:west_wall_descent_4",
+        target_id=0,
+        screen_point=POINT,
+        source_menu_client_tick=1010,
+        target_param0=49,
+        target_param1=52,
+        source_session_id="session-1",
+    )
+
+
 def command_evidence(sequence: int, command: str) -> CommandEvidence:
     return CommandEvidence(
         command_id=f"cmd-{sequence:08d}",
@@ -619,6 +660,76 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
                 if check.stage == "context_menu.complete"
             ],
         )
+
+    def test_walk_uses_unique_lower_context_entry_when_object_intercepts_default(self) -> None:
+        coordinator = FakeCoordinator()
+        target = route_target()
+        walk = MenuEntry("Walk here", "", "WALK", 0, 283, 160)
+        tree = MenuEntry(
+            "Chop down", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 44, 42
+        )
+        pre = observation(menus=(walk,), nearby_objects=(target,))
+        candidate = observation(
+            menus=(tree, walk), tick=11, nearby_objects=(target,)
+        )
+        menu_bounds = ScreenBounds(80, 80, 200, 100)
+        row_bounds = ScreenBounds(81, 114, 199, 15)
+        opened_entries = (
+            replace(tree, row_bounds=ScreenBounds(81, 99, 199, 15)),
+            replace(walk, row_bounds=row_bounds),
+        )
+        opened = observation(
+            menus=opened_entries,
+            tick=12,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            nearby_objects=(target,),
+        )
+        row = observation(
+            menus=opened_entries,
+            tick=13,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            menu_point=row_bounds.center,
+            nearby_objects=(target,),
+        )
+        samples = iter((candidate, opened, row))
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+        )
+
+        result = interface.execute(walk_action(), pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["adaptive"], coordinator.calls)
+        self.assertEqual(
+            PointerActivation.CONTEXT_MENU,
+            coordinator.decisions[0].activation,
+        )
+        self.assertEqual(13, result.post_move_tick)
+        self.assertEqual(1, len(coordinator.row_intents))
+        self.assertEqual(InputPurpose.CONTEXT_ROW, coordinator.row_intents[0].purpose)
+        self.assertEqual(row_bounds.center, coordinator.row_intents[0].target)
+
+    def test_walk_with_direct_default_never_opens_a_context_menu(self) -> None:
+        coordinator = FakeCoordinator()
+        target = route_target()
+        walk = MenuEntry("Walk here", "", "WALK", 0, 283, 160)
+        pre = observation(menus=(walk,), nearby_objects=(target,))
+        post = observation(menus=(walk,), tick=11, nearby_objects=(target,))
+
+        result = self.interface(coordinator, post).execute(walk_action(), pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["adaptive"], coordinator.calls)
+        self.assertEqual(
+            PointerActivation.DIRECT_LEFT,
+            coordinator.decisions[0].activation,
+        )
+        self.assertEqual([], coordinator.row_intents)
 
     def test_context_row_pointer_mismatch_blocks_left_activation_and_records_cancel(self) -> None:
         coordinator = FakeCoordinator()

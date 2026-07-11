@@ -173,14 +173,14 @@ class CoordinatedActionInterface:
 
         last_observation: list[Observation | None] = [None]
         try:
-            if action.kind is ActionKind.INTERACT_OBJECT:
-                receipt = self._execute_adaptive_object(
+            if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
+                receipt = self._execute_adaptive_target(
                     action,
                     observation,
                     last_observation,
                     safety_checks,
                 )
-            elif action.kind in {ActionKind.WALK, ActionKind.CLICK_WIDGET}:
+            elif action.kind is ActionKind.CLICK_WIDGET:
                 receipt = self._execute_direct_pointer(
                     action,
                     observation,
@@ -254,7 +254,7 @@ class CoordinatedActionInterface:
 
         return self._coordinator.execute_pointer(intent, validate=validate)
 
-    def _execute_adaptive_object(
+    def _execute_adaptive_target(
         self,
         action: Action,
         observation: Observation,
@@ -593,15 +593,22 @@ class CoordinatedActionInterface:
         action: Action,
         observation: Observation,
     ) -> MenuEntry | None:
-        matches = [
-            entry
-            for entry in observation.menus
-            if entry.option == action.option
-            and entry.target == action.target_name
-            and entry.identifier == action.target_id
-            and entry.param0 == action.target_param0
-            and entry.param1 == action.target_param1
-        ]
+        if action.kind is ActionKind.WALK:
+            matches = [
+                entry
+                for entry in observation.menus
+                if entry.option == action.option and entry.entry_type == "WALK"
+            ]
+        else:
+            matches = [
+                entry
+                for entry in observation.menus
+                if entry.option == action.option
+                and entry.target == action.target_name
+                and entry.identifier == action.target_id
+                and entry.param0 == action.target_param0
+                and entry.param1 == action.target_param1
+            ]
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
