@@ -349,7 +349,11 @@ class SafetyGate:
         action_result = _record(
             checks,
             "context_menu.action_invariants",
-            self._validate_engine_action_invariants(action, observation),
+            self._validate_engine_action_invariants(
+                action,
+                observation,
+                allow_screen_point_drift=True,
+            ),
         )
         if not action_result.allowed:
             return _evaluation(action_result, checks)
@@ -560,7 +564,11 @@ class SafetyGate:
         action_result = _record(
             checks,
             f"{stage}.action_invariants",
-            self._validate_engine_action_invariants(action, observation),
+            self._validate_engine_action_invariants(
+                action,
+                observation,
+                allow_screen_point_drift=True,
+            ),
         )
         if not action_result.allowed:
             return _evaluation(action_result, checks)
@@ -592,17 +600,23 @@ class SafetyGate:
             if target is None:
                 return _reject("target_missing")
             target_bounds = target.geometry.screen_bounds
+            fresh_point = target.geometry.screen_point
         elif action.kind is ActionKind.CLICK_WIDGET:
             selected = _select_widget(action, observation)
             if selected is None:
                 return _reject("target_missing")
             target_bounds = selected[1].screen_bounds
+            fresh_point = selected[1].screen_point
         else:
             return _reject("settled_pointer_unsupported")
-        if target_bounds is None and point != action.screen_point:
+        if not _points_close(point, fresh_point):
+            return _reject("settled_pointer_outside_fresh_region")
+        if target_bounds is None and (
+            point != action.screen_point or point != fresh_point
+        ):
             # A fresh canonical point without a rectangle is usable only as
             # an exact 1x1 region, matching the coordinator's point-only
-            # target contract. It cannot inherit the +/- tolerance.
+            # target contract. It cannot inherit either +/- tolerance.
             return _reject("target_bounds_missing")
         result = _validate_point(
             point, observation.canvas_bounds, target_bounds
@@ -647,12 +661,24 @@ class SafetyGate:
         return _allow("session_bound")
 
     def _validate_engine_action_invariants(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        allow_screen_point_drift: bool = False,
     ) -> SafetyResult:
         if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
-            return self._validate_object_action(action, observation)
+            return self._validate_object_action(
+                action,
+                observation,
+                allow_screen_point_drift=allow_screen_point_drift,
+            )
         if action.kind is ActionKind.CLICK_WIDGET:
-            return self._validate_widget_action(action, observation)
+            return self._validate_widget_action(
+                action,
+                observation,
+                allow_screen_point_drift=allow_screen_point_drift,
+            )
         if action.kind is ActionKind.PRESS_KEY:
             return self._validate_key_action(action)
         if action.kind is ActionKind.WAIT:
@@ -732,7 +758,11 @@ class SafetyGate:
         return _allow("menu_source_bound")
 
     def _validate_object_action(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        allow_screen_point_drift: bool = False,
     ) -> SafetyResult:
         if not action.target_key:
             return _reject("target_missing")
@@ -753,16 +783,21 @@ class SafetyGate:
             return _reject("target_not_actionable")
         if geometry.screen_point is None:
             return _reject("screen_point_missing")
-        if action.screen_point != geometry.screen_point:
-            return _reject("screen_point_not_verified")
-        return _validate_point(
+        point_result = _validate_reprojected_point(
             action.screen_point,
+            geometry.screen_point,
             observation.canvas_bounds,
             geometry.screen_bounds,
+            allow_drift=allow_screen_point_drift,
         )
+        return point_result
 
     def _validate_widget_action(
-        self, action: Action, observation: Observation
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        allow_screen_point_drift: bool = False,
     ) -> SafetyResult:
         selected = _select_widget(action, observation)
         if selected is None:
@@ -776,16 +811,20 @@ class SafetyGate:
             return _reject("target_name_mismatch")
         if widget.screen_point is None:
             return _reject("screen_point_missing")
-        if action.screen_point != widget.screen_point:
-            return _reject("screen_point_not_verified")
-        point_result = _validate_point(
+        point_result = _validate_reprojected_point(
             action.screen_point,
+            widget.screen_point,
             observation.canvas_bounds,
             widget.screen_bounds,
+            allow_drift=allow_screen_point_drift,
         )
         if not point_result.allowed:
             return point_result
-        return _allow("widget_safe")
+        return (
+            point_result
+            if point_result.reason == "screen_point_drift_bounded"
+            else _allow("widget_safe")
+        )
 
     def _validate_task_constraints(
         self, action: Action, observation: Observation
@@ -980,6 +1019,29 @@ def _validate_point(
         if not target_bounds.contains(point):
             return _reject("screen_point_outside_target")
     return _allow("screen_point_safe")
+
+
+def _validate_reprojected_point(
+    source_point: ScreenPoint | None,
+    fresh_point: ScreenPoint,
+    canvas_bounds: ScreenBounds | None,
+    target_bounds: ScreenBounds | None,
+    *,
+    allow_drift: bool,
+) -> SafetyResult:
+    drifted = source_point != fresh_point
+    if drifted and (
+        not allow_drift or not _points_close(source_point, fresh_point)
+    ):
+        return _reject("screen_point_not_verified")
+    result = _validate_point(fresh_point, canvas_bounds, target_bounds)
+    if not result.allowed:
+        return result
+    return (
+        _allow("screen_point_drift_bounded")
+        if drifted
+        else result
+    )
 
 
 def _valid_coordinate(value: object) -> bool:
