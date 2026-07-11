@@ -1096,7 +1096,10 @@ class InputCoordinatorTests(unittest.TestCase):
         )
 
         self.assertFalse(receipt.successful)
-        self.assertIn("cursor_transfer_gain_exceeded_x", receipt.reason)
+        self.assertEqual(
+            "cursor_transfer_gain_exceeded_x:commanded=1:observed=5:plan=1:step=1",
+            receipt.reason,
+        )
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 

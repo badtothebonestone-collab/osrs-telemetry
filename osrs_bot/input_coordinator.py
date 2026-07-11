@@ -1668,7 +1668,10 @@ class InputCoordinator:
             > abs(commanded) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
         ):
             raise _TransactionAbort(
-                f"cursor_transfer_gain_exceeded_{axis}"
+                f"cursor_transfer_gain_exceeded_{axis}:"
+                f"commanded={commanded}:observed={observed}:"
+                f"plan={transaction.pointer_plan_count}:"
+                f"step={transaction.pointer_step_count}"
             )
         return True, 0
 
