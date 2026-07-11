@@ -43,6 +43,28 @@ class FakeResponse:
 
 
 class ObservationParsingTests(unittest.TestCase):
+    def test_client_window_bounds_are_optional_but_must_contain_canvas(self) -> None:
+        payload = load_fixture()
+        geometry = payload["payloads"]["baseline"]["inputGeometry"]
+        geometry.update(
+            clientWindowX=980,
+            clientWindowY=1980,
+            clientWindowWidth=840,
+            clientWindowHeight=640,
+        )
+
+        observation = parse_observation(payload)
+
+        self.assertEqual(
+            ScreenBounds(980, 1980, 840, 640),
+            observation.client_window_bounds,
+        )
+        geometry["clientWindowWidth"] = 700
+        with self.assertRaisesRegex(
+            ObservationSchemaError, "does not contain the canvas"
+        ):
+            parse_observation(payload)
+
     def test_python_contract_tracks_java_response_and_frame_schemas(self) -> None:
         root = Path(__file__).parents[1]
         endpoint_source = (root / "src/main/java/com/osrstelemetry/PluginSnapshotEndpoint.java").read_text(encoding="utf-8")

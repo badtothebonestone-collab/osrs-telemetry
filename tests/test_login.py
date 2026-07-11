@@ -10,7 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from osrs_bot import login as login_module
-from osrs_bot.input_coordinator import InputCoordinator
+from osrs_bot.input_coordinator import InputCoordinator, InputFailureKind
 from osrs_bot.login import (
     LoginCandidate,
     LoginPromptHelper,
@@ -137,10 +137,15 @@ class FakeBackend:
         *,
         fail_at: str | None = None,
         start: tuple[int, int] = (150, 500),
+        foreground_hwnd: int = 77,
+        change_position_on_call: int | None = None,
     ) -> None:
         self.calls: list[object] = []
         self.fail_at = fail_at
         self.position = start
+        self.foreground_hwnd = foreground_hwnd
+        self.change_position_on_call = change_position_on_call
+        self.position_call_count = 0
         self.armed = False
         self.records: list[dict[str, object]] = []
         self.sequence = 0
@@ -197,6 +202,9 @@ class FakeBackend:
 
     def _current_position(self) -> tuple[int, int]:
         self._call("current_position")
+        self.position_call_count += 1
+        if self.position_call_count == self.change_position_on_call:
+            self.position = (self.position[0] + 1, self.position[1])
         return self.position
 
     def _arm(self) -> dict[str, object]:
@@ -205,8 +213,13 @@ class FakeBackend:
         self.armed = True
         return {}
 
-    def _assert_foreground(self, titles: list[str], *, expected_pid: int) -> None:
+    def _assert_foreground(self, titles: list[str], *, expected_pid: int) -> dict[str, int]:
         self._call("foreground", expected_pid)
+        return {"pid": expected_pid, "hwnd": self.foreground_hwnd}
+
+    def _window_info_at_point(self, point: tuple[int, int]) -> dict[str, int]:
+        self._call("point_owner", point)
+        return {"pid": 4242, "hwnd": 77}
 
     def _move_relative(self, dx: int, dy: int) -> dict[str, object]:
         self._call("move", {"dx": dx, "dy": dy})
@@ -247,7 +260,13 @@ class FakeBackend:
         self._call("close")
 
 
-WINDOW = RuneLiteWindow(77, 4242, "RuneLite - test", ScreenBounds(100, 100, 1000, 700))
+WINDOW = RuneLiteWindow(
+    77,
+    4242,
+    "RuneLite - test",
+    ScreenBounds(100, 100, 1000, 700),
+    ScreenBounds(88, 88, 1024, 724),
+)
 PLAY = LoginCandidate("play_now", ScreenPoint(500, 340), ScreenBounds(420, 300, 160, 80), 0.98)
 WELCOME = LoginCandidate(
     "click_here_to_play", ScreenPoint(500, 480), ScreenBounds(380, 440, 240, 80), 0.97
@@ -264,13 +283,25 @@ def build_helper(
     backends: list[FakeBackend] | None = None,
     fail_at: str | None = None,
     cursor_start: tuple[int, int] = (150, 500),
+    foreground_hwnd: int = 77,
+    cursor_change_calls: list[int | None] | None = None,
     clock: FakeClock | None = None,
 ) -> LoginPromptHelper:
     clock = clock or FakeClock()
     collection = backends if backends is not None else []
+    pending_cursor_changes = list(cursor_change_calls or ())
 
     def backend_factory() -> FakeBackend:
-        backend = FakeBackend(fail_at=fail_at, start=cursor_start)
+        backend = FakeBackend(
+            fail_at=fail_at,
+            start=cursor_start,
+            foreground_hwnd=foreground_hwnd,
+            change_position_on_call=(
+                pending_cursor_changes.pop(0)
+                if pending_cursor_changes
+                else None
+            ),
+        )
         collection.append(backend)
         return backend
 
@@ -822,7 +853,12 @@ class LoginHelperTests(unittest.TestCase):
     def test_cursor_must_start_inside_the_exact_runelite_client(self) -> None:
         backends: list[FakeBackend] = []
         helper = build_helper(
-            FakeObservations([observation("LOGIN_SCREEN", 1)]),
+            FakeObservations(
+                [
+                    observation("LOGIN_SCREEN", 1),
+                    observation("LOGIN_SCREEN", 2),
+                ]
+            ),
             lambda image: (PLAY,),
             backends=backends,
             cursor_start=(1500, 500),
@@ -832,9 +868,12 @@ class LoginHelperTests(unittest.TestCase):
 
         self.assertEqual("BLOCKED", result.status)
         self.assertIn("cursor_start_outside_verified", result.reason)
-        self.assertNotIn("mouse_down", backends[0].calls)
-        self.assertIn("stop_all", backends[0].calls)
-        self.assertIn("firmware_status", backends[0].calls)
+        self.assertEqual(2, len(backends))
+        self.assertTrue(all("mouse_down" not in backend.calls for backend in backends))
+        self.assertTrue(all("stop_all" in backend.calls for backend in backends))
+        self.assertTrue(
+            all("firmware_status" in backend.calls for backend in backends)
+        )
         self.assertFalse(result.clicks[-1].sent)
 
     def test_login_prompt_remains_safe_when_pregame_canvas_is_unavailable(self) -> None:
@@ -856,6 +895,95 @@ class LoginHelperTests(unittest.TestCase):
         self.assertTrue(result.successful)
         self.assertEqual(["play_now"], [click.name for click in result.clicks])
         self.assertTrue(result.clicks[0].receipt.successful)
+        self.assertIn("stop_all", backends[0].calls)
+        self.assertIn("disarm", backends[0].calls)
+
+    def test_login_reacquires_cursor_from_exact_window_border(self) -> None:
+        source = FakeObservations(
+            [
+                observation("LOGIN_SCREEN", 1),
+                observation("LOGGING_IN", 2),
+                observation("LOGGED_IN", 3, loaded=True),
+                observation("LOGGED_IN", 4, loaded=True),
+                observation("LOGGED_IN", 5, loaded=True),
+            ]
+        )
+        detections = iter(((PLAY,), (PLAY,), (), ()))
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            source,
+            lambda image: next(detections),
+            backends=backends,
+            cursor_start=(1103, 500),
+        )
+
+        result = helper.run(timeout_seconds=10)
+
+        self.assertTrue(result.successful)
+        self.assertEqual(["play_now"], [click.name for click in result.clicks])
+        self.assertTrue(result.clicks[0].receipt.successful)
+        self.assertIn(("move", {"dx": -1, "dy": 0}), backends[0].calls)
+        self.assertTrue(
+            result.clicks[0].receipt.firmware_status
+            and result.clicks[0].receipt.firmware_status.safe
+        )
+
+    def test_login_reobserves_once_after_safe_cursor_interference(self) -> None:
+        source = FakeObservations(
+            [
+                observation("LOGIN_SCREEN", 1),
+                observation("LOGIN_SCREEN", 2),
+                observation("LOGGING_IN", 3),
+                observation("LOGGED_IN", 4, loaded=True),
+                observation("LOGGED_IN", 5, loaded=True),
+            ]
+        )
+        detections = iter(((PLAY,), (PLAY,), (PLAY,), (PLAY,), (), ()))
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            source,
+            lambda image: next(detections),
+            backends=backends,
+            cursor_start=(600, 440),
+            cursor_change_calls=[5, None],
+        )
+
+        result = helper.run(max_clicks=1, timeout_seconds=10)
+
+        self.assertTrue(result.successful)
+        self.assertEqual(2, len(result.clicks))
+        self.assertFalse(result.clicks[0].sent)
+        self.assertIs(
+            result.clicks[0].receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertTrue(result.clicks[1].sent)
+        self.assertEqual(2, len(backends))
+        self.assertNotIn("mouse_down", backends[0].calls)
+        self.assertIn("mouse_down", backends[1].calls)
+        self.assertTrue(all("stop_all" in backend.calls for backend in backends))
+        self.assertTrue(all("disarm" in backend.calls for backend in backends))
+
+    def test_login_pins_exact_hwnd_even_when_cursor_starts_inside_client(self) -> None:
+        source = FakeObservations([observation("LOGIN_SCREEN", 1)])
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            source,
+            lambda image: (PLAY,),
+            backends=backends,
+            cursor_start=(500, 340),
+            foreground_hwnd=88,
+        )
+
+        result = helper.run(timeout_seconds=10)
+
+        self.assertFalse(result.successful)
+        self.assertIn("pointer_foreground_hwnd_mismatch", result.reason)
+        self.assertFalse(any(
+            isinstance(call, tuple) and call[0] == "move"
+            for call in backends[0].calls
+        ))
+        self.assertNotIn("mouse_down", backends[0].calls)
         self.assertIn("stop_all", backends[0].calls)
         self.assertIn("disarm", backends[0].calls)
 

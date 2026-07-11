@@ -293,7 +293,9 @@ class WoodcutBankTask:
             return
         self._set_blocked(f"unsupported verification result: {pending.kind.value}")
 
-    def discard_pending_action(self, reason: str) -> None:
+    def discard_pending_action(
+        self, reason: str, *, target_invalidated: bool = True
+    ) -> None:
         """Discard one proposal that the input boundary proved was never sent.
 
         This is not a failed verification: no activation occurred, so there is
@@ -303,6 +305,8 @@ class WoodcutBankTask:
 
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("discard reason must be non-empty text")
+        if not isinstance(target_invalidated, bool):
+            raise TypeError("target_invalidated must be bool")
         pending = self.progress.pending
         if pending is None:
             raise RuntimeError("no pending action can be discarded")
@@ -326,13 +330,16 @@ class WoodcutBankTask:
 
         self.progress.pending = None
         if pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED:
-            if self.progress.target_key is not None:
-                self._next_resource_suppression = (
-                    self.progress.target_key,
-                    "preactivation_target_invalidated",
-                )
-            self.progress.target_key = None
-            self.progress.phase = TaskPhase.FIND_TREE
+            if target_invalidated:
+                if self.progress.target_key is not None:
+                    self._next_resource_suppression = (
+                        self.progress.target_key,
+                        "preactivation_target_invalidated",
+                    )
+                self.progress.target_key = None
+                self.progress.phase = TaskPhase.FIND_TREE
+            else:
+                self.progress.phase = TaskPhase.CHOP
         elif pending.kind is VerificationKind.ITEM_QUANTITY_EQUALS:
             self.progress.phase = TaskPhase.DEPOSIT_LOGS
         elif pending.kind is VerificationKind.CAMERA_POSE_CHANGED:

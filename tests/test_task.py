@@ -560,6 +560,26 @@ class WoodcutBankTaskTests(unittest.TestCase):
             rejected[failed.key],
         )
 
+    def test_cursor_invalidated_chop_retries_same_target_without_suppression(self) -> None:
+        task = WoodcutBankTask()
+        selected = tree(key="resource:cursor-retry")
+        state = observation(objects=(selected,), tick=20)
+        task.decide(state)
+        proposal = task.decide(state)
+        self.assertEqual(selected.key, proposal.action.target_key)
+
+        task.discard_pending_action(
+            "cursor_changed_after_pointer_validation",
+            target_invalidated=False,
+        )
+
+        self.assertEqual(TaskPhase.CHOP, task.progress.phase)
+        self.assertEqual(selected.key, task.progress.target_key)
+        self.assertIsNone(task.progress.pending)
+        replanned = task.decide(replace(state, tick=21))
+        self.assertEqual(selected.key, replanned.action.target_key)
+        self.assertEqual(TaskPhase.VERIFY_LOGS, task.progress.phase)
+
     def test_discard_requires_a_pending_action_and_nonempty_reason(self) -> None:
         task = WoodcutBankTask()
 

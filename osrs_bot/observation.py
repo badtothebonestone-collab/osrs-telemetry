@@ -225,6 +225,47 @@ def _canvas_transform(baseline: Mapping[str, Any]) -> _CanvasTransform | None:
         raise ObservationSchemaError("inputGeometry canvas dimensions must be positive")
     return _CanvasTransform(ScreenBounds(x, y, width, height), source_width, source_height)
 
+
+def _client_window_bounds(
+    input_geometry: Mapping[str, Any],
+    canvas_bounds: ScreenBounds | None,
+) -> ScreenBounds | None:
+    fields = (
+        "clientWindowX",
+        "clientWindowY",
+        "clientWindowWidth",
+        "clientWindowHeight",
+    )
+    values = tuple(input_geometry.get(field) for field in fields)
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ObservationSchemaError(
+            "inputGeometry client window bounds are incomplete"
+        )
+    x, y, width, height = (
+        _integer(value, f"inputGeometry.{field}")
+        for field, value in zip(fields, values, strict=True)
+    )
+    if width <= 0 or height <= 0:
+        raise ObservationSchemaError(
+            "inputGeometry client window dimensions must be positive"
+        )
+    bounds = ScreenBounds(x, y, width, height)
+    if canvas_bounds is not None and not (
+        bounds.contains(ScreenPoint(canvas_bounds.x, canvas_bounds.y))
+        and bounds.contains(
+            ScreenPoint(
+                canvas_bounds.x + canvas_bounds.width - 1,
+                canvas_bounds.y + canvas_bounds.height - 1,
+            )
+        )
+    ):
+        raise ObservationSchemaError(
+            "inputGeometry client window does not contain the canvas"
+        )
+    return bounds
+
 def _world_point(raw: Mapping[str, Any], path: str) -> WorldPoint | None:
     values = (raw.get("worldX"), raw.get("worldY"), raw.get("plane"))
     if all(value is None for value in values):
@@ -710,6 +751,10 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
         optional=True,
     )
     transform = _canvas_transform(baseline)
+    client_window_bounds = _client_window_bounds(
+        input_geometry,
+        transform.canvas_bounds if transform else None,
+    ) if input_geometry else None
     camera_viewport = _mapping(
         baseline.get("cameraViewport"),
         "payloads.baseline.cameraViewport",
@@ -794,6 +839,7 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
                        timestamp=frame.captured_at, tick=frame.source_tick, status=status,
                        fresh=_boolean(freshness.get("fresh"), "freshness.fresh"),
                        cache_wall_clock_fresh=_boolean(freshness.get("sourceCaptureFresh"), "freshness.sourceCaptureFresh"),
+                       client_window_bounds=client_window_bounds,
                        scene_playable=_boolean(baseline.get("scenePlayable"), "baseline.scenePlayable"),
                        session_id=frame.session_id, warnings=_string_tuple(root.get("warnings"), "warnings"),
                        missing_capabilities=_string_tuple(root.get("missingCapabilities"), "missingCapabilities"),

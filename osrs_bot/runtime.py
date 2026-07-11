@@ -18,7 +18,7 @@ from .engine_frame import (
     EngineStage,
     ObservationReference,
 )
-from .input_coordinator import InputCoordinator
+from .input_coordinator import InputCoordinator, InputFailureKind
 from .model import Action, ActionKind, Observation, VerificationSpec
 from .observation import ObservationClient
 from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
@@ -47,10 +47,21 @@ def _may_replan_unsent_action(
     return bool(
         consecutive_replans < MAX_CONSECUTIVE_UNSENT_REPLANS
         and execution.status == "BLOCKED"
-        and execution.unsent_disposition
-        is UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
-        and execution.cleanup_confirmed
         and receipt is not None
+        and (
+            (
+                execution.unsent_disposition
+                is UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
+                and receipt.failure_kind is InputFailureKind.NONE
+            )
+            or (
+                execution.unsent_disposition
+                is UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+                and receipt.failure_kind
+                is InputFailureKind.CURSOR_STATE_INVALIDATED
+            )
+        )
+        and execution.cleanup_confirmed
         and all(
             command.command in _PREACTIVATION_COMMANDS
             for command in receipt.commands
@@ -289,6 +300,7 @@ class RuntimeResult:
             payload["execution"] = {
                 "status": self.execution.status,
                 "reason": self.execution.reason,
+                "unsentDisposition": self.execution.unsent_disposition.value,
                 "preMoveTick": self.execution.pre_move_tick,
                 "postMoveTick": self.execution.post_move_tick,
                 "stopAllConfirmed": self.execution.stop_all_confirmed,
@@ -625,7 +637,13 @@ class TaskRuntime:
                 consecutive_unsent_replans,
             ):
                 try:
-                    self._task.discard_pending_action(execution.reason)
+                    self._task.discard_pending_action(
+                        execution.reason,
+                        target_invalidated=(
+                            execution.unsent_disposition
+                            is UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
+                        ),
+                    )
                 except Exception as error:
                     failure_reason = (
                         "unsent action replan failed: "

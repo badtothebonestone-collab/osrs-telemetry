@@ -9,6 +9,7 @@ from .input_coordinator import (
     ApprovedKeyIntent,
     ApprovedPointerIntent,
     InputCoordinator,
+    InputFailureKind,
     InputPurpose,
     InputReceipt,
     InputValidation,
@@ -59,6 +60,7 @@ class _ActionBlocked(RuntimeError):
 class UnsentActionDisposition(str, Enum):
     NONE = "none"
     TARGET_EVIDENCE_INVALIDATED = "target_evidence_invalidated"
+    CURSOR_STATE_INVALIDATED = "cursor_state_invalidated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +238,11 @@ class CoordinatedActionInterface:
                     else None
                 ),
                 safety_checks=tuple(safety_checks),
+            )
+
+        if receipt.failure_kind is InputFailureKind.CURSOR_STATE_INVALIDATED:
+            unsent_disposition = (
+                UnsentActionDisposition.CURSOR_STATE_INVALIDATED
             )
 
         return ExecutionResult(
@@ -450,6 +457,7 @@ class CoordinatedActionInterface:
             ),
             expected_pid=self._required_pid(observation),
             button=MouseButton.LEFT,
+            reacquisition_bounds=observation.client_window_bounds,
         )
 
     @staticmethod

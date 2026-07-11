@@ -17,6 +17,7 @@ from osrs_bot.input_coordinator import (
     ApprovedPointerIntent,
     CommandEvidence,
     FirmwareSafetyStatus,
+    InputFailureKind,
     InputPurpose,
     InputReceipt,
     InputCoordinator,
@@ -218,6 +219,7 @@ def input_receipt(
     cleanup: bool = True,
     context_cancel_attempted: bool = False,
     context_cancel_acknowledged: bool = False,
+    failure_kind: InputFailureKind = InputFailureKind.NONE,
 ) -> InputReceipt:
     evidence = tuple(
         command_evidence(index, command)
@@ -242,6 +244,7 @@ def input_receipt(
         ledger_complete=True,
         ledger_closed=True,
         backend_closed=True,
+        failure_kind=failure_kind,
         context_cancel_attempted=context_cancel_attempted,
         context_cancel_acknowledged=context_cancel_acknowledged,
         errors=() if status == "PASS" else (reason,),
@@ -658,6 +661,7 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
 
     def test_context_row_is_resolved_then_revalidated_from_new_exact_evidence(self) -> None:
         coordinator = FakeCoordinator()
+        outer = ScreenBounds(40, 40, 520, 430)
         generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
         exact = MenuEntry("Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52)
         candidate = observation(menus=(generic, exact), tick=11)
@@ -688,13 +692,17 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = interface.execute(tree_action(), self.pre)
+        result = interface.execute(
+            tree_action(), replace(self.pre, client_window_bounds=outer)
+        )
 
         self.assertEqual("SENT", result.status)
         self.assertEqual(13, result.post_move_tick)
         self.assertEqual(PointerActivation.CONTEXT_MENU, coordinator.decisions[0].activation)
         self.assertEqual(1, len(coordinator.row_intents))
         row_intent = coordinator.row_intents[0]
+        self.assertEqual(outer, coordinator.pointer_intents[0].reacquisition_bounds)
+        self.assertIsNone(row_intent.reacquisition_bounds)
         self.assertEqual(InputPurpose.CONTEXT_ROW, row_intent.purpose)
         self.assertEqual(row_bounds.center, row_intent.target)
         self.assertEqual(
@@ -1350,7 +1358,11 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             close_bank=close,
         )
         location = WorldPoint(3208, 3220, 2)
-        pre = observation(menus=(), widgets=widgets, location=location)
+        outer = ScreenBounds(40, 40, 520, 430)
+        pre = replace(
+            observation(menus=(), widgets=widgets, location=location),
+            client_window_bounds=outer,
+        )
         fresh = observation(menus=(), tick=11, widgets=widgets, location=location)
         action = Action(
             ActionKind.CLICK_WIDGET,
@@ -1376,6 +1388,42 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         intent = coordinator.pointer_intents[0]
         self.assertEqual(InputPurpose.GAMEPLAY_WIDGET, intent.purpose)
         self.assertEqual(ScreenBounds(107, 107, 7, 7), intent.target_bounds)
+        self.assertEqual(outer, intent.reacquisition_bounds)
+
+    def test_typed_cursor_state_failure_maps_without_reason_inference(self) -> None:
+        reason = "cursor_changed_after_pointer_validation"
+        typed = input_receipt(
+            mode="adaptive_pointer",
+            status="BLOCKED",
+            reason=reason,
+            commands=("ARM", "MOVE", "STOP_ALL", "DISARM", "STATUS"),
+            failure_kind=InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        typed_result = self.interface(
+            FakeCoordinator(forced_receipt=typed), self.hover
+        ).execute(tree_action(), self.pre)
+        self.assertIs(
+            typed_result.unsent_disposition,
+            UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+        )
+
+        lookalike = replace(typed, failure_kind=InputFailureKind.NONE)
+        untyped_result = self.interface(
+            FakeCoordinator(forced_receipt=lookalike), self.hover
+        ).execute(tree_action(), self.pre)
+        self.assertIs(
+            untyped_result.unsent_disposition,
+            UnsentActionDisposition.NONE,
+        )
+
+        conflict_result = self.interface(
+            FakeCoordinator(forced_receipt=typed),
+            observation(menus=(), tick=11),
+        ).execute(tree_action(), self.pre)
+        self.assertIs(
+            conflict_result.unsent_disposition,
+            UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+        )
 
     def test_execution_result_is_immutable_and_has_no_mutable_backend_status(self) -> None:
         coordinator = FakeCoordinator()

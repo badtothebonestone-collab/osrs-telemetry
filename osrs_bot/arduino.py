@@ -455,6 +455,28 @@ def _foreground_window_info() -> dict[str, Any]:
         return {"available": False, "error": f"{type(error).__name__}: {error}"}
 
 
+def _window_info_at_point(point: tuple[int, int]) -> dict[str, Any]:
+    if os.name != "nt":
+        return {"available": False}
+    try:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        user32.WindowFromPoint.argtypes = (wintypes.POINT,)
+        user32.WindowFromPoint.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        child = user32.WindowFromPoint(wintypes.POINT(int(point[0]), int(point[1])))
+        root = user32.GetAncestor(child, 2) or child  # GA_ROOT
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
+        return {
+            "available": bool(root),
+            "hwnd": int(root or 0),
+            "pid": int(pid.value),
+        }
+    except Exception as error:  # noqa: BLE001
+        return {"available": False, "error": f"{type(error).__name__}: {error}"}
+
+
 def _foreground_allowed(info: dict[str, Any] | None, allowed_titles: list[str] | tuple[str, ...] | None) -> bool:
     if not allowed_titles:
         return True
@@ -1660,6 +1682,9 @@ class _ArduinoHIDTransport:
         if expected_pid is None or int(info.get("pid") or 0) != int(expected_pid):
             raise ArduinoHIDError("foreground RuneLite process does not own the telemetry observation")
         return info
+
+    def _window_info_at_point(self, point: tuple[int, int]) -> dict[str, Any]:
+        return _window_info_at_point(point)
 
 
 def _read_monitor_json(path: str | Path | None) -> dict[str, Any] | None:

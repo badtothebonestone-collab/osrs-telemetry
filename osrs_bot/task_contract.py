@@ -194,7 +194,9 @@ class Task(Protocol):
     def apply_verification(self, result: "VerificationResult") -> None:
         ...
 
-    def discard_pending_action(self, reason: str) -> None:
+    def discard_pending_action(
+        self, reason: str, *, target_invalidated: bool = True
+    ) -> None:
         """Forget an action that was proven unsent so fresh evidence can replan."""
 
         ...

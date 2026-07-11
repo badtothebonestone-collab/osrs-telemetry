@@ -177,6 +177,7 @@ class Observation:
     status: str
     fresh: bool
     cache_wall_clock_fresh: bool
+    client_window_bounds: ScreenBounds | None = None
     scene_playable: bool = False
     session_id: str | None = None
     warnings: tuple[str, ...] = ()

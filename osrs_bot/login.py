@@ -14,6 +14,7 @@ from PIL import Image, ImageChops, ImageGrab, ImageStat
 from .input_coordinator import (
     ApprovedPointerIntent,
     InputCoordinator,
+    InputFailureKind,
     InputPurpose,
     InputReceipt,
     InputValidation,
@@ -59,6 +60,7 @@ class RuneLiteWindow:
     pid: int
     title: str
     client_bounds: ScreenBounds
+    outer_bounds: ScreenBounds | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,7 +549,36 @@ def find_runelite_window(expected_pid: int) -> RuneLiteWindow:
             int(client.bottom - client.top),
         )
         if bounds.width >= 500 and bounds.height >= 400:
-            matches.append(RuneLiteWindow(int(hwnd), int(pid.value), title, bounds))
+            outer_rect = _WinRect()
+            outer_bounds = None
+            if user32.GetWindowRect(hwnd, ctypes.byref(outer_rect)):
+                candidate_outer = ScreenBounds(
+                    int(outer_rect.left),
+                    int(outer_rect.top),
+                    int(outer_rect.right - outer_rect.left),
+                    int(outer_rect.bottom - outer_rect.top),
+                )
+                client_corners = (
+                    ScreenPoint(bounds.x, bounds.y),
+                    ScreenPoint(
+                        bounds.x + bounds.width - 1,
+                        bounds.y + bounds.height - 1,
+                    ),
+                )
+                if (
+                    candidate_outer.width > 0
+                    and candidate_outer.height > 0
+                    and all(
+                        candidate_outer.contains(point)
+                        for point in client_corners
+                    )
+                ):
+                    outer_bounds = candidate_outer
+            matches.append(
+                RuneLiteWindow(
+                    int(hwnd), int(pid.value), title, bounds, outer_bounds
+                )
+            )
         return True
 
     user32.EnumWindows(collect, 0)
@@ -635,6 +666,7 @@ class LoginPromptHelper:
         started = self._monotonic()
         deadline = started + runtime_limit
         clicks: list[LoginClick] = []
+        cursor_replans = 0
         misses = 0
         loaded_proof: tuple[int, str | None, int] | None = None
 
@@ -687,7 +719,7 @@ class LoginPromptHelper:
                 return self._result("BLOCKED", "ambiguous_supported_prompts", False, started, clicks)
             if candidates[0].name == "disconnected_ok" and observation.game_state != "LOGIN_SCREEN":
                 return self._result("BLOCKED", "disconnected_dialog_outside_login_screen", False, started, clicks)
-            if len(clicks) >= click_limit:
+            if sum(click.sent for click in clicks) >= click_limit:
                 return self._result("BLOCKED", "maximum_login_clicks_reached", False, started, clicks)
 
             local = candidates[0]
@@ -706,6 +738,13 @@ class LoginPromptHelper:
                 )
             clicks.append(click)
             if not receipt.successful:
+                if (
+                    cursor_replans < 1
+                    and self._may_retry_cursor_state(receipt)
+                ):
+                    cursor_replans += 1
+                    self._sleep(self._poll_seconds)
+                    continue
                 result_status = "BLOCKED" if receipt.status == "BLOCKED" else "ERROR"
                 return self._result(
                     result_status,
@@ -722,6 +761,36 @@ class LoginPromptHelper:
                 return self._result("BLOCKED", f"{local.name}_did_not_transition", False, started, clicks)
 
         return self._result("BLOCKED", "login_assist_timeout", False, started, clicks)
+
+    @staticmethod
+    def _may_retry_cursor_state(receipt: InputReceipt) -> bool:
+        preactivation = {
+            "STOP_ALL",
+            "PING",
+            "IDENTIFY",
+            "CAPS",
+            "STATUS",
+            "ARM",
+            "MOVE",
+            "DISARM",
+        }
+        return bool(
+            receipt.status == "BLOCKED"
+            and receipt.failure_kind
+            is InputFailureKind.CURSOR_STATE_INVALIDATED
+            and receipt.stop_all_acknowledged
+            and receipt.disarm_acknowledged
+            and receipt.firmware_status_acknowledged
+            and receipt.firmware_status is not None
+            and receipt.firmware_status.safe
+            and receipt.unresolved_command_count == 0
+            and receipt.failed_command_count == 0
+            and receipt.ack_missing_count == 0
+            and receipt.ledger_complete
+            and receipt.ledger_closed
+            and receipt.backend_closed
+            and all(command.command in preactivation for command in receipt.commands)
+        )
 
     def _wait_for_transition(
         self,
@@ -780,7 +849,9 @@ class LoginPromptHelper:
             movement_bounds=window.client_bounds,
             target_bounds=candidate.match_bounds,
             expected_pid=window.pid,
+            expected_hwnd=window.hwnd,
             button=MouseButton.LEFT,
+            reacquisition_bounds=window.outer_bounds,
         )
 
         def validate(

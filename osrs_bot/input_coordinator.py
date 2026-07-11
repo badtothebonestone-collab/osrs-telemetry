@@ -24,6 +24,8 @@ MAX_POINTER_FEEDBACK_PLANS = 64
 MAX_FEEDBACK_PLAN_AXIS_DELTA = 64
 MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT = 4
 CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT = 8
+MAX_CURSOR_REACQUISITION_GAP_DEVICE_PX = 64
+MAX_CURSOR_REACQUISITION_STEPS = 72
 MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES = 1
 MAX_TRANSACTION_NO_EFFECT_EVENTS = 8
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
@@ -82,6 +84,11 @@ class InputPurpose(str, Enum):
     GAMEPLAY_KEY = "gameplay_key"
 
 
+class InputFailureKind(str, Enum):
+    NONE = "none"
+    CURSOR_STATE_INVALIDATED = "cursor_state_invalidated"
+
+
 class MouseButton(str, Enum):
     LEFT = "left"
     RIGHT = "right"
@@ -107,7 +114,9 @@ class ApprovedPointerIntent:
     movement_bounds: ScreenBounds
     target_bounds: ScreenBounds
     expected_pid: int
+    expected_hwnd: int | None = None
     button: MouseButton = MouseButton.LEFT
+    reacquisition_bounds: ScreenBounds | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -127,8 +136,28 @@ class ApprovedPointerIntent:
             raise ValueError("target_bounds must be contained by movement_bounds")
         if not target_bounds.contains(self.target):
             raise ValueError("target must be inside target_bounds")
+        if self.reacquisition_bounds is not None:
+            reacquisition = _validate_bounds(
+                self.reacquisition_bounds, "reacquisition_bounds"
+            )
+            if self.purpose not in {
+                InputPurpose.LOGIN_PROMPT,
+                InputPurpose.GAMEPLAY_OBJECT,
+                InputPurpose.GAMEPLAY_WIDGET,
+            }:
+                raise ValueError(
+                    "reacquisition_bounds are limited to initial login or gameplay targets"
+                )
+            if not _bounds_contains_bounds(reacquisition, movement):
+                raise ValueError(
+                    "reacquisition_bounds must contain movement_bounds"
+                )
         if not _is_int(self.expected_pid) or self.expected_pid <= 0:
             raise ValueError("expected_pid must be a positive integer")
+        if self.expected_hwnd is not None and (
+            not _is_int(self.expected_hwnd) or self.expected_hwnd <= 0
+        ):
+            raise ValueError("expected_hwnd must be a positive integer when provided")
         if not isinstance(self.button, MouseButton):
             raise TypeError("button must be MouseButton")
 
@@ -378,6 +407,7 @@ class InputReceipt:
     ledger_complete: bool
     ledger_closed: bool
     backend_closed: bool
+    failure_kind: InputFailureKind = InputFailureKind.NONE
     context_cancel_attempted: bool = False
     context_cancel_acknowledged: bool = False
     errors: tuple[str, ...] = ()
@@ -402,6 +432,10 @@ class InputReceipt:
         )
         if self.status not in {"PASS", "BLOCKED", "ERROR"}:
             raise ValueError("status is unsupported")
+        if not isinstance(self.failure_kind, InputFailureKind):
+            raise TypeError("failure_kind must be an InputFailureKind")
+        if self.status == "PASS" and self.failure_kind is not InputFailureKind.NONE:
+            raise ValueError("a successful receipt cannot carry a failure kind")
         reason = _clean_text(self.reason)
         if not reason:
             raise ValueError("reason must be non-empty")
@@ -511,6 +545,7 @@ class InputReceipt:
             "intentIds": list(self.intent_ids),
             "status": self.status,
             "reason": self.reason,
+            "failureKind": self.failure_kind.value,
             "successful": self.successful,
             "wireProofComplete": self.wire_proof_complete,
             "connected": self.connected,
@@ -558,6 +593,8 @@ class _Backend(Protocol):
         expected_pid: int | None = None,
     ) -> dict[str, Any]: ...
 
+    def _window_info_at_point(self, point: tuple[int, int]) -> dict[str, Any]: ...
+
     def _mouse_down(self, *, button: str = "left") -> None: ...
 
     def _mouse_up(self, *, button: str = "left") -> None: ...
@@ -574,9 +611,26 @@ class _Backend(Protocol):
 
 
 class _TransactionAbort(RuntimeError):
-    def __init__(self, reason: str, *, blocked: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        blocked: bool = False,
+        failure_kind: InputFailureKind = InputFailureKind.NONE,
+    ) -> None:
         super().__init__(_clean_text(reason, fallback="input_transaction_aborted"))
         self.blocked = blocked
+        if not isinstance(failure_kind, InputFailureKind):
+            raise TypeError("failure_kind must be an InputFailureKind")
+        self.failure_kind = failure_kind
+
+
+def _cursor_state_invalidated(reason: str) -> _TransactionAbort:
+    return _TransactionAbort(
+        reason,
+        blocked=True,
+        failure_kind=InputFailureKind.CURSOR_STATE_INVALIDATED,
+    )
 
 
 def _command_from_mapping(raw: object) -> CommandEvidence:
@@ -710,6 +764,7 @@ class _Transaction:
         self.pointer_plan_count = 0
         self.pointer_step_count = 0
         self.pointer_no_effect_count = 0
+        self.pointer_hwnd: int | None = None
 
     def add_error(self, reason: object) -> None:
         text = _clean_text(reason, fallback="unknown_input_error")
@@ -794,6 +849,7 @@ class _TransactionState:
     context_cancel_acknowledged: bool = False
     body_status: str = "ERROR"
     body_reason: str = "input_transaction_not_executed"
+    failure_kind: InputFailureKind = InputFailureKind.NONE
 
 
 class InputCoordinator:
@@ -1080,6 +1136,7 @@ class InputCoordinator:
             ledger_complete=receipt.ledger_complete,
             ledger_closed=receipt.ledger_closed,
             backend_closed=receipt.backend_closed,
+            failure_kind=receipt.failure_kind,
             context_cancel_attempted=receipt.context_cancel_attempted,
             context_cancel_acknowledged=receipt.context_cancel_acknowledged,
             errors=receipt.errors,
@@ -1266,6 +1323,7 @@ class InputCoordinator:
             except _TransactionAbort as error:
                 state.body_status = "BLOCKED" if error.blocked else "ERROR"
                 state.body_reason = str(error)
+                state.failure_kind = error.failure_kind
                 if transaction is not None:
                     transaction.add_error(str(error))
             except Exception as error:  # noqa: BLE001 - fail closed, then clean up
@@ -1285,9 +1343,13 @@ class InputCoordinator:
                         try:
                             if context_pid is None:
                                 raise RuntimeError("context PID unavailable")
-                            self._assert_foreground(backend, context_pid)
+                            self._assert_pinned_pointer_foreground(
+                                transaction, context_pid
+                            )
                             self._ensure_firmware_armed(transaction)
-                            self._assert_foreground(backend, context_pid)
+                            self._assert_pinned_pointer_foreground(
+                                transaction, context_pid
+                            )
                             self._assert_firmware_armed(
                                 transaction, phase="before_context_cancel"
                             )
@@ -1357,11 +1419,13 @@ class InputCoordinator:
     ) -> ScreenPoint:
         backend = transaction.backend
         self._ensure_firmware_armed(transaction)
-        self._assert_foreground(backend, intent.expected_pid)
+        self._assert_pointer_foreground(transaction, intent)
         start = self._current_position(backend)
         if not intent.movement_bounds.contains(start):
-            raise _TransactionAbort(
-                "cursor_start_outside_verified_movement_bounds", blocked=True
+            start = self._reacquire_cursor_start(
+                transaction,
+                intent,
+                start,
             )
         actual = start
         x_calibrated = False
@@ -1451,9 +1515,11 @@ class InputCoordinator:
             transaction.pointer_plan_count += 1
 
             for step in plan.steps:
-                self._assert_foreground(backend, intent.expected_pid)
+                self._assert_pointer_foreground(transaction, intent)
                 if not intent.movement_bounds.contains(actual):
-                    raise _TransactionAbort("cursor_left_verified_movement_bounds")
+                    raise _cursor_state_invalidated(
+                        "cursor_left_verified_movement_bounds"
+                    )
                 self._assert_delayed_command_compatible(
                     delayed=x_delayed_command,
                     commanded=step.dx,
@@ -1482,9 +1548,11 @@ class InputCoordinator:
                 transaction.pointer_step_count += 1
                 self._sleep(plan.timestep_seconds)
                 actual = self._current_position(backend)
-                self._assert_foreground(backend, intent.expected_pid)
+                self._assert_pointer_foreground(transaction, intent)
                 if not intent.movement_bounds.contains(actual):
-                    raise _TransactionAbort("cursor_left_verified_movement_bounds")
+                    raise _cursor_state_invalidated(
+                        "cursor_left_verified_movement_bounds"
+                    )
                 (
                     x_calibrated,
                     x_no_effect_retries,
@@ -1517,7 +1585,7 @@ class InputCoordinator:
             # bounded correction trajectory is needed.
             self._sleep(plan.timestep_seconds)
             settled = self._current_position(backend)
-            self._assert_foreground(backend, intent.expected_pid)
+            self._assert_pointer_foreground(transaction, intent)
             if settled != actual:
                 (
                     x_calibrated,
@@ -1547,7 +1615,9 @@ class InputCoordinator:
                 )
             actual = settled
             if not intent.movement_bounds.contains(actual):
-                raise _TransactionAbort("cursor_left_verified_movement_bounds")
+                raise _cursor_state_invalidated(
+                    "cursor_left_verified_movement_bounds"
+                )
             # Device-pixel coordinates and integer Arduino HID deltas need not
             # share a one-pixel lattice (for example at 175% display scaling).
             # Accept only a fully settled plan endpoint inside the caller's
@@ -1566,10 +1636,207 @@ class InputCoordinator:
 
         final = self._current_position(backend)
         if not intent.movement_bounds.contains(final):
-            raise _TransactionAbort("cursor_final_position_outside_verified_bounds")
+            raise _cursor_state_invalidated(
+                "cursor_final_position_outside_verified_bounds"
+            )
         if not intent.target_bounds.contains(final):
             raise _TransactionAbort("cursor_target_outside_verified_target_bounds")
         return final
+
+    def _reacquire_cursor_start(
+        self,
+        transaction: _Transaction,
+        intent: ApprovedPointerIntent,
+        start: ScreenPoint,
+    ) -> ScreenPoint:
+        """Move a freshly observed outer-window cursor into the strict region.
+
+        This is movement-only recovery for a manual cursor handoff or window
+        resize. It never activates input and hands control to the ordinary
+        client/canvas planner only after an unchanged sample has at least one
+        transfer unit of inward headroom.
+        """
+
+        outer = intent.reacquisition_bounds
+        if outer is None or not outer.contains(start):
+            raise _cursor_state_invalidated(
+                "cursor_start_outside_verified_movement_bounds"
+            )
+        self._assert_pointer_foreground(transaction, intent)
+        pinned_hwnd = transaction.pointer_hwnd
+        if pinned_hwnd is None:
+            raise _TransactionAbort(
+                "pointer_foreground_hwnd_unavailable", blocked=True
+            )
+        self._assert_point_owned_by_window(
+            transaction.backend,
+            start,
+            expected_pid=intent.expected_pid,
+            expected_hwnd=pinned_hwnd,
+        )
+        bounds = intent.movement_bounds
+        left = bounds.x
+        right = bounds.x + bounds.width - 1
+        top = bounds.y
+        bottom = bounds.y + bounds.height - 1
+        outside = (
+            max(0, left - start.x),
+            max(0, start.x - right),
+            max(0, top - start.y),
+            max(0, start.y - bottom),
+        )
+        outside_axes = int(bool(outside[0] or outside[1])) + int(
+            bool(outside[2] or outside[3])
+        )
+        if outside_axes != 1:
+            raise _cursor_state_invalidated(
+                "cursor_reacquisition_requires_one_outside_axis"
+            )
+        gap = max(outside)
+        if gap > MAX_CURSOR_REACQUISITION_GAP_DEVICE_PX:
+            raise _cursor_state_invalidated(
+                "cursor_reacquisition_gap_exceeded"
+            )
+
+        inset = CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
+        if outside[0]:
+            direction = 1
+            axis = "x"
+            destination = left + inset
+            cross_margins = (start.y - top, bottom - start.y)
+        elif outside[1]:
+            direction = -1
+            axis = "x"
+            destination = right - inset
+            cross_margins = (start.y - top, bottom - start.y)
+        elif outside[2]:
+            direction = 1
+            axis = "y"
+            destination = top + inset
+            cross_margins = (start.x - left, right - start.x)
+        else:
+            direction = -1
+            axis = "y"
+            destination = bottom - inset
+            cross_margins = (start.x - left, right - start.x)
+        if min(cross_margins) < inset:
+            raise _TransactionAbort(
+                "cursor_reacquisition_cross_axis_headroom_insufficient",
+                blocked=True,
+            )
+
+        if transaction.pointer_plan_count >= self._max_correction_plans + 1:
+            raise _TransactionAbort(
+                "pointer transaction exceeds the total feedback plan limit"
+            )
+        transaction.pointer_plan_count += 1
+
+        def remaining(point: ScreenPoint) -> int:
+            coordinate = point.x if axis == "x" else point.y
+            return max(0, (destination - coordinate) * direction)
+
+        def ready(point: ScreenPoint) -> bool:
+            return bounds.contains(point) and remaining(point) == 0
+
+        actual = start
+        for step_index in range(MAX_CURSOR_REACQUISITION_STEPS + 1):
+            if ready(actual):
+                self._sleep(self._pointer_timestep_seconds)
+                settled = self._current_position(transaction.backend)
+                self._assert_pointer_foreground(transaction, intent)
+                self._assert_point_owned_by_window(
+                    transaction.backend,
+                    settled,
+                    expected_pid=intent.expected_pid,
+                    expected_hwnd=pinned_hwnd,
+                )
+                if settled != actual:
+                    raise _cursor_state_invalidated(
+                        "cursor_reacquisition_did_not_settle"
+                    )
+                return actual
+            if step_index >= MAX_CURSOR_REACQUISITION_STEPS:
+                break
+            if transaction.pointer_step_count >= self._max_pointer_steps:
+                raise _TransactionAbort(
+                    "pointer motion exceeds the total step limit"
+                )
+            before = actual
+            command_dx = direction if axis == "x" else 0
+            command_dy = direction if axis == "y" else 0
+            self._assert_pointer_foreground(transaction, intent)
+            self._assert_point_owned_by_window(
+                transaction.backend,
+                before,
+                expected_pid=intent.expected_pid,
+                expected_hwnd=pinned_hwnd,
+            )
+            try:
+                self._assert_transfer_headroom(
+                    before, command_dx, command_dy, outer
+                )
+            except _TransactionAbort as error:
+                raise _TransactionAbort(
+                    "cursor_reacquisition_outer_headroom_insufficient",
+                    blocked=True,
+                ) from error
+            acknowledged, _ = transaction.invoke(
+                "MOVE",
+                lambda dx=command_dx, dy=command_dy: (
+                    transaction.backend._move_relative(dx, dy)
+                ),
+            )
+            if not acknowledged:
+                raise _TransactionAbort("move_not_acknowledged")
+            transaction.pointer_step_count += 1
+            self._sleep(self._pointer_timestep_seconds)
+            actual = self._current_position(transaction.backend)
+            self._assert_pointer_foreground(transaction, intent)
+            if actual == before:
+                # Permit one delayed/coalesced cursor report, but never issue a
+                # second command while the first is unresolved.
+                self._sleep(self._pointer_timestep_seconds)
+                actual = self._current_position(transaction.backend)
+                self._assert_pointer_foreground(transaction, intent)
+            observed_axis = (
+                actual.x - before.x if axis == "x" else actual.y - before.y
+            )
+            observed_cross = (
+                actual.y - before.y if axis == "x" else actual.x - before.x
+            )
+            if observed_cross != 0:
+                raise _cursor_state_invalidated(
+                    "cursor_reacquisition_cross_axis_motion"
+                )
+            if observed_axis == 0:
+                raise _TransactionAbort(
+                    "cursor_reacquisition_no_effect", blocked=True
+                )
+            if (observed_axis > 0) != (direction > 0):
+                raise _cursor_state_invalidated(
+                    "cursor_reacquisition_direction_mismatch"
+                )
+            if abs(observed_axis) > MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT:
+                raise _TransactionAbort(
+                    "cursor_reacquisition_transfer_gain_exceeded", blocked=True
+                )
+            if not outer.contains(actual):
+                raise _cursor_state_invalidated(
+                    "cursor_left_verified_reacquisition_bounds"
+                )
+            self._assert_point_owned_by_window(
+                transaction.backend,
+                actual,
+                expected_pid=intent.expected_pid,
+                expected_hwnd=pinned_hwnd,
+            )
+            if remaining(actual) >= remaining(before):
+                raise _cursor_state_invalidated(
+                    "cursor_reacquisition_made_no_progress"
+                )
+        raise _TransactionAbort(
+            "cursor_reacquisition_step_limit_exceeded", blocked=True
+        )
 
     @staticmethod
     def _feedback_axis_command(
@@ -1753,7 +2020,7 @@ class InputCoordinator:
         if commanded == 0:
             if delayed_command == 0:
                 if observed != 0:
-                    raise _TransactionAbort(
+                    raise _cursor_state_invalidated(
                         f"cursor_feedback_uncommanded_axis_{axis}"
                     )
                 return calibrated, no_effect_retries, 0
@@ -1788,7 +2055,7 @@ class InputCoordinator:
                 return False, no_effect_retries + 1, commanded
             raise _TransactionAbort(f"cursor_feedback_no_effect_{axis}")
         if (commanded > 0) != (observed > 0):
-            raise _TransactionAbort(
+            raise _cursor_state_invalidated(
                 f"cursor_feedback_direction_mismatch_{axis}"
             )
         if delayed_command != 0 and (delayed_command > 0) != (commanded > 0):
@@ -1820,7 +2087,7 @@ class InputCoordinator:
 
         def validate_pointer() -> InputValidation:
             # Deliberately after all movement and immediately before activation.
-            self._assert_foreground(backend, intent.expected_pid)
+            self._assert_pointer_foreground(transaction, intent)
             self._assert_cursor_stable_in_target(
                 backend,
                 intent,
@@ -1828,7 +2095,7 @@ class InputCoordinator:
                 phase="before_pointer_validation",
             )
             decision = validate(intent, actual)
-            self._assert_foreground(backend, intent.expected_pid)
+            self._assert_pointer_foreground(transaction, intent)
             self._assert_cursor_stable_in_target(
                 backend,
                 intent,
@@ -1853,11 +2120,15 @@ class InputCoordinator:
     ) -> None:
         current = self._current_position(backend)
         if current != actual:
-            raise _TransactionAbort(f"cursor_changed_{phase}")
+            raise _cursor_state_invalidated(f"cursor_changed_{phase}")
         if not intent.movement_bounds.contains(current):
-            raise _TransactionAbort(f"cursor_left_verified_bounds_{phase}")
+            raise _cursor_state_invalidated(
+                f"cursor_left_verified_bounds_{phase}"
+            )
         if not intent.target_bounds.contains(current):
-            raise _TransactionAbort(f"cursor_left_verified_target_{phase}")
+            raise _cursor_state_invalidated(
+                f"cursor_left_verified_target_{phase}"
+            )
 
     def _click(
         self,
@@ -1874,7 +2145,7 @@ class InputCoordinator:
         if intent is not None or actual is not None:
             if intent is None or actual is None:
                 raise _TransactionAbort("pointer activation context is incomplete")
-            self._assert_foreground(transaction.backend, intent.expected_pid)
+            self._assert_pointer_foreground(transaction, intent)
             self._assert_cursor_stable_in_target(
                 transaction.backend,
                 intent,
@@ -2003,8 +2274,94 @@ class InputCoordinator:
             )
 
     @staticmethod
-    def _assert_foreground(backend: _Backend, expected_pid: int) -> None:
-        backend._assert_foreground(("RuneLite",), expected_pid=expected_pid)
+    def _assert_foreground(
+        backend: _Backend, expected_pid: int
+    ) -> Mapping[str, Any]:
+        info = backend._assert_foreground(
+            ("RuneLite",), expected_pid=expected_pid
+        )
+        if not isinstance(info, Mapping):
+            raise _TransactionAbort("foreground_window_evidence_unavailable")
+        return info
+
+    @staticmethod
+    def _verified_foreground_hwnd(
+        info: Mapping[str, Any], *, expected_hwnd: int | None
+    ) -> int:
+        hwnd = info.get("hwnd")
+        if not _is_int(hwnd) or hwnd <= 0:
+            raise _TransactionAbort(
+                "pointer_foreground_hwnd_unavailable", blocked=True
+            )
+        if expected_hwnd is not None and hwnd != expected_hwnd:
+            raise _TransactionAbort(
+                "pointer_foreground_hwnd_mismatch", blocked=True
+            )
+        return hwnd
+
+    @staticmethod
+    def _assert_same_foreground_window(
+        info: Mapping[str, Any], expected_hwnd: int
+    ) -> None:
+        if info.get("hwnd") != expected_hwnd:
+            raise _cursor_state_invalidated(
+                "pointer_foreground_window_changed"
+            )
+
+    def _assert_pointer_foreground(
+        self,
+        transaction: _Transaction,
+        intent: ApprovedPointerIntent,
+    ) -> Mapping[str, Any]:
+        info = self._assert_foreground(
+            transaction.backend, intent.expected_pid
+        )
+        hwnd = self._verified_foreground_hwnd(
+            info, expected_hwnd=intent.expected_hwnd
+        )
+        if transaction.pointer_hwnd is None:
+            transaction.pointer_hwnd = hwnd
+        else:
+            self._assert_same_foreground_window(
+                info, transaction.pointer_hwnd
+            )
+        return info
+
+    def _assert_pinned_pointer_foreground(
+        self,
+        transaction: _Transaction,
+        expected_pid: int,
+    ) -> Mapping[str, Any]:
+        info = self._assert_foreground(transaction.backend, expected_pid)
+        if transaction.pointer_hwnd is None:
+            raise _TransactionAbort(
+                "pointer_foreground_hwnd_unavailable", blocked=True
+            )
+        self._assert_same_foreground_window(
+            info, transaction.pointer_hwnd
+        )
+        return info
+
+    @staticmethod
+    def _assert_point_owned_by_window(
+        backend: _Backend,
+        point: ScreenPoint,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+    ) -> None:
+        info = backend._window_info_at_point((point.x, point.y))
+        if not isinstance(info, Mapping):
+            raise _TransactionAbort(
+                "cursor_reacquisition_point_owner_unavailable", blocked=True
+            )
+        if (
+            info.get("hwnd") != expected_hwnd
+            or info.get("pid") != expected_pid
+        ):
+            raise _cursor_state_invalidated(
+                "cursor_reacquisition_point_owner_mismatch"
+            )
 
     @staticmethod
     def _current_position(backend: _Backend) -> ScreenPoint:
@@ -2104,6 +2461,7 @@ class InputCoordinator:
             ),
             ledger_closed=state.ledger_closed,
             backend_closed=state.backend_closed,
+            failure_kind=state.failure_kind,
             context_cancel_attempted=state.context_cancel_attempted,
             context_cancel_acknowledged=state.context_cancel_acknowledged,
             errors=errors,

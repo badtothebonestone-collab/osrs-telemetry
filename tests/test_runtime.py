@@ -14,6 +14,7 @@ from osrs_bot.engine_frame import EngineFramePublisher, EngineStage
 from osrs_bot.input_coordinator import (
     CommandEvidence,
     FirmwareSafetyStatus,
+    InputFailureKind,
     InputReceipt,
 )
 from osrs_bot.model import (
@@ -129,6 +130,7 @@ def _safe_unsent_execution(
     ),
     activation_commands: bool = False,
     complete_cleanup: bool = True,
+    receipt_failure_kind: InputFailureKind | None = None,
 ) -> ExecutionResult:
     command_names = (
         ("ARM", "MOVE", "MOUSE_DOWN", "MOUSE_UP", "STOP_ALL", "DISARM", "STATUS")
@@ -158,6 +160,16 @@ def _safe_unsent_execution(
         ledger_complete=True,
         ledger_closed=True,
         backend_closed=True,
+        failure_kind=(
+            receipt_failure_kind
+            if receipt_failure_kind is not None
+            else (
+                InputFailureKind.CURSOR_STATE_INVALIDATED
+                if disposition
+                is UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+                else InputFailureKind.NONE
+            )
+        ),
         errors=(reason,),
     )
     return ExecutionResult(
@@ -231,6 +243,7 @@ class _Task:
         self.projections = projections
         self.applied: list[VerificationResult] = []
         self.discarded: list[str] = []
+        self.discard_policies: list[bool] = []
         self.decide_calls = 0
         self.status = TaskStatus.RUNNING
         self.state = "ready"
@@ -260,8 +273,11 @@ class _Task:
             self.status = TaskStatus.RUNNING
             self.state = "verified"
 
-    def discard_pending_action(self, reason: str) -> None:
+    def discard_pending_action(
+        self, reason: str, *, target_invalidated: bool = True
+    ) -> None:
         self.discarded.append(reason)
+        self.discard_policies.append(target_invalidated)
         self.state = "replan"
 
     def snapshot(self) -> TaskSnapshot:
@@ -716,6 +732,81 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertIs(task.applied[0].status, VerificationStatus.FAIL)
         self.assertEqual(2, result.actions)
 
+    def test_cursor_state_invalidation_reobserves_once_without_target_suppression(self) -> None:
+        first, _ = _executable(10)
+        complete = Decision(
+            "complete",
+            "fresh cursor evidence selected no further action",
+            Action(ActionKind.WAIT, "Wait", 11),
+        )
+        reason = "cursor_changed_after_pointer_validation"
+        task = _Task([first, complete])
+        interface = _ActionInterface(
+            _safe_unsent_execution(
+                first.action,
+                10,
+                reason,
+                disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+            )
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        self.assertEqual([reason], task.discarded)
+        self.assertEqual([False], task.discard_policies)
+        self.assertEqual([], task.applied)
+        self.assertEqual(1, result.actions)
+
+    def test_second_consecutive_cursor_state_invalidation_blocks(self) -> None:
+        first, _ = _executable(10)
+        second, _ = _executable(11)
+        reason = "cursor_changed_after_pointer_validation"
+        task = _Task([first, second])
+        interface = _SequencedActionInterface(
+            _safe_unsent_execution(
+                first.action,
+                10,
+                reason,
+                disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+            ),
+            _safe_unsent_execution(
+                second.action,
+                11,
+                reason,
+                disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+            ),
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual([reason], task.discarded)
+        self.assertEqual([False], task.discard_policies)
+        self.assertEqual(2, result.actions)
+        payload = result.to_dict()["execution"]
+        self.assertEqual(
+            "cursor_state_invalidated", payload["unsentDisposition"]
+        )
+        self.assertEqual(
+            "cursor_state_invalidated",
+            payload["receipt"]["failureKind"],
+        )
+
     def test_unsent_replan_requires_typed_disposition_cleanup_and_no_activation(self) -> None:
         reason = "fresh_input_validation_denied: hover_menu_mismatch"
         factories = (
@@ -736,6 +827,19 @@ class TaskRuntimeTests(unittest.TestCase):
                 10,
                 reason,
                 activation_commands=True,
+            ),
+            lambda action: _safe_unsent_execution(
+                action,
+                10,
+                reason,
+                disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+                receipt_failure_kind=InputFailureKind.NONE,
+            ),
+            lambda action: replace(
+                _blocked_execution(action, 10, reason),
+                unsent_disposition=(
+                    UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+                ),
             ),
         )
         for factory in factories:
