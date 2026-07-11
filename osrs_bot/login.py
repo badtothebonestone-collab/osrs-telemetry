@@ -27,6 +27,7 @@ from .observation import ObservationClient
 MAX_LOGIN_CLICKS = 4
 MAX_LOGIN_SECONDS = 180.0
 TRANSITION_SECONDS = 15.0
+MAX_LOADED_SCENE_PROOF_AGE_SECONDS = 2.0
 CLIENT_MARGIN_PX = 8
 MAX_TEMPLATE_SEARCH_ZONE_PIXELS = 4_000_000
 MAX_TEMPLATE_ANCHOR_CANDIDATES = 20_000
@@ -423,6 +424,7 @@ def _detect_login_surfaces_with_limits(
     anchor_candidate_limit: int,
     first_anchor_candidate_limit_per_scale: int,
     first_anchor_candidate_limit: int,
+    include_disconnected_dialog: bool,
 ) -> tuple[LoginCandidate, ...]:
     """Return only visually proven, already-authenticated RuneLite prompts."""
 
@@ -463,7 +465,7 @@ def _detect_login_surfaces_with_limits(
                 confidence=confidence,
             )
         )
-    if not candidates:
+    if not candidates and include_disconnected_dialog:
         disconnected = _disconnected_dialog_candidate(screenshot)
         if disconnected is not None:
             candidates.append(disconnected)
@@ -485,6 +487,7 @@ def detect_login_surfaces(
             MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE
         ),
         first_anchor_candidate_limit=MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES,
+        include_disconnected_dialog=True,
     )
 
 
@@ -503,6 +506,12 @@ def detect_loaded_scene_login_surfaces(
         first_anchor_candidate_limit=(
             MAX_LOADED_SCENE_TEMPLATE_FIRST_ANCHOR_CANDIDATES
         ),
+        # This fallback exists only to finish the bounded template search that
+        # capped on a coherent loaded scene.  The disconnect heuristic is
+        # state-specific, never density-capped, and is actionable only on a
+        # LOGIN_SCREEN observation; it cannot contribute to this negative
+        # loaded-scene proof.
+        include_disconnected_dialog=False,
     )
 
 
@@ -769,6 +778,50 @@ class LoginPromptHelper:
                 return self._result("BLOCKED", f"window_proof_failed: {type(error).__name__}: {error}", False, started, clicks)
 
             if observation.loaded_scene and not candidates:
+                if (
+                    observation.age_seconds
+                    > MAX_LOADED_SCENE_PROOF_AGE_SECONDS
+                ):
+                    try:
+                        refreshed = self._observations.fetch()
+                    except Exception as error:
+                        return self._result(
+                            "ERROR",
+                            "loaded_scene_refresh_unavailable: "
+                            f"{type(error).__name__}: {error}",
+                            False,
+                            started,
+                            clicks,
+                        )
+                    if (
+                        refreshed.client_process_id
+                        != observation.client_process_id
+                        or refreshed.session_id != observation.session_id
+                    ):
+                        return self._result(
+                            "BLOCKED",
+                            "loaded_scene_refresh_identity_changed",
+                            False,
+                            started,
+                            clicks,
+                        )
+                    if refreshed.tick < observation.tick:
+                        return self._result(
+                            "BLOCKED",
+                            "loaded_scene_refresh_tick_regressed",
+                            False,
+                            started,
+                            clicks,
+                        )
+                    if (
+                        not refreshed.loaded_scene
+                        or refreshed.age_seconds
+                        > MAX_LOADED_SCENE_PROOF_AGE_SECONDS
+                    ):
+                        loaded_proof = None
+                        self._sleep(self._poll_seconds)
+                        continue
+                    observation = refreshed
                 proof = (
                     observation.client_process_id,
                     observation.session_id,

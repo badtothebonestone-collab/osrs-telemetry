@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -510,6 +510,30 @@ class LoginDetectionTests(unittest.TestCase):
 
         self.assertEqual([candidate.name for candidate in candidates], ["disconnected_ok"])
 
+    def test_loaded_scene_fallback_excludes_login_screen_disconnect_heuristic(self) -> None:
+        screenshot = Image.new("RGB", (1000, 700), (55, 18, 14))
+        for x in range(250, 750):
+            for y in range(238, 483):
+                screenshot.putpixel((x, y), (60, 38, 32))
+        center_x, center_y = 500, 427
+        for x in range(center_x - 120, center_x + 120):
+            for y in range(center_y - 45, center_y + 45):
+                screenshot.putpixel((x, y), (55, 42, 35))
+        for x in range(center_x - 120, center_x + 120):
+            for y in (
+                *range(center_y - 45, center_y - 30),
+                *range(center_y + 30, center_y + 45),
+            ):
+                screenshot.putpixel((x, y), (15, 10, 8))
+        for x in range(center_x - 12, center_x + 13, 4):
+            for y in range(center_y - 10, center_y + 11):
+                screenshot.putpixel((x, y), (235, 220, 185))
+
+        self.assertEqual(
+            (),
+            login_module.detect_loaded_scene_login_surfaces(screenshot),
+        )
+
     def test_flat_login_surface_is_not_a_disconnect_dialog(self) -> None:
         screenshot = Image.new("RGB", (1000, 700), (55, 38, 32))
         self.assertEqual(detect_login_surfaces(screenshot), ())
@@ -786,6 +810,38 @@ class LoginHelperTests(unittest.TestCase):
         result = helper.run()
         self.assertTrue(result.successful)
         self.assertEqual(backends, [])
+
+    def test_loaded_scene_proof_refreshes_frames_aged_during_detection(self) -> None:
+        old = datetime.now(timezone.utc) - timedelta(seconds=3)
+        first_old = replace(
+            observation("LOGGED_IN", 9, loaded=True),
+            timestamp=old,
+            assembled_at=old,
+        )
+        second_old = replace(
+            observation("LOGGED_IN", 11, loaded=True),
+            timestamp=old,
+            assembled_at=old,
+        )
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            FakeObservations(
+                [
+                    first_old,
+                    observation("LOGGED_IN", 10, loaded=True),
+                    second_old,
+                    observation("LOGGED_IN", 12, loaded=True),
+                ]
+            ),
+            lambda _image: (),
+            backends=backends,
+        )
+
+        result = helper.run()
+
+        self.assertTrue(result.successful)
+        self.assertEqual("loaded_scene_verified", result.reason)
+        self.assertEqual([], backends)
 
     def test_loaded_scene_candidate_cap_uses_exact_read_only_fallback(self) -> None:
         primary_calls = 0
