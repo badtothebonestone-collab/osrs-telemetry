@@ -36,6 +36,20 @@ from .safety import (
 
 
 TRANSIENT_POST_MOVE_RETRY_REASONS = frozenset({"observation_not_pass"})
+TARGET_EVIDENCE_INVALIDATION_REASONS = frozenset(
+    {
+        "geometry_unavailable",
+        "hover_menu_mismatch",
+        "screen_point_missing",
+        "screen_point_not_verified",
+        "screen_point_outside_target",
+        "settled_pointer_outside_fresh_region",
+        "target_missing",
+        "target_not_actionable",
+        "target_not_visible",
+        "target_offscreen",
+    }
+)
 
 
 class _ActionBlocked(RuntimeError):
@@ -304,7 +318,7 @@ class CoordinatedActionInterface:
                     return PointerActivationDecision.deny("menu_sample_missing")
                 context_minimum_tick[0] = post.menu_client_tick
                 return PointerActivationDecision.context(context.reason)
-            if hover.reason == "hover_menu_mismatch":
+            if hover.reason in TARGET_EVIDENCE_INVALIDATION_REASONS:
                 target_evidence_invalidated[0] = True
             return PointerActivationDecision.deny(hover.reason)
 

@@ -509,6 +509,49 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         )
         self.assertIsNone(coordinator.decisions[0].activation)
 
+    def test_fresh_projection_invalidation_is_typed_for_one_safe_replan(self) -> None:
+        cases = (
+            (
+                "stacked-region-drift",
+                ScreenPoint(POINT.x - 3, POINT.y),
+                ScreenPoint(POINT.x + 3, POINT.y),
+                "settled_pointer_outside_fresh_region",
+            ),
+            (
+                "canonical-drift",
+                ScreenPoint(POINT.x + 2, POINT.y),
+                ScreenPoint(POINT.x + 4, POINT.y),
+                "screen_point_not_verified",
+            ),
+        )
+        for label, actual, fresh, expected_reason in cases:
+            with self.subTest(label=label):
+                coordinator = FakeCoordinator(actual_pointer=actual)
+                post = observation(
+                    menus=self.hover.menus,
+                    tick=11,
+                    menu_point=actual,
+                )
+                target = post.nearby_objects[0]
+                target = replace(
+                    target,
+                    geometry=replace(target.geometry, screen_point=fresh),
+                )
+                post = replace(post, nearby_objects=(target,))
+
+                result = self.interface(coordinator, post).execute(
+                    tree_action(), self.pre
+                )
+
+                self.assertEqual("BLOCKED", result.status)
+                self.assertIn(expected_reason, result.reason)
+                self.assertIs(
+                    result.unsent_disposition,
+                    UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED,
+                )
+                self.assertIsNone(coordinator.decisions[0].activation)
+                self.assertTrue(result.cleanup_confirmed)
+
     def test_settled_pointer_inside_verified_region_preserves_canonical_aim(self) -> None:
         actual = ScreenPoint(POINT.x + 3, POINT.y)
         coordinator = FakeCoordinator(actual_pointer=actual)
