@@ -20,6 +20,10 @@ from .pointer import (
 COMMAND_LEDGER_SCHEMA = "arduino_command_ledger.v1"
 MAX_LEDGER_ENTRIES = 2_048
 MAX_POINTER_STEPS = 512
+MAX_POINTER_FEEDBACK_PLANS = 64
+MAX_FEEDBACK_PLAN_AXIS_DELTA = 64
+MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT = 4
+CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT = 8
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
 DEFAULT_CLICK_HOLD_SECONDS = 0.06
 _COMMAND_ID = re.compile(r"^cmd-[0-9]{8,}$")
@@ -198,12 +202,14 @@ class PointerActivationDecision:
         return cls(InputValidation.deny(reason), None)
 
 
-PointerValidator: TypeAlias = Callable[[ApprovedPointerIntent], InputValidation]
+PointerValidator: TypeAlias = Callable[
+    [ApprovedPointerIntent, ScreenPoint], InputValidation
+]
 KeyValidator: TypeAlias = Callable[[ApprovedKeyIntent], InputValidation]
 ContextRowResolver: TypeAlias = Callable[[], ApprovedPointerIntent]
 PointerPlanner: TypeAlias = Callable[..., PointerMotionPlan]
 PointerActivationValidator: TypeAlias = Callable[
-    [ApprovedPointerIntent], PointerActivationDecision
+    [ApprovedPointerIntent, ScreenPoint], PointerActivationDecision
 ]
 
 
@@ -698,6 +704,8 @@ class _Transaction:
         self.snapshot = _EvidenceSnapshot((), 0, 0, 0)
         self.errors: list[str] = []
         self.ledger_complete = True
+        self.pointer_plan_count = 0
+        self.pointer_step_count = 0
 
     def add_error(self, reason: object) -> None:
         text = _clean_text(reason, fallback="unknown_input_error")
@@ -802,7 +810,7 @@ class InputCoordinator:
         pointer_timestep_seconds: float = DEFAULT_POINTER_TIMESTEP_SECONDS,
         click_hold_seconds: float = DEFAULT_CLICK_HOLD_SECONDS,
         max_pointer_steps: int = MAX_POINTER_STEPS,
-        max_correction_plans: int = 4,
+        max_correction_plans: int = MAX_POINTER_FEEDBACK_PLANS - 1,
         max_ledger_entries: int = MAX_LEDGER_ENTRIES,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -828,10 +836,21 @@ class InputCoordinator:
             click_hold_seconds
         ) < 0.0:
             raise ValueError("click_hold_seconds must be finite and non-negative")
-        if not _is_int(max_pointer_steps) or not 1 <= max_pointer_steps <= 4_096:
-            raise ValueError("max_pointer_steps must be between 1 and 4096")
-        if not _is_int(max_correction_plans) or not 0 <= max_correction_plans <= 32:
-            raise ValueError("max_correction_plans must be between 0 and 32")
+        if (
+            not _is_int(max_pointer_steps)
+            or not 1 <= max_pointer_steps <= MAX_POINTER_STEPS
+        ):
+            raise ValueError(
+                f"max_pointer_steps must be between 1 and {MAX_POINTER_STEPS}"
+            )
+        if (
+            not _is_int(max_correction_plans)
+            or not 0 <= max_correction_plans < MAX_POINTER_FEEDBACK_PLANS
+        ):
+            raise ValueError(
+                "max_correction_plans must be between 0 and "
+                f"{MAX_POINTER_FEEDBACK_PLANS - 1}"
+            )
         if (
             not _is_int(max_ledger_entries)
             or not 16 <= max_ledger_entries <= MAX_LEDGER_ENTRIES
@@ -892,8 +911,13 @@ class InputCoordinator:
             raise TypeError("validate must be callable")
 
         def body(transaction: _Transaction) -> None:
-            self._move(transaction, intent)
-            self._validate_pointer(transaction.backend, intent, validate)
+            actual = self._move(transaction, intent)
+            self._validate_pointer(
+                transaction.backend,
+                intent,
+                actual,
+                validate,
+            )
             self._click(transaction, intent.button)
 
         return self._execute("pointer", (intent.intent_id,), body)
@@ -943,9 +967,12 @@ class InputCoordinator:
         row_id: list[str] = []
 
         def body(transaction: _Transaction) -> None:
-            self._move(transaction, open_intent)
+            actual = self._move(transaction, open_intent)
             self._validate_pointer(
-                transaction.backend, open_intent, validate_hover
+                transaction.backend,
+                open_intent,
+                actual,
+                validate_hover,
             )
             self._click(transaction, MouseButton.RIGHT)
             state.context_cancel_attempted = False
@@ -972,8 +999,13 @@ class InputCoordinator:
                     blocked=True,
                 )
             row_id.append(row_intent.intent_id)
-            self._move(transaction, row_intent)
-            self._validate_pointer(transaction.backend, row_intent, validate_row)
+            actual = self._move(transaction, row_intent)
+            self._validate_pointer(
+                transaction.backend,
+                row_intent,
+                actual,
+                validate_row,
+            )
             self._click(transaction, MouseButton.LEFT)
             menu_open[0] = False
 
@@ -1050,15 +1082,27 @@ class InputCoordinator:
         state = _TransactionState("", "adaptive_pointer", (intent.intent_id,))
 
         def body(transaction: _Transaction) -> None:
-            self._move(transaction, intent)
+            actual = self._move(transaction, intent)
             self._assert_foreground(transaction.backend, intent.expected_pid)
-            decision = decide_activation(intent)
+            self._assert_cursor_stable_in_target(
+                transaction.backend,
+                intent,
+                actual,
+                phase="before_activation_validation",
+            )
+            decision = decide_activation(intent, actual)
+            self._assert_foreground(transaction.backend, intent.expected_pid)
+            self._assert_cursor_stable_in_target(
+                transaction.backend,
+                intent,
+                actual,
+                phase="after_activation_validation",
+            )
             if not isinstance(decision, PointerActivationDecision):
                 raise _TransactionAbort(
                     "activation validator returned an invalid result"
                 )
             self._require_validation(decision.validation)
-            self._assert_foreground(transaction.backend, intent.expected_pid)
             if decision.activation is PointerActivation.DIRECT_LEFT:
                 self._click(transaction, MouseButton.LEFT)
                 return
@@ -1088,9 +1132,12 @@ class InputCoordinator:
                     blocked=True,
                 )
             row_id.append(row_intent.intent_id)
-            self._move(transaction, row_intent)
+            actual = self._move(transaction, row_intent)
             self._validate_pointer(
-                transaction.backend, row_intent, validate_row
+                transaction.backend,
+                row_intent,
+                actual,
+                validate_row,
             )
             self._click(transaction, MouseButton.LEFT)
             menu_open[0] = False
@@ -1238,7 +1285,7 @@ class InputCoordinator:
 
     def _move(
         self, transaction: _Transaction, intent: ApprovedPointerIntent
-    ) -> None:
+    ) -> ScreenPoint:
         backend = transaction.backend
         self._assert_foreground(backend, intent.expected_pid)
         start = self._current_position(backend)
@@ -1247,11 +1294,60 @@ class InputCoordinator:
                 "cursor_start_outside_verified_movement_bounds", blocked=True
             )
         actual = start
-        total_steps = 0
+        x_calibrated = False
+        y_calibrated = False
         for plan_index in range(self._max_correction_plans + 1):
+            if transaction.pointer_plan_count >= self._max_correction_plans + 1:
+                raise _TransactionAbort(
+                    "pointer transaction exceeds the total feedback plan limit"
+                )
+            x_in_target = (
+                intent.target_bounds.x
+                <= actual.x
+                < intent.target_bounds.x + intent.target_bounds.width
+            )
+            y_in_target = (
+                intent.target_bounds.y
+                <= actual.y
+                < intent.target_bounds.y + intent.target_bounds.height
+            )
+            command_dx = self._feedback_axis_command(
+                remaining=0 if x_in_target else intent.target.x - actual.x,
+                coordinate=actual.x,
+                lower=intent.movement_bounds.x,
+                upper=(
+                    intent.movement_bounds.x
+                    + intent.movement_bounds.width
+                    - 1
+                ),
+                calibrated=x_calibrated,
+                axis="x",
+            )
+            command_dy = self._feedback_axis_command(
+                remaining=0 if y_in_target else intent.target.y - actual.y,
+                coordinate=actual.y,
+                lower=intent.movement_bounds.y,
+                upper=(
+                    intent.movement_bounds.y
+                    + intent.movement_bounds.height
+                    - 1
+                ),
+                calibrated=y_calibrated,
+                axis="y",
+            )
+            command_dx, command_dy = self._clamp_feedback_waypoint_to_envelope(
+                actual,
+                command_dx,
+                command_dy,
+                intent.movement_bounds,
+            )
+            command_target = ScreenPoint(
+                actual.x + command_dx,
+                actual.y + command_dy,
+            )
             plan = self._pointer_planner(
                 actual,
-                intent.target,
+                command_target,
                 intent.movement_bounds,
                 timestep_seconds=self._pointer_timestep_seconds,
                 limits=self._pointer_limits,
@@ -1260,24 +1356,35 @@ class InputCoordinator:
                 raise _TransactionAbort("pointer planner returned an invalid plan")
             if (
                 plan.start != actual
-                or plan.target != intent.target
+                or plan.target != command_target
                 or plan.bounds != intent.movement_bounds
             ):
                 raise _TransactionAbort(
-                    "pointer plan does not match the approved intent"
+                    "pointer plan does not match the feedback waypoint"
                 )
-            if total_steps + len(plan.steps) > self._max_pointer_steps:
+            self._assert_plan_transfer_envelope(
+                actual,
+                plan,
+                intent.movement_bounds,
+            )
+            if (
+                transaction.pointer_step_count + len(plan.steps)
+                > self._max_pointer_steps
+            ):
                 raise _TransactionAbort("pointer motion exceeds the total step limit")
+            transaction.pointer_plan_count += 1
 
             for step in plan.steps:
                 self._assert_foreground(backend, intent.expected_pid)
                 if not intent.movement_bounds.contains(actual):
                     raise _TransactionAbort("cursor_left_verified_movement_bounds")
-                projected = ScreenPoint(actual.x + step.dx, actual.y + step.dy)
-                if not intent.movement_bounds.contains(projected):
-                    raise _TransactionAbort(
-                        "relative_move_would_leave_verified_movement_bounds"
-                    )
+                self._assert_transfer_headroom(
+                    actual,
+                    step.dx,
+                    step.dy,
+                    intent.movement_bounds,
+                )
+                before = actual
                 acknowledged, _ = transaction.invoke(
                     "MOVE",
                     lambda step=step: backend._move_relative(
@@ -1286,22 +1393,42 @@ class InputCoordinator:
                 )
                 if not acknowledged:
                     raise _TransactionAbort("move_not_acknowledged")
-                total_steps += 1
+                transaction.pointer_step_count += 1
                 self._sleep(plan.timestep_seconds)
                 actual = self._current_position(backend)
                 self._assert_foreground(backend, intent.expected_pid)
                 if not intent.movement_bounds.contains(actual):
                     raise _TransactionAbort("cursor_left_verified_movement_bounds")
+                x_calibrated = self._validate_axis_transfer(
+                    commanded=step.dx,
+                    observed=actual.x - before.x,
+                    calibrated=x_calibrated,
+                    axis="x",
+                )
+                y_calibrated = self._validate_axis_transfer(
+                    commanded=step.dy,
+                    observed=actual.y - before.y,
+                    calibrated=y_calibrated,
+                    axis="y",
+                )
 
             # Each planner trajectory ends at rest.  Give cursor feedback one
             # full deterministic timestep to settle before deciding whether a
             # bounded correction trajectory is needed.
             self._sleep(plan.timestep_seconds)
-            actual = self._current_position(backend)
+            settled = self._current_position(backend)
             self._assert_foreground(backend, intent.expected_pid)
+            if settled != actual:
+                raise _TransactionAbort("cursor_changed_during_plan_settle")
+            actual = settled
             if not intent.movement_bounds.contains(actual):
                 raise _TransactionAbort("cursor_left_verified_movement_bounds")
-            if actual == intent.target:
+            # Device-pixel coordinates and integer Arduino HID deltas need not
+            # share a one-pixel lattice (for example at 175% display scaling).
+            # Accept only a fully settled plan endpoint inside the caller's
+            # pre-verified target region. A zero-step plan can prove an already
+            # stable point; a transient mid-trajectory crossing cannot.
+            if intent.target_bounds.contains(actual):
                 break
             if plan_index >= self._max_correction_plans:
                 raise _TransactionAbort(
@@ -1311,22 +1438,188 @@ class InputCoordinator:
         final = self._current_position(backend)
         if not intent.movement_bounds.contains(final):
             raise _TransactionAbort("cursor_final_position_outside_verified_bounds")
-        if final != intent.target:
-            raise _TransactionAbort("cursor_did_not_reach_approved_target")
         if not intent.target_bounds.contains(final):
             raise _TransactionAbort("cursor_target_outside_verified_target_bounds")
+        return final
+
+    @staticmethod
+    def _feedback_axis_command(
+        *,
+        remaining: int,
+        coordinate: int,
+        lower: int,
+        upper: int,
+        calibrated: bool,
+        axis: str,
+    ) -> int:
+        if remaining == 0:
+            return 0
+        direction = 1 if remaining > 0 else -1
+        if not calibrated:
+            magnitude = 1
+        else:
+            magnitude = max(
+                1,
+                abs(remaining) // MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT,
+            )
+            magnitude = min(magnitude, MAX_FEEDBACK_PLAN_AXIS_DELTA)
+        clearance = upper - coordinate if direction > 0 else coordinate - lower
+        safe_magnitude = (
+            clearance // CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
+        )
+        if safe_magnitude < 1:
+            raise _TransactionAbort(
+                f"cursor_transfer_headroom_insufficient_{axis}"
+            )
+        return direction * min(magnitude, safe_magnitude)
+
+    @staticmethod
+    def _clamp_feedback_waypoint_to_envelope(
+        actual: ScreenPoint,
+        dx: int,
+        dy: int,
+        bounds: ScreenBounds,
+    ) -> tuple[int, int]:
+        active_axes = int(dx != 0) + int(dy != 0)
+        if active_axes == 0:
+            return 0, 0
+        margins = (
+            actual.x - bounds.x,
+            bounds.x + bounds.width - 1 - actual.x,
+            actual.y - bounds.y,
+            bounds.y + bounds.height - 1 - actual.y,
+        )
+        command_budget = (
+            min(margins) // CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
+        )
+        if command_budget < active_axes:
+            raise _TransactionAbort(
+                "cursor_bidirectional_transfer_headroom_insufficient"
+            )
+        per_axis_limit = command_budget // active_axes
+
+        def clamp(delta: int) -> int:
+            if delta == 0:
+                return 0
+            magnitude = min(abs(delta), per_axis_limit)
+            return magnitude if delta > 0 else -magnitude
+
+        return clamp(dx), clamp(dy)
+
+    @staticmethod
+    def _assert_plan_transfer_envelope(
+        actual: ScreenPoint,
+        plan: PointerMotionPlan,
+        bounds: ScreenBounds,
+    ) -> None:
+        command_path = sum(
+            max(abs(step.dx), abs(step.dy)) for step in plan.steps
+        )
+        required = (
+            command_path * CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
+        )
+        margins = (
+            actual.x - bounds.x,
+            bounds.x + bounds.width - 1 - actual.x,
+            actual.y - bounds.y,
+            bounds.y + bounds.height - 1 - actual.y,
+        )
+        if required > min(margins):
+            raise _TransactionAbort(
+                "pointer_plan_transfer_envelope_would_leave_bounds"
+            )
+
+    @staticmethod
+    def _assert_transfer_headroom(
+        actual: ScreenPoint,
+        dx: int,
+        dy: int,
+        bounds: ScreenBounds,
+    ) -> None:
+        required = (
+            max(abs(dx), abs(dy))
+            * CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
+        )
+        margins = (
+            actual.x - bounds.x,
+            bounds.x + bounds.width - 1 - actual.x,
+            actual.y - bounds.y,
+            bounds.y + bounds.height - 1 - actual.y,
+        )
+        if required > min(margins):
+            raise _TransactionAbort(
+                "relative_move_bidirectional_transfer_envelope_would_leave_bounds"
+            )
+
+    @staticmethod
+    def _validate_axis_transfer(
+        *,
+        commanded: int,
+        observed: int,
+        calibrated: bool,
+        axis: str,
+    ) -> bool:
+        if commanded == 0:
+            if observed != 0:
+                raise _TransactionAbort(
+                    f"cursor_feedback_uncommanded_axis_{axis}"
+                )
+            return calibrated
+        if observed == 0:
+            raise _TransactionAbort(f"cursor_feedback_no_effect_{axis}")
+        if (commanded > 0) != (observed > 0):
+            raise _TransactionAbort(
+                f"cursor_feedback_direction_mismatch_{axis}"
+            )
+        if (
+            abs(observed)
+            > abs(commanded) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+        ):
+            raise _TransactionAbort(
+                f"cursor_transfer_gain_exceeded_{axis}"
+            )
+        return True
 
     def _validate_pointer(
         self,
         backend: _Backend,
         intent: ApprovedPointerIntent,
+        actual: ScreenPoint,
         validate: PointerValidator,
     ) -> None:
         # Deliberately after all movement and immediately before activation.
         self._assert_foreground(backend, intent.expected_pid)
-        decision = validate(intent)
-        self._require_validation(decision)
+        self._assert_cursor_stable_in_target(
+            backend,
+            intent,
+            actual,
+            phase="before_pointer_validation",
+        )
+        decision = validate(intent, actual)
         self._assert_foreground(backend, intent.expected_pid)
+        self._assert_cursor_stable_in_target(
+            backend,
+            intent,
+            actual,
+            phase="after_pointer_validation",
+        )
+        self._require_validation(decision)
+
+    def _assert_cursor_stable_in_target(
+        self,
+        backend: _Backend,
+        intent: ApprovedPointerIntent,
+        actual: ScreenPoint,
+        *,
+        phase: str,
+    ) -> None:
+        current = self._current_position(backend)
+        if current != actual:
+            raise _TransactionAbort(f"cursor_changed_{phase}")
+        if not intent.movement_bounds.contains(current):
+            raise _TransactionAbort(f"cursor_left_verified_bounds_{phase}")
+        if not intent.target_bounds.contains(current):
+            raise _TransactionAbort(f"cursor_left_verified_target_{phase}")
 
     def _click(self, transaction: _Transaction, button: MouseButton) -> None:
         down_acknowledged, _ = transaction.invoke(

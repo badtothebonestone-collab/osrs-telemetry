@@ -4,10 +4,10 @@
 
 **Phase 8 complete — thin frontend contracts and cooperative lifecycle established.**
 
-Final regression is in progress. Offline device-pixel hardening gates pass;
-fresh loaded-scene proof remains.
+Final regression is in progress. Offline device-pixel and pointer-arrival
+hardening gates pass; fresh loaded-scene proof remains.
 
-Current hardening checkpoint subject: `sensor: bind input geometry to device pixels`
+Current hardening checkpoint subject: `input: validate device-pixel pointer arrival`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -67,6 +67,18 @@ Regression command:
   checks, context-row revalidation, and the verified bank-close Escape path.
 - The deterministic pointer policy produces only bounded relative motion inside
   the verified canvas, with velocity/acceleration caps and target-aware braking.
+- The policy retains one exact target, while the coordinator binds activation to
+  the actual stable device-pixel endpoint. The coordinator executes at most 64
+  exact command-waypoint plans/512 MOVE commands across the complete Arduino
+  transaction, beginning an unknown axis with a unit probe. Every planner path
+  requires an eight-device-pixel per-count envelope on all four sides, so a
+  reversed or cross-axis response within that declared envelope remains inside
+  verified bounds; observed transfer above four fails closed. Only a complete-
+  plan endpoint inside the explicit activation region is eligible. Fresh
+  validators receive that actual point and cursor stability is checked before
+  and after validation. Gameplay activation stays within +/-3 pixels of the
+  approved safe point; saved-session login may use only its freshly recognized
+  prompt bounds.
 - Every connected transaction records a non-truncated command/ACK ledger and
   attempts `STOP_ALL`, `DISARM`, and wire `STATUS`. Success requires the final
   firmware report to prove disarmed with zero held keys/buttons and no missing,
@@ -180,6 +192,14 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   Python tests passed; forced fresh Java suite 55 passed across 6 suites with
   zero failures/errors/skips; an actual Windows subprocess verified exact
   per-monitor-v2 awareness.
+- Pointer-arrival hardening gate: 323 Python tests passed; golden replay 2
+  passed; and a forced fresh Java run executed 71 tests across 8 suites with
+  zero failures, errors, or skips. Coverage reproduces long movement on the
+  observed 175% HID/device-pixel lattice, records every point inside bounds,
+  exercises the 400% supported ceiling plus four-sided insufficient headroom,
+  unsupported transfer, and transaction-wide context-row caps, and proves
+  cursor drift or bounded-plan exhaustion produces no click and still completes
+  safe cleanup.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned

@@ -74,6 +74,16 @@ runtime logic.
   client only after proving per-monitor-v2 awareness; gameplay remains confined
   to loaded-scene telemetry canvas bounds.
 
+- **D016 — Observed pointer arrival:** the pure motion policy still targets one
+  exact command-space waypoint at a time, but integer HID deltas may land on a
+  coarser device-pixel lattice under display scaling. The coordinator uses an
+  unknown-axis unit probe, a four-sided transfer envelope, and at most 64
+  actual-feedback plans/512 MOVE commands across the complete Arduino
+  transaction. It may activate only from a settled full-plan endpoint inside an
+  explicit verified region, and fresh validation is bound to that actual point.
+  Gameplay uses at most three pixels around the approved safe point; login may
+  use the freshly recognized prompt bounds.
+
 ## Phases and acceptance
 
 | Phase | Status | Acceptance |
@@ -310,6 +320,31 @@ runtime logic.
   a forced fresh Java run executed 55 tests across 6 suites with zero failures,
   errors, or skips; an actual Windows subprocess verified per-monitor-v2; and
   `git diff --check` passed.
+- A committed login-screen trial on a 175% display proved that each Arduino HID
+  count moved about 1.75 Win32 device pixels. Exact center-pixel feedback then
+  oscillated even though a settled plan endpoint was already safely inside the
+  freshly recognized Play Now bounds. Both failed attempts clicked nothing and
+  ended with acknowledged `STOP_ALL`, `DISARM`, and safe zero-held-input
+  `STATUS` receipts.
+- Kept the pure exact planner and made the coordinator translate toward the
+  approved point with bounded command-space waypoints and actual feedback. An
+  unknown axis starts with one count; every planner path reserves an eight-
+  device-pixel per-count envelope on all four sides, observed transfer above
+  four aborts, and the whole Arduino transaction is capped at 64 plans/512 MOVE
+  commands even when it opens and selects a context row. A zero-step plan may
+  prove an already-stable approved point; no transient crossing may activate.
+  The actual endpoint is passed into fresh validation and must remain unchanged
+  inside transit and activation bounds before and after it.
+- Gameplay regions are clipped to +/-3 device pixels around the approved point,
+  and SafetyGate hover validation is rebound to the actual settled point so two
+  independent tolerances cannot drift apart. Login revalidates the complete
+  detected prompt and exact window ownership at the actual point.
+- Pointer-arrival hardening gate: all 323 Python tests passed, including long
+  175% gameplay movement, every-position containment, 400% boundary transfer,
+  initial/four-sided headroom, unsupported-gain, stable zero-step, cursor-drift,
+  and transaction-wide plan/step caps; golden replay 2 passed; and a forced
+  fresh Java run executed 71 tests across 8 suites with zero failures, errors,
+  or skips.
 - No gameplay action was permitted from the login screen. The final loaded-scene
   observation, one safe default cycle, live overlay comparison, short manual
   demonstration, and exact process/input cleanup proof remain required.

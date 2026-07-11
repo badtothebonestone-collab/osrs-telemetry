@@ -197,13 +197,19 @@ def input_receipt(
 
 
 class FakeCoordinator:
-    def __init__(self, *, forced_receipt: InputReceipt | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        forced_receipt: InputReceipt | None = None,
+        actual_pointer: ScreenPoint | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self.pointer_intents: list[ApprovedPointerIntent] = []
         self.key_intents: list[ApprovedKeyIntent] = []
         self.decisions: list[PointerActivationDecision] = []
         self.row_intents: list[ApprovedPointerIntent] = []
         self.forced_receipt = forced_receipt
+        self.actual_pointer = actual_pointer
 
     @staticmethod
     def _denied(
@@ -223,7 +229,7 @@ class FakeCoordinator:
     def execute_pointer(self, intent, *, validate):  # type: ignore[no-untyped-def]
         self.calls.append("pointer")
         self.pointer_intents.append(intent)
-        decision = validate(intent)
+        decision = validate(intent, self.actual_pointer or intent.target)
         if self.forced_receipt is not None:
             return self.forced_receipt
         if not isinstance(decision, InputValidation) or not decision.allowed:
@@ -260,7 +266,7 @@ class FakeCoordinator:
     ):  # type: ignore[no-untyped-def]
         self.calls.append("adaptive")
         self.pointer_intents.append(intent)
-        decision = decide_activation(intent)
+        decision = decide_activation(intent, self.actual_pointer or intent.target)
         self.decisions.append(decision)
         if self.forced_receipt is not None:
             return self.forced_receipt
@@ -284,7 +290,7 @@ class FakeCoordinator:
         try:
             row_intent = resolve_row()
             self.row_intents.append(row_intent)
-            row_validation = validate_row(row_intent)
+            row_validation = validate_row(row_intent, row_intent.target)
         except Exception as error:  # mirror coordinator fail-closed cancellation
             reason = f"context_row_resolution_blocked: {error}"
             return input_receipt(
@@ -392,7 +398,7 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(InputPurpose.GAMEPLAY_OBJECT, intent.purpose)
         self.assertEqual(POINT, intent.target)
         self.assertEqual(CANVAS, intent.movement_bounds)
-        self.assertEqual(ScreenBounds(100, 100, 30, 30), intent.target_bounds)
+        self.assertEqual(ScreenBounds(107, 107, 7, 7), intent.target_bounds)
         self.assertEqual(1234, intent.expected_pid)
         self.assertEqual("pre_move.observation", result.safety_checks[0].stage)
         self.assertIn(
@@ -423,6 +429,24 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertIn("hover_menu_mismatch", result.reason)
         self.assertFalse(result.sent)
         self.assertTrue(result.cleanup_confirmed)
+        self.assertIsNone(coordinator.decisions[0].activation)
+
+    def test_hover_validation_is_bound_to_actual_settled_point(self) -> None:
+        actual = ScreenPoint(POINT.x + 3, POINT.y)
+        stale_center_match = ScreenPoint(POINT.x - 3, POINT.y)
+        coordinator = FakeCoordinator(actual_pointer=actual)
+        post = observation(
+            menus=self.hover.menus,
+            tick=11,
+            menu_point=stale_center_match,
+        )
+
+        result = self.interface(coordinator, post).execute(
+            tree_action(), self.pre
+        )
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("hover_pointer_mismatch", result.reason)
         self.assertIsNone(coordinator.decisions[0].activation)
 
     def test_fresh_hover_polling_is_bounded_before_direct_activation(self) -> None:
@@ -499,7 +523,15 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         row_intent = coordinator.row_intents[0]
         self.assertEqual(InputPurpose.CONTEXT_ROW, row_intent.purpose)
         self.assertEqual(row_bounds.center, row_intent.target)
-        self.assertEqual(row_bounds, row_intent.target_bounds)
+        self.assertEqual(
+            ScreenBounds(
+                row_bounds.center.x - 3,
+                row_bounds.center.y - 3,
+                7,
+                7,
+            ),
+            row_intent.target_bounds,
+        )
         self.assertEqual(2, len(result.receipt.intent_ids if result.receipt else ()))
         self.assertEqual(
             ["context_menu_open_safe", "context_row_safe"],
@@ -810,7 +842,7 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(["pointer"], coordinator.calls)
         intent = coordinator.pointer_intents[0]
         self.assertEqual(InputPurpose.GAMEPLAY_WIDGET, intent.purpose)
-        self.assertEqual(close.screen_bounds, intent.target_bounds)
+        self.assertEqual(ScreenBounds(107, 107, 7, 7), intent.target_bounds)
 
     def test_execution_result_is_immutable_and_has_no_mutable_backend_status(self) -> None:
         coordinator = FakeCoordinator()

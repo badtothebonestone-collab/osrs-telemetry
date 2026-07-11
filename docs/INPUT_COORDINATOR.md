@@ -52,6 +52,29 @@ It reaches the exact target at rest and contains no randomization or transport
 access. The private transport independently rejects zero moves and deltas over
 20 pixels on either axis.
 
+The coordinator aims at the center/proposed safe point but separately evaluates
+observed arrival because integer Arduino HID counts and Win32 device pixels need
+not share a one-pixel lattice at scaled display settings. It feeds the pure
+planner exact, bounded command-space waypoints, lets each plan finish at rest,
+then replans from actual cursor feedback. The complete Arduino transaction,
+including context-row movement, is capped at 64 plans and 512 MOVE commands.
+Only a settled endpoint inside an explicit caller-
+approved activation region may authorize a click; a transient crossing cannot.
+An already-stable point in that region is represented by a complete zero-step
+plan and still requires fresh actual-point validation. Gameplay regions are the
+verified target and canvas intersection clipped to three device pixels around
+the SafetyGate-approved point; saved-session login may use the complete freshly
+recognized prompt bounds inside the exact client.
+
+An unknown axis begins with one HID-count probe. Before every MOVE, all four
+directions on both screen axes must contain an explicit envelope of eight device
+pixels per HID count across the complete planner path; this also contains a
+reversed or cross-axis response within that declared envelope. Observed
+transaction transfer must not exceed four. A missing, reversed, uncommanded, or
+larger response aborts before activation. Containment remains conditional on
+the declared eight-pixel physical-transfer envelope; an unbounded or faulty
+external transfer cannot be made safe by software alone.
+
 Gameplay transit is confined to the loaded-scene telemetry canvas in Win32
 device pixels. Before a game tick can provide canvas geometry, saved-session
 login transit may use only the exact visible PID-owned Win32 RuneLite client
@@ -64,10 +87,13 @@ before trusting native bounds, screenshots, or cursor feedback; inability to
 prove that coordinate context blocks before any hardware connection.
 
 The coordinator checks focus/PID and actual cursor feedback throughout the
-trajectory. Any correction is another bounded deterministic plan. Immediately
-before activation, the caller's fresh validator must still prove the exact
-hover/default action or open-menu row. Context-menu failures attempt an
-acknowledged Escape before normal cleanup.
+trajectory. Every correction is another bounded deterministic plan. Immediately
+before activation, it passes the actual settled device-pixel point to the
+caller's fresh validator. The cursor must remain unchanged and inside both the
+verified transit and activation bounds before and after that validation. The
+validator must still prove the exact hover/default action or open-menu row at
+that actual point. Context-menu failures attempt an acknowledged Escape before
+normal cleanup.
 
 ## Supported callers
 

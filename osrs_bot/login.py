@@ -644,7 +644,10 @@ class LoginPromptHelper:
             button=MouseButton.LEFT,
         )
 
-        def validate(approved: ApprovedPointerIntent) -> InputValidation:
+        def validate(
+            approved: ApprovedPointerIntent,
+            actual_point: ScreenPoint,
+        ) -> InputValidation:
             if approved != intent:
                 return InputValidation.deny("login intent identity changed")
             try:
@@ -663,12 +666,12 @@ class LoginPromptHelper:
             if (
                 not self._same_candidate(candidate, refreshed)
                 or not self._safe_candidate(window, refreshed)
-                or not refreshed.match_bounds.contains(intent.target)
+                or not refreshed.match_bounds.contains(actual_point)
             ):
                 return InputValidation.deny(
                     "recognized prompt changed after pointer movement"
                 )
-            if not self._point_owner(window, intent.target):
+            if not self._point_owner(window, actual_point):
                 return InputValidation.deny(
                     "click point no longer belongs to the exact RuneLite window"
                 )

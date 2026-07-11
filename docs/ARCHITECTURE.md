@@ -200,9 +200,13 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
 
 1. opens one private Arduino transport, command ledger, and armed transaction;
 2. constrains deterministic relative movement to the observed RuneLite canvas;
-3. moves to the exact observed screen point with bounded velocity,
-   acceleration, braking, and feedback corrections;
-4. asks the caller's lane-specific validator for fresh evidence;
+3. selects bounded command-space waypoints toward the exact observed screen
+   point, runs the pure exact planner for each waypoint with bounded velocity,
+   acceleration, braking, four-sided transfer headroom, transaction-wide plan
+   and MOVE caps, and actual-feedback correction, then accepts only a complete-
+   plan settled endpoint inside the caller's explicit activation region;
+4. passes that actual stable device-pixel endpoint to the caller's
+   lane-specific validator for fresh evidence;
 5. requires a newer menu sample whose top/default entry, scene parameters, and
    pointer position match the intended target;
 6. when the exact action is a unique lower context entry, opens the menu,

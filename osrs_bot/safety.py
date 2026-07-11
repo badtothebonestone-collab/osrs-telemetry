@@ -21,6 +21,9 @@ from .model import (
 )
 
 
+POINTER_MATCH_TOLERANCE_PX = 3
+
+
 @dataclass(frozen=True, slots=True)
 class SafetyResult:
     allowed: bool
@@ -913,7 +916,9 @@ def _valid_bounds(bounds: ScreenBounds) -> bool:
 
 
 def _points_close(
-    actual: ScreenPoint | None, expected: ScreenPoint | None, tolerance: int = 3
+    actual: ScreenPoint | None,
+    expected: ScreenPoint | None,
+    tolerance: int = POINTER_MATCH_TOLERANCE_PX,
 ) -> bool:
     return bool(
         actual is not None

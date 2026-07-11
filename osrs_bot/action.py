@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from .input_coordinator import (
@@ -25,7 +25,13 @@ from .model import (
     ScreenPoint,
     WidgetTarget,
 )
-from .safety import SafetyCheck, SafetyEvaluation, SafetyGate, SafetyResult
+from .safety import (
+    POINTER_MATCH_TOLERANCE_PX,
+    SafetyCheck,
+    SafetyEvaluation,
+    SafetyGate,
+    SafetyResult,
+)
 
 
 class _ActionBlocked(RuntimeError):
@@ -226,9 +232,13 @@ class CoordinatedActionInterface:
     ) -> InputReceipt:
         intent = self._pointer_intent(action, observation)
 
-        def validate(_intent: ApprovedPointerIntent) -> InputValidation:
+        def validate(
+            _intent: ApprovedPointerIntent,
+            actual_point: ScreenPoint,
+        ) -> InputValidation:
+            actual_action = replace(action, screen_point=actual_point)
             post, result, _ = self._await_post_move(
-                action,
+                actual_action,
                 {
                     "menu_sample_not_newer",
                     "hover_pointer_mismatch",
@@ -252,12 +262,16 @@ class CoordinatedActionInterface:
         canvas = self._required_canvas(observation)
         context_minimum_tick: list[int | None] = [None]
         row_minimum_tick: list[int | None] = [None]
+        actual_action: list[Action | None] = [None]
 
         def decide_activation(
             _intent: ApprovedPointerIntent,
+            actual_point: ScreenPoint,
         ) -> PointerActivationDecision:
+            moved_action = replace(action, screen_point=actual_point)
+            actual_action[0] = moved_action
             post, hover, context = self._await_post_move(
-                action,
+                moved_action,
                 {
                     "menu_sample_not_newer",
                     "hover_pointer_mismatch",
@@ -279,15 +293,18 @@ class CoordinatedActionInterface:
             minimum_tick = context_minimum_tick[0]
             if minimum_tick is None:
                 raise _ActionBlocked("menu_sample_missing")
+            moved_action = actual_action[0]
+            if moved_action is None:
+                raise _ActionBlocked("actual_pointer_sample_missing")
             opened, result = self._await_context_menu(
-                action,
+                moved_action,
                 minimum_tick=minimum_tick,
                 safety_checks=safety_checks,
             )
             last_observation[0] = opened
             if not result.allowed:
                 raise _ActionBlocked(result.reason)
-            entry = self._exact_context_entry(action, opened)
+            entry = self._exact_context_entry(moved_action, opened)
             if entry is None or entry.row_bounds is None:
                 raise _ActionBlocked("context_row_bounds_missing")
             if opened.menu_client_tick is None:
@@ -310,14 +327,20 @@ class CoordinatedActionInterface:
                 button=MouseButton.LEFT,
             )
 
-        def validate_row(row_intent: ApprovedPointerIntent) -> InputValidation:
+        def validate_row(
+            row_intent: ApprovedPointerIntent,
+            actual_point: ScreenPoint,
+        ) -> InputValidation:
             minimum_tick = row_minimum_tick[0]
             if minimum_tick is None:
                 return InputValidation.deny("menu_sample_missing")
+            moved_action = actual_action[0]
+            if moved_action is None:
+                return InputValidation.deny("actual_pointer_sample_missing")
             row_observation, result = self._await_context_menu(
-                action,
+                moved_action,
                 minimum_tick=minimum_tick,
-                row_point=row_intent.target,
+                row_point=actual_point,
                 safety_checks=safety_checks,
             )
             last_observation[0] = row_observation
@@ -447,15 +470,25 @@ class CoordinatedActionInterface:
     ) -> ScreenBounds:
         if target_bounds is None:
             return ScreenBounds(point.x, point.y, 1, 1)
-        left = max(target_bounds.x, canvas.x)
-        top = max(target_bounds.y, canvas.y)
+        left = max(
+            target_bounds.x,
+            canvas.x,
+            point.x - POINTER_MATCH_TOLERANCE_PX,
+        )
+        top = max(
+            target_bounds.y,
+            canvas.y,
+            point.y - POINTER_MATCH_TOLERANCE_PX,
+        )
         right = min(
             target_bounds.x + target_bounds.width,
             canvas.x + canvas.width,
+            point.x + POINTER_MATCH_TOLERANCE_PX + 1,
         )
         bottom = min(
             target_bounds.y + target_bounds.height,
             canvas.y + canvas.height,
+            point.y + POINTER_MATCH_TOLERANCE_PX + 1,
         )
         if right <= left or bottom <= top:
             raise ValueError("verified target bounds do not intersect canvas")
