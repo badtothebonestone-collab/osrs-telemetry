@@ -34,9 +34,9 @@ There is one observation truth, one runtime orchestrator, one active explicit
 task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
-The architecture is being migrated in bounded checkpoints. The current column
-describes the Phase 7 implementation; the target column names only contracts
-still owned by later phases.
+The bounded architecture migration is complete through Phase 8. The current
+column is implemented; the target column now names only preservation rules and
+the later GUI consumer.
 
 | Layer | Current baseline | Governing target |
 |---|---|---|
@@ -46,12 +46,12 @@ still owned by later phases.
 | Task | minimal `Task` protocol plus definition-bound concrete `WoodcutBankTask` FSM | preserve the protocol and explicit task-specific transitions |
 | Decision | opaque state/action plus immutable selected/eligible/rejected evidence from the actual task path | preserve this task-neutral evidence contract for frontends |
 | Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
-| Runtime configuration | immutable endpoint/Arduino/poll/bound values with engine caps | same contract consumed by the future facade |
+| Runtime configuration | immutable endpoint/Arduino/poll/bound values with engine caps | same contract consumed by every frontend |
 | Input | one `InputCoordinator`, deterministic pointer policy, private Arduino transport, immutable wire receipts | preserve the sole-owner boundary for every future caller |
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
 | Diagnostics | one immutable latest `EngineFrame` plus optional passive click-through overlay | preserve one no-authority status contract for recorder/frontend readers |
 | Demonstration evidence | bounded read-only recorder plus tamper-verifying semantic inspector | preserve append-only, no-replay, review-only evidence |
-| Frontend | `run.cmd` | thin application facade and future GUI consuming the same contracts |
+| Frontend | tokenized `EngineApplication` facade plus minimal foreground CLI | future GUI consuming the same facade without engine logic |
 
 ## Ownership boundaries
 
@@ -282,8 +282,8 @@ make it click-through, non-focusable, layered, and tool-window-only. It has no
 input handlers, target selection, SafetyGate calls, or Arduino imports, and an
 overlay failure cannot alter runtime control.
 
-The recorder, future CLI facade, and GUI consume immutable read contracts.
-Readers may
+The recorder, implemented CLI facade, and future GUI consume immutable read
+contracts. Readers may
 format or filter it but may not reselect a target, recalculate safety, mutate
 the FSM, import Arduino control, or authorize input.
 
@@ -306,26 +306,41 @@ candidates contain authoritative world anchors, actions, plane transitions,
 known game-object IDs, or NPC IDs correlated through an exact same-tick census.
 Walk, player, widget, incomplete, and uncorrelated menu identifiers cannot
 become entity candidates. Input coordinates are omitted and every candidate is
-review-only and never automatically active. The recorder imports no runtime, safety, task,
-input, login, or Arduino authority.
+review-only and never automatically active. The recorder imports no runtime,
+safety, task, input, login, or Arduino authority.
 
-## Frontend target
+## Application facade and frontend
 
-The frontend facade exposes only high-level lifecycle and read contracts: list
-supported tasks/definitions, inspect and validate profile fields, start, pause,
-request safe stop, read `EngineFrame`, read statistics/blockers, and begin/end
-demonstration capture. It delegates all task, safety, input, and verification
-logic to the engine.
+`EngineApplication` is the implemented composition root. It lists the exact one
+task/definition, returns the frontend-safe profile schema, reuses authoritative
+profile validation, creates a fresh task/runtime/control for each start, returns
+the exact latest EngineFrame and runtime-owned statistics, reports exact
+blockers, and owns mutually exclusive run/demonstration worker lifecycles.
+
+Run and capture commands carry monotonic local IDs, so delayed UI commands
+cannot affect a later operation. Pause is acknowledged only at a no-input
+boundary; an Observation held across pause is discarded. Once decision emits
+an executable action, Arduino transaction, cleanup, bounded verification, and
+typed transition finish before pause/safe-stop acknowledgement. Pause never
+extends the hard runtime bound. No thread is killed and safe stop opens no extra
+hardware session.
+
+The facade imports the concrete task only to compose the sole supported engine.
+It has no target selection, SafetyGate, Verifier, InputCoordinator, Arduino, or
+raw-input calls. `run.cmd app` exposes catalog/profile and foreground run
+commands; Ctrl+C becomes cooperative safe stop. There is no daemon, IPC layer,
+or GUI. See `docs/FRONTEND_CONTRACT.md`.
 
 ## Vision and LLM boundaries
 
-RuneLite remains authoritative for identity and semantic state. A future
-`VisionEvidence` record contains capture time, exact crop/transform,
-model/version, class/confidence, bounds or mask, and occlusion/image-quality
-status. Vision may supplement or veto an unsafe condition, or propose a point
-inside API-confirmed geometry; it may not overwrite session, tick, player,
-inventory, entity, menu, or widget facts. No vision model dependency is part of
-the active mission.
+RuneLite remains authoritative for identity and semantic state. The implemented
+dependency-free `VisionEvidence` seam contains capture time, exact
+crop/transform, model/version, class/confidence, bounds or mask, and
+occlusion/image-quality status. It is frozen, explicitly non-authoritative, and
+has no runtime consumer or model dependency. Vision may later supplement or
+veto an unsafe condition, or propose a point inside API-confirmed geometry; it
+may not overwrite session, tick, player, inventory, entity, menu, or widget
+facts.
 
 No LLM participates in runtime control. A future offline assistant may read
 immutable definitions, demonstration artifacts, run history, and diagnostic

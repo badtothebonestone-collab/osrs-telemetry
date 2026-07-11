@@ -2208,6 +2208,7 @@ def record_live(
     poll_seconds: float = 0.05,
     annotations: Iterable[str] = (),
     screenshots_enabled: bool = True,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> Path:
     if (
         isinstance(duration_seconds, bool)
@@ -2223,6 +2224,9 @@ def record_live(
         or not 0.02 <= float(poll_seconds) <= 5.0
     ):
         raise DemonstrationError("poll_seconds must be between 0.02 and 5.0")
+    if stop_requested is not None and not callable(stop_requested):
+        raise DemonstrationError("stop_requested must be callable or None")
+    should_stop = stop_requested or (lambda: False)
     recorder = DemonstrationRecorder(
         name,
         output_root=output_root,
@@ -2236,7 +2240,13 @@ def record_live(
     consecutive_errors = 0
     try:
         while time.monotonic() < deadline:
+            if should_stop():
+                reason = "facade_stop_requested"
+                break
             time.sleep(min(float(poll_seconds), max(0.0, deadline - time.monotonic())))
+            if should_stop():
+                reason = "facade_stop_requested"
+                break
             if time.monotonic() >= deadline:
                 break
             try:

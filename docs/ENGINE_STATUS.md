@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 7 complete — bounded manual demonstration evidence and inspection established.**
+**Phase 8 complete — thin frontend contracts and cooperative lifecycle established.**
 
-Current checkpoint subject: `demonstrations: capture read-only semantic evidence`
+Current checkpoint subject: `app: expose thin frontend contracts`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -99,6 +99,25 @@ Regression command:
   automatic, and invalid evidence emits no suggestions.
 - Demonstration and screenshot modules import no runtime, task, safety, login,
   input coordinator, Arduino, or software input authority.
+- `EngineApplication` now exposes the exact one-task/one-definition catalog,
+  fresh profile schema, authoritative profile validation, and fresh
+  task/runtime/control construction for each start.
+- Monotonic run and capture IDs reject delayed commands. Automation and manual
+  demonstration workers are serialized and mutually exclusive, including
+  concurrent start races.
+- Runtime pause is acknowledged only at a no-input boundary and discards an
+  Observation held across the pause. Once an action is decided, safe stop waits
+  for its Arduino transaction, cleanup receipt, bounded verification, and typed
+  transition. Pause never extends the hard runtime bound.
+- The facade returns the exact latest `EngineFrame`, runtime-owned immutable
+  statistics, and owner-produced blockers. It does not select targets, run
+  safety, verify, own Arduino, or infer diagnostic truth.
+- `run.cmd app` provides catalog/profile inspection, validation, foreground
+  dry-run, and explicit Arduino execute mode. `Ctrl+C` becomes cooperative safe
+  stop; there is no daemon, IPC surface, or full GUI.
+- The future GUI screen/restart contract is documented. The frozen
+  `VisionEvidence` type is only a dependency-free non-authoritative seam; no
+  vision model or runtime consumer was added.
 
 ## Governing direction
 
@@ -143,6 +162,9 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   Java suite 42 passed across 6 suites with zero failures/errors/skips.
 - Phase 7 gate: golden replay 2 passed; 267 Python tests passed; forced fresh
   Java suite 51 passed across 6 suites with zero failures/errors/skips.
+- Phase 8 gate: golden replay 2 passed; 301 Python tests passed; forced fresh
+  Java suite 51 passed across 6 suites with zero failures/errors/skips; facade
+  catalog, profile-schema, and default-profile validation commands succeeded.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -167,5 +189,5 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
-  and demonstration contracts are implemented. **Phase 8 is next**; only the
-  thin facade remains before the bounded final regression.
+  demonstration, and frontend composition contracts are implemented. Only the
+  bounded final regression remains.

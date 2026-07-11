@@ -95,20 +95,23 @@ propose a point inside an API-confirmed clickbox. It may not overwrite
 authoritative RuneLite identity, state, session, tick, inventory, menu, or
 widget facts. No YOLO/model dependency is part of the active mission.
 
-In the target architecture, all automated input, including saved-session login
-assistance, goes through one Arduino coordinator. The current baseline has two
-Arduino-backed session owners that Phase 5 must consolidate. There is no
-software-input gameplay fallback. Exact post-move hover/menu revalidation and
-later outcome verification remain mandatory.
+All automated input, including saved-session login assistance, now goes through
+one `InputCoordinator`. The Arduino transport is private and there is no
+software-input gameplay fallback. Exact post-move hover/menu revalidation,
+later outcome verification, and authoritative cleanup remain mandatory.
 
-## Diagnostics and future frontend
+## Diagnostics, application facade, and future GUI
 
-The target runtime will publish one immutable `EngineFrame`. It includes
+The runtime publishes one immutable `EngineFrame`. It includes
 task/state, definition/profile, progress, selected and rejected targets,
 ordered safety checks, pending and last verification, last execution receipt,
 cleanup status, and blockers.
 
-Recorders, overlays, CLIs, and future GUI surfaces consume that same frame.
+The implemented `EngineApplication` facade exposes the exact one-task catalog,
+profile schema/validation, tokenized start/pause/resume/safe-stop lifecycle,
+runtime-owned statistics/blockers, exact EngineFrame, and mutually exclusive
+demonstration begin/end. Recorders, overlays, CLIs, and future GUI surfaces
+consume those contracts.
 They are read-only observers except for explicit high-level lifecycle commands.
 They never select targets, recalculate safety, own task state, or authorize
 input. The engine continues normally when diagnostics are disabled.
@@ -151,3 +154,6 @@ committed replay and bounded live evidence while the internals gain coherent
 sensor truth, a minimal task seam, a validated definition/profile, one Arduino
 owner, one diagnostic frame, passive inspection tools, and thin lifecycle
 contracts—without broadening into a generic control system.
+
+The full GUI remains future work. The current CLI/facade proves its contracts
+without adding GUI-owned task, safety, input, or verification logic.

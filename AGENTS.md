@@ -15,6 +15,7 @@ Read in this order:
 9. `docs/INPUT_COORDINATOR.md`
 10. `docs/ENGINE_FRAME.md`
 11. `docs/DEMONSTRATIONS.md`
+12. `docs/FRONTEND_CONTRACT.md`
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.
@@ -49,7 +50,9 @@ Keep one source of truth for each layer:
 - one `SafetyGate` with non-overridable engine invariants;
 - one Arduino session owner and automated input path;
 - one typed verification/outcome path;
-- one immutable diagnostic `EngineFrame` with no control authority.
+- one immutable diagnostic `EngineFrame` with no control authority;
+- one thin application facade that composes those owners without duplicating
+  them.
 
 RuneLite API facts are authoritative for session/ticks, player position and
 plane, inventory/equipment, entity identity/actions, menus/widgets, and game
@@ -91,6 +94,9 @@ login/recovery surfaces fail closed.
   item IDs, route facts, or mutable progress internals.
 - Demonstrations and historical runs are append-only evidence. They may suggest
   reviewed definition/fixture changes but never authorize input or raw replay.
+- Frontend lifecycle commands must carry the current run/capture ID. Pause and
+  safe stop are cooperative at no-input boundaries; never kill a worker or
+  interrupt an Arduino transaction/pending verification.
 - An LLM may read immutable definitions and evidence offline; it must never emit
   runtime input or bypass the FSM, safety gate, input coordinator, or verifier.
 - Prefer deletion and direct OSRS-specific code over speculative abstraction.
@@ -117,4 +123,6 @@ With RuneLite closed:
 
 Read-only live commands are `run.cmd observe`, `run.cmd task`, and
 `run.cmd record-demo NAME`; `run.cmd inspect-demo PATH` verifies finalized
-evidence offline. Gameplay is explicitly opt-in through `run.cmd execute COMx`.
+evidence offline. `run.cmd app catalog|profile-schema|validate-profile` exposes
+the frontend contract. Gameplay is explicitly opt-in through
+`run.cmd execute COMx` or `run.cmd app run --execute --arduino-port COMx`.

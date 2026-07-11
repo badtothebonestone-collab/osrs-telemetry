@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
+from enum import Enum
 from typing import Callable, Protocol
 
 from .action import CoordinatedActionInterface, ExecutionResult
@@ -22,6 +24,151 @@ from .verification import VerificationResult, VerificationStatus, Verifier
 LIVE_FOCUS_HANDOFF_SECONDS = 15.0
 
 
+class RuntimeControlState(str, Enum):
+    RUNNING = "running"
+    PAUSE_REQUESTED = "pause_requested"
+    PAUSED = "paused"
+    SAFE_STOP_REQUESTED = "safe_stop_requested"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeControlSnapshot:
+    state: RuntimeControlState
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeBoundary:
+    safe_stop_requested: bool
+    pause_observed: bool
+    timed_out: bool
+
+
+class RuntimeControl:
+    """Cooperative lifecycle requests observed only at safe runtime boundaries."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._pause_requested = False
+        self._paused_at_boundary = False
+        self._safe_stop_requested = False
+
+    def request_pause(self) -> RuntimeControlSnapshot:
+        with self._condition:
+            if not self._safe_stop_requested:
+                self._pause_requested = True
+            self._condition.notify_all()
+            return self._snapshot_unlocked()
+
+    def resume(self) -> RuntimeControlSnapshot:
+        with self._condition:
+            if not self._safe_stop_requested:
+                self._pause_requested = False
+            self._condition.notify_all()
+            return self._snapshot_unlocked()
+
+    def request_safe_stop(self) -> RuntimeControlSnapshot:
+        with self._condition:
+            self._safe_stop_requested = True
+            self._pause_requested = False
+            self._condition.notify_all()
+            return self._snapshot_unlocked()
+
+    def snapshot(self) -> RuntimeControlSnapshot:
+        with self._condition:
+            return self._snapshot_unlocked()
+
+    def wait_for_state(
+        self, state: RuntimeControlState, timeout: float | None = None
+    ) -> bool:
+        if not isinstance(state, RuntimeControlState):
+            raise TypeError("state must be RuntimeControlState")
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be non-negative or None")
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: self._snapshot_unlocked().state is state,
+                timeout=None if timeout is None else float(timeout),
+            )
+
+    def wait_at_boundary(
+        self, *, timeout_seconds: float | None = None
+    ) -> RuntimeBoundary:
+        """Acknowledge pause/stop only between indivisible engine units."""
+
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds < 0
+        ):
+            raise ValueError("timeout_seconds must be non-negative or None")
+        with self._condition:
+            pause_observed = False
+            timed_out = False
+            deadline = (
+                None
+                if timeout_seconds is None
+                else time.monotonic() + float(timeout_seconds)
+            )
+            if self._pause_requested and not self._safe_stop_requested:
+                pause_observed = True
+                self._paused_at_boundary = True
+                self._condition.notify_all()
+                while self._pause_requested and not self._safe_stop_requested:
+                    remaining = (
+                        None
+                        if deadline is None
+                        else max(0.0, deadline - time.monotonic())
+                    )
+                    notified = self._condition.wait(
+                        timeout=remaining
+                    )
+                    if not notified and self._pause_requested:
+                        timed_out = True
+                        break
+                self._paused_at_boundary = False
+                self._condition.notify_all()
+            return RuntimeBoundary(
+                self._safe_stop_requested,
+                pause_observed,
+                timed_out,
+            )
+
+    def _snapshot_unlocked(self) -> RuntimeControlSnapshot:
+        if self._safe_stop_requested:
+            state = RuntimeControlState.SAFE_STOP_REQUESTED
+        elif self._paused_at_boundary:
+            state = RuntimeControlState.PAUSED
+        elif self._pause_requested:
+            state = RuntimeControlState.PAUSE_REQUESTED
+        else:
+            state = RuntimeControlState.RUNNING
+        return RuntimeControlSnapshot(state)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStatistics:
+    active: bool
+    status: str
+    reason: str | None
+    observations: int
+    actions: int
+    last_tick: int | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "active": self.active,
+            "status": self.status,
+            "reason": self.reason,
+            "observations": self.observations,
+            "actions": self.actions,
+            "lastTick": self.last_tick,
+        }
+
+
 class _ActionInterface(Protocol):
     def execute(self, action: Action, observation: Observation) -> ExecutionResult: ...
 
@@ -40,7 +187,7 @@ class RuntimeResult:
 
     @property
     def successful(self) -> bool:
-        return self.status in {"COMPLETE", "DRY_RUN"}
+        return self.status in {"COMPLETE", "DRY_RUN", "SAFE_STOPPED"}
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -114,6 +261,7 @@ class TaskRuntime:
         *,
         configuration: RuntimeConfig = DEFAULT_RUNTIME_CONFIG,
         frame_publisher: EngineFramePublisher | None = None,
+        control: RuntimeControl | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -138,18 +286,44 @@ class TaskRuntime:
         ):
             raise TypeError("frame_publisher must be EngineFramePublisher or None")
         self._frame_publisher = frame_publisher or EngineFramePublisher()
+        if control is not None and not isinstance(control, RuntimeControl):
+            raise TypeError("control must be RuntimeControl or None")
+        self._control = control
         self._frame_observation: Observation | None = None
         self._frame_decision: Decision | None = None
         self._frame_execution: ExecutionResult | None = None
         self._frame_verification: VerificationResult | None = None
         self._frame_pending: VerificationSpec | None = None
         self._frame_publish_error: str | None = None
+        self._statistics_lock = threading.Lock()
+        self._statistics = RuntimeStatistics(False, "IDLE", None, 0, 0, None)
 
     @property
     def frame_publisher(self) -> EngineFramePublisher:
         return self._frame_publisher
 
+    def statistics(self) -> RuntimeStatistics:
+        with self._statistics_lock:
+            return self._statistics
+
+    def record_worker_failure(self, reason: str) -> RuntimeStatistics:
+        """Close statistics if an unexpected exception escapes run()."""
+
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be non-empty text")
+        current = self.statistics()
+        self._update_statistics(
+            False,
+            "ERROR",
+            reason,
+            current.observations,
+            current.actions,
+            current.last_tick,
+        )
+        return self.statistics()
+
     def run(self, *, execute: bool = False) -> RuntimeResult:
+        self._update_statistics(True, "RUNNING", None, 0, 0, None)
         self._reset_frame_state()
         self._publish_frame(EngineStage.STARTING)
         if execute and self._action_interface is None:
@@ -164,7 +338,54 @@ class TaskRuntime:
         runtime_deadline = self._clock() + self._max_runtime_seconds
         focus_deadline = self._clock() + LIVE_FOCUS_HANDOFF_SECONDS
 
+        def control_boundary() -> RuntimeBoundary:
+            if self._control is None:
+                return RuntimeBoundary(False, False, False)
+            remaining = max(0.0, runtime_deadline - self._clock())
+            return self._control.wait_at_boundary(
+                timeout_seconds=remaining
+            )
+
+        boundary = control_boundary()
+        if boundary.timed_out:
+            return self._result(
+                "LIMIT",
+                "runtime limit reached while paused",
+                observations,
+                actions,
+                last_tick,
+                last_decision,
+            )
+        if boundary.safe_stop_requested:
+            return self._result(
+                "SAFE_STOPPED",
+                "safe stop requested before observation",
+                observations,
+                actions,
+                last_tick,
+                last_decision,
+            )
+
         while observations < self._max_observations and self._clock() <= runtime_deadline:
+            boundary = control_boundary()
+            if boundary.timed_out:
+                return self._result(
+                    "LIMIT",
+                    "runtime limit reached while paused",
+                    observations,
+                    actions,
+                    last_tick,
+                    last_decision,
+                )
+            if boundary.safe_stop_requested:
+                return self._result(
+                    "SAFE_STOPPED",
+                    "safe stop acknowledged at an observation boundary",
+                    observations,
+                    actions,
+                    last_tick,
+                    last_decision,
+                )
             try:
                 observation = self._fetch()
             except Exception as error:  # endpoint and schema failures are terminal
@@ -178,8 +399,34 @@ class TaskRuntime:
                 )
             observations += 1
             last_tick = observation.tick
+            self._update_statistics(
+                True, "RUNNING", None, observations, actions, last_tick
+            )
             self._frame_observation = observation
             self._publish_frame(EngineStage.OBSERVED)
+            boundary = control_boundary()
+            if boundary.timed_out:
+                return self._result(
+                    "LIMIT",
+                    "runtime limit reached while paused",
+                    observations,
+                    actions,
+                    last_tick,
+                    last_decision,
+                )
+            if boundary.safe_stop_requested:
+                return self._result(
+                    "SAFE_STOPPED",
+                    "safe stop acknowledged before task decision",
+                    observations,
+                    actions,
+                    last_tick,
+                    last_decision,
+                )
+            if boundary.pause_observed:
+                # A pause can make a previously fresh observation stale. It is
+                # diagnostic evidence only; refetch before task state changes.
+                continue
             if execute and (
                 not observation.client_focused
                 or observation.client_process_id is None
@@ -303,6 +550,9 @@ class TaskRuntime:
                     decision,
                 )
             actions += 1
+            self._update_statistics(
+                True, "RUNNING", None, observations, actions, last_tick
+            )
             self._frame_execution = execution
             self._publish_frame(EngineStage.EXECUTED, task_snapshot=task_snapshot)
             if not execution.sent:
@@ -355,6 +605,9 @@ class TaskRuntime:
                     )
                 observations += 1
                 last_tick = candidate.tick
+                self._update_statistics(
+                    True, "RUNNING", None, observations, actions, last_tick
+                )
                 self._frame_observation = candidate
                 self._publish_frame(EngineStage.OBSERVED)
                 try:
@@ -460,6 +713,27 @@ class TaskRuntime:
                     decision,
                     execution,
                 )
+            boundary = control_boundary()
+            if boundary.timed_out:
+                return self._result(
+                    "LIMIT",
+                    "runtime limit reached while paused",
+                    observations,
+                    actions,
+                    last_tick,
+                    decision,
+                    execution,
+                )
+            if boundary.safe_stop_requested:
+                return self._result(
+                    "SAFE_STOPPED",
+                    "safe stop acknowledged after action verification",
+                    observations,
+                    actions,
+                    last_tick,
+                    decision,
+                    execution,
+                )
 
         reason = (
             "runtime limit reached"
@@ -469,6 +743,25 @@ class TaskRuntime:
         return self._result(
             "LIMIT", reason, observations, actions, last_tick, last_decision
         )
+
+    def _update_statistics(
+        self,
+        active: bool,
+        status: str,
+        reason: str | None,
+        observations: int,
+        actions: int,
+        last_tick: int | None,
+    ) -> None:
+        with self._statistics_lock:
+            self._statistics = RuntimeStatistics(
+                active,
+                status,
+                reason,
+                observations,
+                actions,
+                last_tick,
+            )
 
     def _reset_frame_state(self) -> None:
         self._frame_observation = None
@@ -591,6 +884,14 @@ class TaskRuntime:
         )
         if terminal_frame is None:
             terminal_frame = self._frame_publisher.latest()
+        self._update_statistics(
+            False,
+            status,
+            reason,
+            observations,
+            actions,
+            last_tick,
+        )
         return RuntimeResult(
             status=status,
             reason=reason,
@@ -604,11 +905,39 @@ class TaskRuntime:
         )
 
 
+def build_runtime(
+    client: ObservationClient,
+    task: Task,
+    *,
+    configuration: RuntimeConfig,
+    execute: bool,
+    control: RuntimeControl | None = None,
+) -> TaskRuntime:
+    """Compose the existing dry/live engine without moving authority upward."""
+
+    configuration.validated_for_mode(execute=execute)
+    if execute:
+        return build_live_runtime(
+            client,
+            task,
+            configuration=configuration,
+            control=control,
+        )
+    return TaskRuntime(
+        client,
+        task,
+        Verifier(),
+        configuration=configuration,
+        control=control,
+    )
+
+
 def build_live_runtime(
     client: ObservationClient,
     task: Task,
     *,
     configuration: RuntimeConfig,
+    control: RuntimeControl | None = None,
 ) -> TaskRuntime:
     from .safety import SafetyGate
 
@@ -627,4 +956,5 @@ def build_live_runtime(
         Verifier(),
         action_interface,
         configuration=configuration,
+        control=control,
     )

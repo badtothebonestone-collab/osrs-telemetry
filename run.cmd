@@ -12,10 +12,11 @@ if /I "%MODE%"=="login" goto login
 if /I "%MODE%"=="execute" goto execute
 if /I "%MODE%"=="record-demo" goto record_demo
 if /I "%MODE%"=="inspect-demo" goto inspect_demo
+if /I "%MODE%"=="app" goto app
 if /I "%MODE%"=="replay" goto replay
 if /I "%MODE%"=="test" goto test
 
-echo Usage: run.cmd [plugin^|observe^|task [--overlay]^|login COMx^|execute COMx [--overlay]^|record-demo NAME [options]^|inspect-demo PATH^|replay^|test] 1>&2
+echo Usage: run.cmd [plugin^|observe^|task [--overlay]^|login COMx^|execute COMx [--overlay]^|record-demo NAME [options]^|inspect-demo PATH^|app COMMAND [options]^|replay^|test] 1>&2
 exit /b 2
 
 :plugin
@@ -60,6 +61,14 @@ if "%~2"=="" (
     exit /b 2
 )
 python -m osrs_bot.demonstration inspect "%~2"
+exit /b %ERRORLEVEL%
+
+:app
+if "%~2"=="" (
+    echo Application facade requires a command: catalog, profile-schema, validate-profile, or run. 1>&2
+    exit /b 2
+)
+python -m osrs_bot.application_cli %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %ERRORLEVEL%
 
 :replay

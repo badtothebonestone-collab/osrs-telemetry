@@ -18,6 +18,7 @@ from osrs_bot.demonstration import (
     DemonstrationLimitReached,
     DemonstrationRecorder,
     inspect_demonstration,
+    record_live,
 )
 from osrs_bot.model import ScreenBounds, WorldPoint
 from osrs_bot.observation import DemonstrationEvidenceSnapshot, parse_observation
@@ -261,6 +262,28 @@ def _rehash_file(artifact: Path, relative: str) -> None:
 
 
 class DemonstrationRecorderTests(unittest.TestCase):
+    def test_external_stop_finalizes_a_verified_artifact(self) -> None:
+        class Client:
+            @staticmethod
+            def fetch_demonstration_evidence():
+                return _evidence(_base_observation(), _hot())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = record_live(
+                "facade-stop",
+                Client(),  # type: ignore[arg-type]
+                output_root=Path(temporary),
+                duration_seconds=1.0,
+                poll_seconds=0.02,
+                screenshots_enabled=False,
+                stop_requested=lambda: True,
+            )
+            result = inspect_demonstration(artifact)
+            manifest = json.loads((artifact / "manifest.json").read_text())
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertEqual("facade_stop_requested", manifest["stopReason"])
+
     def test_records_deduplicated_semantic_before_after_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             artifact = _record_fixture(Path(temporary))

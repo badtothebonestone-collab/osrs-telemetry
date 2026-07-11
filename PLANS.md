@@ -61,6 +61,11 @@ runtime logic.
   self-describing; inspection verifies them before emitting world/entity/action
   suggestions that are review-only, omit input coordinates, and can never
   activate task data or bypass normal safety proof.
+- **D014 — Frontend lifecycle is composition, not authority:** one tokenized
+  `EngineApplication` composes the existing task/runtime and demonstration
+  owners. It returns their immutable values exactly, requires current run or
+  capture IDs for commands, and acknowledges pause/safe stop only at runtime
+  boundaries that cannot abandon input cleanup or typed verification.
 
 ## Phases and acceptance
 
@@ -73,8 +78,8 @@ runtime logic.
 | 4. One task/site definition | Complete (`0c8ec9e`) | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
 | 5. Arduino boundary | Complete (`8b71ebc`) | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
-| 7. Demonstration capture | Complete (this checkpoint) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
-| 8. Frontend contracts | Pending | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
+| 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
+| 8. Frontend contracts | Complete (this checkpoint) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
 | Final regression | Pending | Full suites/replay pass; bounded fresh live observation and safe default-cycle evidence; cleanup and audits confirmed. |
 
 ## Phase 0 completed work
@@ -251,6 +256,33 @@ runtime logic.
   fresh 51-test Java suite passed across 6 suites, and `git diff --check`
   passed.
 
+## Phase 8 completed work
+
+- Added one in-process `EngineApplication` composition facade that lists the
+  exact supported task/definition, publishes a fresh frontend-safe profile
+  contract, and reuses the authoritative profile binder at every start.
+- Added monotonic run/capture IDs, serialized start/capture ownership, and
+  mutually exclusive automation/demonstration workers. Delayed IDs cannot
+  pause, stop, resume, or end a later operation.
+- Added cooperative runtime pause/resume/safe-stop control. Pause is
+  acknowledged only at no-input boundaries, observations held across pause are
+  discarded, and a decided action always finishes its Arduino transaction,
+  cleanup receipt, bounded verification, and typed transition before stop.
+- Added exact facade reads of the latest `EngineFrame`, runtime-owned immutable
+  statistics, and owner-produced blockers. Application lifecycle state remains
+  separate and cannot reinterpret task, safety, verification, or cleanup truth.
+- Added a foreground `run.cmd app` CLI for catalog/profile inspection,
+  validation, dry-run, and explicit Arduino execute mode. `Ctrl+C` requests
+  cooperative safe stop; no daemon, IPC protocol, or full GUI was added.
+- Added a frozen dependency-free `VisionEvidence` future seam with exact crop
+  transforms and model-space evidence. It is explicitly non-authoritative,
+  cannot authorize input, and has no model or runtime integration.
+- Documented the complete future GUI screen contract, restart rules, and
+  Vision/LLM authority boundaries in `docs/FRONTEND_CONTRACT.md`.
+- Final gate: golden replay 2 passed, all 301 Python tests passed, the forced
+  fresh 51-test Java suite passed across 6 suites, facade catalog/schema/profile
+  commands succeeded, and `git diff --check` passed.
+
 ## Prohibited during this mission
 
 - A second gameplay task or site, multiple woodcut areas, a generic navigation
@@ -280,7 +312,7 @@ runtime logic.
 - The demonstration path intentionally cannot observe global raw mouse-button
   or keyboard transitions; it records RuneLite semantic click evidence and
   declares those coverage gaps in every manifest.
-- No frontend facade exists yet. The overlay remains intentionally
-  diagnostic-only and still needs final loaded-scene visual comparison against
-  the live EngineFrame; one short real demonstration also remains final
-  regression evidence.
+- The implemented facade intentionally has no full GUI, daemon, or IPC layer.
+  The overlay still needs final loaded-scene visual comparison against the live
+  EngineFrame; one short real demonstration also remains final-regression
+  evidence.

@@ -1,6 +1,6 @@
 # Definitions, Profiles, and Runtime Configuration
 
-Phase 4 implements exactly one built-in task/site definition and one validated
+The engine implements exactly one built-in task/site definition and one validated
 default profile. These are typed Python values committed with the engine, not a
 loader, registry, task language, or external configuration schema.
 
@@ -38,8 +38,15 @@ The current `Profile` contains only:
 
 The default binding selects `lumbridge_west_trees_v1` and exactly one cycle.
 Unknown definitions, malformed identifiers, and any other goal fail clearly.
-There is no file loader yet. A profile has no freshness, focus, PID/session,
+There is no file loader. A profile has no freshness, focus, PID/session,
 geometry, menu, PIN, verification, input, cleanup, or runtime-limit switches.
+
+`profile_contract()` returns a fresh frontend-safe description of the three
+fields, defaults, and exact allowed definition/goal values. It explicitly says
+profiles cannot override engine invariants. `validate_profile_values()` rejects
+missing, unknown, malformed, and unsafe in-memory values, then delegates to the
+same `Profile` and built-in binder used by start. This is an inspection and
+validation contract, not a generic schema language or external loader.
 
 ## Runtime configuration
 

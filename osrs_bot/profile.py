@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from collections.abc import Mapping
+from typing import Any
 
 from .definition import LUMBRIDGE_WEST_TREES_V1, TaskSiteDefinition
 
 
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 DEFAULT_PROFILE_ID = "default_lumbridge_west_trees_v1"
+PROFILE_CONTRACT_SCHEMA = "osrs_profile_contract.v1"
 
 
 def _require_identifier(field_name: str, value: object) -> None:
@@ -69,6 +72,63 @@ def bind_builtin_profile(profile: Profile) -> BoundProfile:
         raise TypeError("profile must be a Profile")
     _validate_supported_profile(profile)
     return BoundProfile(profile=profile, definition=LUMBRIDGE_WEST_TREES_V1)
+
+
+def profile_contract() -> dict[str, Any]:
+    """Return the sole frontend-safe profile shape and its exact allowed values."""
+
+    return {
+        "schema": PROFILE_CONTRACT_SCHEMA,
+        "additionalProperties": False,
+        "fields": [
+            {
+                "name": "profileId",
+                "type": "identifier",
+                "required": True,
+                "default": DEFAULT_PROFILE.profile_id,
+                "constraints": "lowercase identifier, at most 64 characters",
+            },
+            {
+                "name": "definitionId",
+                "type": "enum",
+                "required": True,
+                "default": DEFAULT_PROFILE.definition_id,
+                "allowedValues": [LUMBRIDGE_WEST_TREES_V1.definition_id],
+            },
+            {
+                "name": "cycleGoal",
+                "type": "integer",
+                "required": True,
+                "default": DEFAULT_PROFILE.cycle_goal,
+                "allowedValues": [1],
+            },
+        ],
+        "profileMayOverrideEngineInvariants": False,
+    }
+
+
+def validate_profile_values(values: Mapping[str, object]) -> BoundProfile:
+    """Validate the in-memory frontend contract; this is not a profile loader."""
+
+    if not isinstance(values, Mapping):
+        raise TypeError("profile values must be a mapping")
+    if any(not isinstance(key, str) for key in values):
+        raise ValueError("profile field names must be strings")
+    required = {"profileId", "definitionId", "cycleGoal"}
+    actual = set(values)
+    missing = sorted(required - actual)
+    unknown = sorted(actual - required)
+    if missing:
+        raise ValueError(f"profile values are missing fields: {missing}")
+    if unknown:
+        raise ValueError(f"profile values contain unknown fields: {unknown}")
+    return bind_builtin_profile(
+        Profile(
+            profile_id=values["profileId"],  # type: ignore[arg-type]
+            definition_id=values["definitionId"],  # type: ignore[arg-type]
+            cycle_goal=values["cycleGoal"],  # type: ignore[arg-type]
+        )
+    )
 
 
 def _validate_supported_profile(profile: Profile) -> None:

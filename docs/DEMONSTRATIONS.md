@@ -31,6 +31,13 @@ oversized files, unexpected files, invalid schemas, discontinuous recorder
 sequences, or size/hash tampering. It emits no candidate suggestions when
 evidence is invalid.
 
+The in-process `EngineApplication` also exposes tokenized begin/end operations
+for a future GUI. Each capture receives a monotonic `capture_id`; an end request
+must carry the exact current ID. Automation and demonstration capture are
+mutually exclusive. Ending a capture sets the recorder's read-only stop
+predicate, waits boundedly for normal finalization, then runs this same
+inspector. It never kills the recorder thread or opens an input path.
+
 ## Captured evidence
 
 The existing `POST /snapshot` endpoint remains the only telemetry endpoint.

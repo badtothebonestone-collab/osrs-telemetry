@@ -35,6 +35,10 @@ from .task_contract import (
 )
 from .verification import OutcomeKind, VerificationResult
 
+
+WOODCUT_BANK_TASK_ID = "woodcut_bank"
+
+
 class TaskPhase(str, Enum):
     FIND_TREE = "find_tree"
     CHOP = "chop"
@@ -102,7 +106,7 @@ class WoodcutBankTask:
             else None
         )
         return TaskSnapshot(
-            task_id="woodcut_bank",
+            task_id=WOODCUT_BANK_TASK_ID,
             status=status,
             state=self.progress.phase.value,
             blocker=blocker,

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import ast
+import threading
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from osrs_bot.action import ExecutionResult
-from osrs_bot.configuration import DEFAULT_RUNTIME_CONFIG
+from osrs_bot.configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from osrs_bot.engine_frame import EngineFramePublisher, EngineStage
 from osrs_bot.input_coordinator import (
     CommandEvidence,
@@ -30,7 +32,7 @@ from osrs_bot.model import (
     WidgetObservation,
     WorldPoint,
 )
-from osrs_bot.runtime import TaskRuntime
+from osrs_bot.runtime import RuntimeControl, RuntimeControlState, TaskRuntime
 from osrs_bot.safety import SafetyGate
 from osrs_bot.task_contract import (
     Decision,
@@ -773,6 +775,193 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(52, result.actions)
         self.assertGreater(result.observations, 240)
         self.assertEqual(52, task.completed)
+
+    def test_safe_stop_before_observation_never_fetches_or_decides(self) -> None:
+        control = RuntimeControl()
+        control.request_safe_stop()
+        client = _Client(_observation(10))
+        task = _Task([_wait(10)])
+        runtime = TaskRuntime(
+            client,
+            task,
+            _Verifier(None),
+            control=control,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run()
+
+        self.assertEqual("SAFE_STOPPED", result.status)
+        self.assertTrue(result.successful)
+        self.assertEqual([], client.requests)
+        self.assertEqual(0, task.decide_calls)
+        self.assertEqual("SAFE_STOPPED", runtime.statistics().status)
+        self.assertFalse(runtime.statistics().active)
+
+    def test_pause_after_observation_discards_it_and_refetches(self) -> None:
+        control = RuntimeControl()
+
+        class PausePublisher(_RecordingPublisher):
+            requested = False
+
+            def publish(self, **values):
+                frame = super().publish(**values)
+                if frame.stage is EngineStage.OBSERVED and not self.requested:
+                    self.requested = True
+                    control.request_pause()
+                return frame
+
+        decision, _ = _executable(11)
+        task = _Task([decision])
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(None),
+            frame_publisher=PausePublisher(),
+            control=control,
+            sleep=lambda _: None,
+        )
+        results: list[object] = []
+        worker = threading.Thread(target=lambda: results.append(runtime.run()))
+        worker.start()
+
+        self.assertTrue(control.wait_for_state(RuntimeControlState.PAUSED, 1.0))
+        self.assertEqual(0, task.decide_calls)
+        control.resume()
+        worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        result = results[0]
+        self.assertEqual("DRY_RUN", result.status)
+        self.assertEqual(2, result.observations)
+        self.assertEqual(1, task.decide_calls)
+        self.assertEqual(11, result.decision.action.source_tick)
+
+    def test_stop_requested_during_decide_finishes_action_verification(self) -> None:
+        control = RuntimeControl()
+        decision, _ = _executable(10)
+
+        class StopDuringDecisionTask(_Task):
+            def decide(self, observation: Observation) -> Decision:
+                result = super().decide(observation)
+                control.request_safe_stop()
+                return result
+
+        task = StopDuringDecisionTask([decision])
+        execution = _sent_execution(decision.action, 10, 11)
+        interface = _ActionInterface(execution)
+        passed = VerificationResult(
+            VerificationStatus.PASS,
+            "log gained",
+            Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 11),
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(passed),
+            interface,
+            control=control,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("SAFE_STOPPED", result.status)
+        self.assertEqual(1, result.actions)
+        self.assertEqual([passed], task.applied)
+        self.assertEqual(1, len(interface.calls))
+        self.assertIs(result.execution, execution)
+        self.assertTrue(result.execution.cleanup_confirmed)
+        self.assertIsNone(result.engine_frame.pending_verification)
+        self.assertEqual("SAFE_STOPPED", runtime.statistics().status)
+
+    def test_pause_requested_during_decide_waits_for_action_verification(self) -> None:
+        control = RuntimeControl()
+        decision, _ = _executable(10)
+
+        class PauseDuringDecisionTask(_Task):
+            def decide(self, observation: Observation) -> Decision:
+                result = super().decide(observation)
+                control.request_pause()
+                return result
+
+        task = PauseDuringDecisionTask([decision])
+        execution = _sent_execution(decision.action, 10, 11)
+        interface = _ActionInterface(execution)
+        passed = VerificationResult(
+            VerificationStatus.PASS,
+            "log gained",
+            Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 11),
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(passed),
+            interface,
+            control=control,
+            sleep=lambda _: None,
+        )
+        results: list[object] = []
+        worker = threading.Thread(target=lambda: results.append(runtime.run(execute=True)))
+        worker.start()
+
+        self.assertTrue(control.wait_for_state(RuntimeControlState.PAUSED, 1.0))
+        self.assertEqual([passed], task.applied)
+        self.assertEqual(1, len(interface.calls))
+        self.assertTrue(execution.cleanup_confirmed)
+        self.assertIsNone(runtime.frame_publisher.latest().pending_verification)
+        control.request_safe_stop()
+        worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("SAFE_STOPPED", results[0].status)
+
+    def test_safe_stop_wakes_a_paused_runtime(self) -> None:
+        control = RuntimeControl()
+        control.request_pause()
+        runtime = TaskRuntime(
+            _Client(_observation(10)),
+            _Task([_wait(10)]),
+            _Verifier(None),
+            control=control,
+            sleep=lambda _: None,
+        )
+        results: list[object] = []
+        worker = threading.Thread(target=lambda: results.append(runtime.run()))
+        worker.start()
+
+        self.assertTrue(control.wait_for_state(RuntimeControlState.PAUSED, 1.0))
+        control.request_safe_stop()
+        worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("SAFE_STOPPED", results[0].status)
+
+    def test_pause_cannot_extend_the_hard_runtime_bound(self) -> None:
+        control = RuntimeControl()
+        control.request_pause()
+        configuration = RuntimeConfig(
+            poll_seconds=0.01,
+            max_observations=2,
+            max_actions=1,
+            max_runtime_seconds=0.05,
+            verification_timeout_seconds=0.02,
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10)),
+            _Task([_wait(10)]),
+            _Verifier(None),
+            configuration=configuration,
+            control=control,
+            sleep=lambda _: None,
+        )
+
+        started = time.monotonic()
+        result = runtime.run()
+
+        self.assertEqual("LIMIT", result.status)
+        self.assertIn("while paused", result.reason)
+        self.assertLess(time.monotonic() - started, 0.5)
 
     def test_runtime_has_no_concrete_task_or_progress_dependency(self) -> None:
         runtime_path = Path(__file__).parents[1] / "osrs_bot" / "runtime.py"

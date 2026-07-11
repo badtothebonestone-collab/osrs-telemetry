@@ -75,3 +75,16 @@ Examples:
 The overlay is diagnostic only. It is not proof that a target is currently
 safe to click; only the normal task, SafetyGate, InputCoordinator, and Verifier
 path can authorize and prove an action.
+
+## Application read contract
+
+`EngineApplication.read_engine_frame()` returns the exact latest object held by
+the runtime's `EngineFramePublisher`; it does not copy, rebuild, or reinterpret
+the frame. `read_statistics()` likewise returns the runtime-owned immutable
+counters rather than deriving them from frame sequence numbers.
+
+Application lifecycle is intentionally separate. `pause_requested`, `paused`,
+and `safe_stop_requested` describe cooperative frontend control, while the
+EngineFrame stage continues to describe the real engine boundary. A frontend
+must render both honestly and must never turn lifecycle state into target,
+safety, verification, receipt, cleanup, or blocker evidence.

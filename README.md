@@ -16,6 +16,7 @@ RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
                -> InputCoordinator -> Arduino -> Verifier -> typed Outcome
                -> immutable EngineFrame -> optional passive overlay
 manual control -> read-only demo evidence -> verified review suggestions
+thin EngineApplication facade -> catalog/profile/lifecycle/status/demo contracts
 ```
 
 There is one command surface: `run.cmd`.
@@ -114,6 +115,22 @@ outbound route, bank open/deposit/close, the fixed return route, and `COMPLETE`.
 It is a sanitized semantic regression derived from the bounded live proof; it
 does not pretend that the ignored live traces contain full raw observations.
 
+Inspect the frontend-ready catalog/profile contract or run the same engine
+through the thin foreground facade:
+
+```powershell
+.\run.cmd app catalog
+.\run.cmd app profile-schema
+.\run.cmd app validate-profile
+.\run.cmd app run
+# Explicit Arduino live mode:
+.\run.cmd app run --execute --arduino-port COM6
+```
+
+`Ctrl+C` during `app run` requests safe stop and waits for any in-flight action
+cleanup plus typed verification. In-process pause/resume and manual-demo
+begin/end are exposed for a future GUI; no GUI or background service is built.
+
 ## Repository map
 
 - `src/main/java/com/osrstelemetry/`: RuneLite sensor and read-only snapshot endpoint.
@@ -132,11 +149,14 @@ does not pretend that the ignored live traces contain full raw observations.
 - `osrs_bot/pointer.py`: pure deterministic bounded relative-motion policy.
 - `osrs_bot/verification.py`: the only post-action verifier and typed outcomes.
 - `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
+- `osrs_bot/application.py`: tokenized thin composition/lifecycle facade.
+- `osrs_bot/application_cli.py`: catalog/profile and foreground facade CLI.
 - `osrs_bot/engine_frame.py`: the immutable latest runtime diagnostic truth.
 - `osrs_bot/debug_overlay.py`: optional passive EngineFrame-only Windows overlay.
 - `osrs_bot/demonstration.py`: bounded read-only recorder and tamper-verifying
   semantic inspector.
 - `osrs_bot/screen_capture.py`: read-only, verified-canvas screenshot crops.
+- `osrs_bot/vision.py`: frozen advisory-only future evidence type; no model.
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
 - `arduino/ArduinoHIDBridge/`: retained HID firmware.
 - `tests/`: focused Python tests for the active baseline.
@@ -150,6 +170,7 @@ does not pretend that the ignored live traces contain full raw observations.
 - `docs/INPUT_COORDINATOR.md`: sole input owner, pointer, receipt, and cleanup contract.
 - `docs/ENGINE_FRAME.md`: diagnostic publication and passive overlay contract.
 - `docs/DEMONSTRATIONS.md`: artifact, inspection, and no-replay contract.
+- `docs/FRONTEND_CONTRACT.md`: implemented facade and future GUI screen contract.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
@@ -173,6 +194,10 @@ does not pretend that the ignored live traces contain full raw observations.
   demonstration manifests state that gap and retain semantic menu-click proof.
 - A demonstration is one observed evidence bundle, not proof of a generally
   correct route and never an executable replay.
+- The facade supports exactly one task/definition/profile. Resource/bank choices
+  and alternate goals remain disabled because the schema does not expose them.
+- There is no full GUI, daemon/IPC surface, vision model, or LLM runtime. The
+  `VisionEvidence` type is a non-authoritative future seam only.
 
 Read `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` before
 extending the engine. `docs/RESCUE_CONTRACT.md` remains the frozen baseline
