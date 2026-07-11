@@ -216,6 +216,8 @@ class RuntimeResult:
                     "targetId": action.target_id,
                     "targetParam0": action.target_param0,
                     "targetParam1": action.target_param1,
+                    "key": action.key,
+                    "keyHoldMillis": action.key_hold_millis,
                     "screenPoint": (
                         None
                         if action.screen_point is None

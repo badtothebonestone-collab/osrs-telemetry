@@ -113,6 +113,11 @@ def build_overlay_scene(
         f"{task.task_id} | {task.state} | {task.status.value}",
         _binding_line(frame),
         (
+            "decision: none"
+            if frame.decision is None
+            else f"decision: {frame.decision.reason}"
+        ),
+        (
             "target: none"
             if selected is None
             else (

@@ -121,6 +121,7 @@ class DebugOverlayTests(unittest.TestCase):
             tuple(item.color for item in detailed.rectangles),
         )
         self.assertTrue(any("woodcut_bank" in line for line in compact.text_lines))
+        self.assertTrue(any("decision:" in line for line in compact.text_lines))
         self.assertTrue(any("target:" in line for line in compact.text_lines))
         self.assertTrue(any("safety:" in line for line in compact.text_lines))
 

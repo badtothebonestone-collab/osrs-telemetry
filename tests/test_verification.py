@@ -50,6 +50,8 @@ def observation(
     location: WorldPoint = WorldPoint(3201, 3200, 0),
     inventory: InventoryObservation | None = None,
     widgets: WidgetObservation | None = None,
+    camera_yaw: int | None = None,
+    geometry_frame_id: str | None = None,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -76,13 +78,14 @@ def observation(
         client_process_id=process_id,
         assembled_at=timestamp,
         frame_id=frame_id,
-        geometry_frame_id=frame_id,
+        geometry_frame_id=geometry_frame_id or frame_id,
         source_coherent=True,
         menu_fresh=True,
         menu_source_tick=tick,
         menu_timestamp=timestamp,
         menu_session_id=session_id,
         menu_process_id=process_id,
+        camera_yaw=camera_yaw,
     )
 
 
@@ -213,6 +216,61 @@ class VerifierTest(unittest.TestCase):
 
         self.assertTrue(result.passed)
         self.assertEqual(OutcomeKind.ARRIVED, result.outcome.kind)
+
+    def test_camera_pose_change_requires_direction_frame_and_stationary_player(self) -> None:
+        location = WorldPoint(3195, 3248, 0)
+        spec = specification(
+            VerificationKind.CAMERA_POSE_CHANGED,
+            before_location=location,
+            before_camera_yaw=0,
+            before_geometry_frame_id="camera-frame-0",
+            camera_key="right",
+        )
+
+        changed = self.verifier.evaluate(
+            spec,
+            observation(
+                location=location,
+                camera_yaw=1_200,
+                geometry_frame_id="camera-frame-1200",
+            ),
+        )
+        self.assertTrue(changed.passed)
+        self.assertEqual(OutcomeKind.CAMERA_POSE_CHANGED, changed.outcome.kind)
+
+        left = replace(spec, before_camera_yaw=0, camera_key="left")
+        wrapped_left = self.verifier.evaluate(
+            left,
+            observation(
+                location=location,
+                camera_yaw=16_147,
+                geometry_frame_id="camera-frame-16147",
+            ),
+        )
+        self.assertTrue(wrapped_left.passed)
+
+        for candidate in (
+            observation(
+                location=location,
+                camera_yaw=1_200,
+                geometry_frame_id="camera-frame-0",
+            ),
+            observation(
+                location=WorldPoint(3196, 3248, 0),
+                camera_yaw=1_200,
+                geometry_frame_id="camera-frame-1200",
+            ),
+            observation(
+                location=location,
+                camera_yaw=16_000,
+                geometry_frame_id="camera-frame-16000",
+            ),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    VerificationStatus.PENDING,
+                    self.verifier.evaluate(spec, candidate).status,
+                )
 
     def test_emits_plane_changed(self) -> None:
         result = self.verifier.evaluate(

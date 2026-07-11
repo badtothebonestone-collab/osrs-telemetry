@@ -5,6 +5,7 @@ from enum import Enum
 
 from .model import (
     BANK_INTERFACE_NAME,
+    CAMERA_YAW_UNITS,
     Observation,
     VerificationKind,
     VerificationSpec,
@@ -27,6 +28,7 @@ class OutcomeKind(str, Enum):
     INTERFACE_OPENED = "interface_opened"
     INTERFACE_CLOSED = "interface_closed"
     DIALOGUE_OPTION_APPEARED = "dialogue_option_appeared"
+    CAMERA_POSE_CHANGED = "camera_pose_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +192,22 @@ def _invalid_specification_reason(specification: VerificationSpec) -> str | None
         if not _is_nonnegative_integer(specification.expected_plane):
             return "invalid_interface_plane"
 
+    if specification.kind is VerificationKind.CAMERA_POSE_CHANGED:
+        if not isinstance(specification.before_location, WorldPoint):
+            return "invalid_camera_location_baseline"
+        if (
+            not _is_integer(specification.before_camera_yaw)
+            or not 0 <= specification.before_camera_yaw < CAMERA_YAW_UNITS
+        ):
+            return "invalid_camera_yaw_baseline"
+        if (
+            not isinstance(specification.before_geometry_frame_id, str)
+            or not specification.before_geometry_frame_id.strip()
+        ):
+            return "invalid_camera_geometry_frame_baseline"
+        if specification.camera_key not in {"left", "right"}:
+            return "invalid_camera_key"
+
     return None
 
 
@@ -277,6 +295,25 @@ def _successful_outcome(
             and not observation.widgets.bank_open
         ):
             return Outcome(OutcomeKind.INTERFACE_CLOSED, observation.tick)
+        return None
+
+    if specification.kind is VerificationKind.CAMERA_POSE_CHANGED:
+        if (
+            observation.location != specification.before_location
+            or observation.camera_yaw is None
+            or observation.geometry_frame_id is None
+            or observation.geometry_frame_id
+            == specification.before_geometry_frame_id
+        ):
+            return None
+        before = specification.before_camera_yaw
+        assert before is not None
+        if specification.camera_key == "right":
+            delta = (observation.camera_yaw - before) % CAMERA_YAW_UNITS
+        else:
+            delta = (before - observation.camera_yaw) % CAMERA_YAW_UNITS
+        if 0 < delta <= CAMERA_YAW_UNITS // 2:
+            return Outcome(OutcomeKind.CAMERA_POSE_CHANGED, observation.tick)
         return None
 
     return None

@@ -7,6 +7,7 @@ from .model import (
     Action,
     ActionKind,
     BANK_INTERFACE_NAME,
+    CameraConstraint,
     CLOSE_BANK_WIDGET_KEY,
     DEPOSIT_INVENTORY_WIDGET_KEY,
     DialogueOptionConstraint,
@@ -17,6 +18,7 @@ from .model import (
     Observation,
     ScreenBounds,
     ScreenPoint,
+    VerificationKind,
     WidgetTarget,
 )
 
@@ -561,6 +563,16 @@ class SafetyGate:
                 )
                 if not dialogue_sample.allowed:
                     return _evaluation(dialogue_sample, checks)
+            elif action.task_constraints.camera is not None:
+                camera_sample = _record(
+                    checks,
+                    f"{stage}.camera_sample",
+                    _allow("camera_sample_newer")
+                    if observation.tick > action.source_tick
+                    else _reject("camera_sample_not_newer"),
+                )
+                if not camera_sample.allowed:
+                    return _evaluation(camera_sample, checks)
         action_result = _record(
             checks,
             f"{stage}.action_invariants",
@@ -689,9 +701,12 @@ class SafetyGate:
     def _validate_key_action(action: Action) -> SafetyResult:
         dialogue = action.task_constraints.dialogue
         interface = _interface_close_constraint(action)
+        camera = action.task_constraints.camera
         if dialogue is not None:
             if action.key not in {str(value) for value in range(1, 10)}:
                 return _reject("unsafe_key")
+            if action.key_hold_millis != 50:
+                return _reject("unsafe_key_hold")
             if (
                 action.key != dialogue.option_key
                 or action.option != dialogue.option_text
@@ -704,6 +719,8 @@ class SafetyGate:
         if interface is not None:
             if action.key not in {"esc", "escape"}:
                 return _reject("unsafe_key")
+            if action.key_hold_millis != 50:
+                return _reject("unsafe_key_hold")
             if (
                 not action.option
                 or action.option != action.target_name
@@ -712,6 +729,33 @@ class SafetyGate:
             ):
                 return _reject("interface_close_identity_mismatch")
             return _allow("interface_close_key_shape_safe")
+        if camera is not None:
+            if action.key not in {"left", "right"}:
+                return _reject("unsafe_key")
+            if (
+                action.key != camera.direction
+                or action.key_hold_millis != camera.hold_millis
+            ):
+                return _reject("camera_key_shape_mismatch")
+            if (
+                not action.option
+                or action.target_key != camera.target_key
+                or action.target_name != camera.target_key
+                or action.target_id != 0
+            ):
+                return _reject("camera_target_identity_mismatch")
+            verification = action.verification
+            if (
+                verification is None
+                or verification.kind is not VerificationKind.CAMERA_POSE_CHANGED
+                or verification.before_location != camera.source_location
+                or verification.before_camera_yaw != camera.before_yaw
+                or verification.before_geometry_frame_id
+                != camera.source_geometry_frame_id
+                or verification.camera_key != camera.direction
+            ):
+                return _reject("camera_verification_mismatch")
+            return _allow("camera_key_shape_safe")
         return _reject("key_constraint_missing")
 
     def _validate_source_menu_sample(
@@ -856,7 +900,47 @@ class SafetyGate:
             )
             if not dialogue.allowed:
                 return dialogue
+        if constraints.camera is not None:
+            camera = self._validate_camera_constraint(
+                action, constraints.camera, observation
+            )
+            if not camera.allowed:
+                return camera
         return _allow("task_constraints_satisfied")
+
+    @staticmethod
+    def _validate_camera_constraint(
+        action: Action,
+        constraint: CameraConstraint,
+        observation: Observation,
+    ) -> SafetyResult:
+        if observation.location != constraint.source_location:
+            return _reject("camera_source_location_changed")
+        if observation.plane != constraint.target_location.plane:
+            return _reject("camera_target_plane_mismatch")
+        if observation.camera_yaw != constraint.before_yaw:
+            return _reject("camera_pose_changed")
+        if observation.geometry_frame_id != constraint.source_geometry_frame_id:
+            return _reject("camera_geometry_frame_changed")
+        target = observation.object_by_key(constraint.target_key)
+        if target is None:
+            return _reject("camera_target_missing")
+        if (
+            target.key != constraint.target_key
+            or target.object_id != 0
+            or target.name != constraint.target_key
+            or target.kind != "NAVIGATION_TILE"
+            or target.actions != ("Walk here",)
+            or target.location != constraint.target_location
+            or target.scene_x is None
+            or target.scene_y is None
+            or action.target_param0 != target.scene_x
+            or action.target_param1 != target.scene_y
+        ):
+            return _reject("camera_target_identity_mismatch")
+        if target.geometry.actionable:
+            return _reject("camera_projection_already_actionable")
+        return _allow("camera_constraint_satisfied")
 
     @staticmethod
     def _validate_interface_constraint(

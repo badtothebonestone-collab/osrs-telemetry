@@ -186,6 +186,8 @@ class EngineFrameTests(unittest.TestCase):
         self.assertEqual("lumbridge_west_trees_v1", payload["task"]["definitionId"])
         self.assertEqual("tree:selected", payload["selectedTarget"]["key"])
         self.assertEqual("item_quantity_increased", payload["lastVerification"]["outcome"]["kind"])
+        self.assertIn("cameraYaw", payload["observation"])
+        self.assertIn("keyHoldMillis", payload["decision"]["action"])
         self.assertEqual(1511, payload["pendingVerification"]["itemId"])
         self.assertEqual(0, payload["pendingVerification"]["beforeQuantity"])
         self.assertTrue(payload["cleanup"]["safe"])

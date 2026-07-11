@@ -11,7 +11,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-from .model import DialogueOption, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
+from .model import CAMERA_YAW_UNITS, DialogueOption, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
 from .model import PlayerObservation, ScreenBounds, ScreenPoint, TargetGeometry, WidgetObservation, WidgetTarget, WorldPoint
 
 RESPONSE_SCHEMA = "plugin_snapshot_response.v2"
@@ -417,14 +417,23 @@ def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | N
         raise ObservationSchemaError("payloads.tile_projection.tiles must be an array")
     for index, value in enumerate(tile_values):
         raw = _mapping(value, f"tile_projection.tiles[{index}]")
-        if raw.get("status") != "PASS":
+        if raw.get("status") not in {"PASS", "WARN"}:
             continue
         label = raw.get("label")
         if not isinstance(label, str) or not label:
             raise ObservationSchemaError(f"tile_projection.tiles[{index}].label must be a string")
-        location = _world_point(raw, f"tile_projection.tiles[{index}].location") or requested_tiles.get(label)
+        requested = requested_tiles.get(label)
+        if requested is None:
+            raise ObservationSchemaError(
+                f"tile_projection.tiles[{index}] was not requested"
+            )
+        location = _world_point(raw, f"tile_projection.tiles[{index}].location") or requested
         if location is None:
             raise ObservationSchemaError(f"tile_projection.tiles[{index}] lacks a world location")
+        if location != requested:
+            raise ObservationSchemaError(
+                f"tile_projection.tiles[{index}] disagrees with the requested world location"
+            )
         geometry = _target_geometry(raw, transform)
         objects[label] = NearbyObject(key=label, object_id=0, name=label, kind="NAVIGATION_TILE",
                                       actions=("Walk here",), location=location,
@@ -701,6 +710,25 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
         optional=True,
     )
     transform = _canvas_transform(baseline)
+    camera_viewport = _mapping(
+        baseline.get("cameraViewport"),
+        "payloads.baseline.cameraViewport",
+        optional=True,
+    )
+    camera_yaw = _integer(
+        camera_viewport.get("cameraYaw"),
+        "payloads.baseline.cameraViewport.cameraYaw",
+        optional=True,
+    )
+    camera_pitch = _integer(
+        camera_viewport.get("cameraPitch"),
+        "payloads.baseline.cameraViewport.cameraPitch",
+        optional=True,
+    )
+    if camera_yaw is not None and not 0 <= camera_yaw < CAMERA_YAW_UNITS:
+        raise ObservationSchemaError("cameraYaw is outside the fixed-point yaw range")
+    if camera_pitch is not None and camera_pitch < 0:
+        raise ObservationSchemaError("cameraPitch must be non-negative")
     base_player = _mapping(baseline.get("player"), "payloads.baseline.player", optional=True)
     location = _world_point(base_player, "payloads.baseline.player location")
     activity = _payload(payloads, "activity")
@@ -777,7 +805,8 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
                        geometry_frame_id=frame.geometry_frame_id,
                        source_coherent=source_coherent, menu_fresh=menu_fresh,
                        menu_source_tick=menu_source_tick, menu_timestamp=menu_timestamp,
-                       menu_session_id=menu_session_id, menu_process_id=menu_process_id)
+                       menu_session_id=menu_session_id, menu_process_id=menu_process_id,
+                       camera_yaw=camera_yaw, camera_pitch=camera_pitch)
 
 class ObservationClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8893", *, auth_token: str | None = None,

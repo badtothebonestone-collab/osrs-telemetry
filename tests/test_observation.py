@@ -124,7 +124,12 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual(4242, fallback.client_process_id)
 
     def test_loaded_snapshot_becomes_one_immutable_observation(self) -> None:
-        observation = parse_observation(load_fixture())
+        payload = load_fixture()
+        payload["payloads"]["baseline"]["cameraViewport"].update(
+            cameraYaw=1234,
+            cameraPitch=1024,
+        )
+        observation = parse_observation(payload)
 
         self.assertTrue(observation.loaded_scene)
         self.assertEqual(WorldPoint(3192, 3244, 0), observation.location)
@@ -144,6 +149,8 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual(879, observation.player.animation)
         self.assertEqual(2, observation.inventory.quantity(1511))
         self.assertEqual("fixture-session", observation.session_id)
+        self.assertEqual(1234, observation.camera_yaw)
+        self.assertEqual(1024, observation.camera_pitch)
         self.assertEqual(ScreenBounds(1000, 2000, 800, 600), observation.canvas_bounds)
         self.assertFalse(hasattr(observation, "__dict__"))
         self.assertFalse(hasattr(observation.location, "__dict__"))
@@ -369,6 +376,79 @@ class ObservationParsingTests(unittest.TestCase):
 
         self.assertIsNotNone(route)
         self.assertFalse(route.geometry.actionable)
+
+    def test_warn_tile_retains_exact_identity_for_camera_recovery(self) -> None:
+        payload = load_fixture()
+        point = WorldPoint(3200, 3238, 0)
+        payload["payloads"]["tile_projection"] = {
+            "schema": "tile_projection_response.v1",
+            "status": "WARN",
+            "sourceTick": 174,
+            "capturedAtUtc": "2026-07-10T16:06:57.697000000Z",
+            "sessionId": "fixture-session",
+            "clientProcessId": 1234,
+            "geometryFrameId": "fixture-geometry-174",
+            "tiles": [{
+                "status": "WARN",
+                "label": "route:west-approach",
+                "worldX": point.x,
+                "worldY": point.y,
+                "plane": point.plane,
+                "sceneX": 56,
+                "sceneY": 38,
+                "geometryAvailable": False,
+                "onScreen": False,
+                "visible": False,
+                "actionable": False,
+                "reason": "tile projection returned no canvas geometry",
+            }]
+        }
+
+        observation = parse_observation(
+            payload, (("route:west-approach", point),)
+        )
+        route = observation.object_by_key("route:west-approach")
+
+        self.assertIsNotNone(route)
+        self.assertTrue(observation.source_coherent)
+        self.assertTrue(observation.loaded_scene)
+        self.assertEqual("NAVIGATION_TILE", route.kind)
+        self.assertEqual(point, route.location)
+        self.assertEqual((56, 38), (route.scene_x, route.scene_y))
+        self.assertFalse(route.geometry.actionable)
+
+    def test_tile_projection_must_match_an_exact_requested_world_point(self) -> None:
+        point = WorldPoint(3200, 3238, 0)
+        for label, requested in (
+            ("unrequested label", ()),
+            ("contradictory location", (("route:west-approach", point),)),
+        ):
+            with self.subTest(label=label):
+                payload = load_fixture()
+                payload["payloads"]["tile_projection"] = {
+                    "tiles": [{
+                        "status": "WARN",
+                        "label": "route:west-approach",
+                        "worldX": point.x + (1 if requested else 0),
+                        "worldY": point.y,
+                        "plane": point.plane,
+                        "sceneX": 56,
+                        "sceneY": 38,
+                        "geometryAvailable": False,
+                        "onScreen": False,
+                        "visible": False,
+                        "actionable": False,
+                    }]
+                }
+                with self.assertRaises(ObservationSchemaError):
+                    parse_observation(payload, requested)
+
+    def test_camera_pose_rejects_invalid_fixed_point_values(self) -> None:
+        payload = load_fixture()
+        payload["payloads"]["baseline"]["cameraViewport"]["cameraYaw"] = 16_384
+
+        with self.assertRaisesRegex(ObservationSchemaError, "cameraYaw"):
+            parse_observation(payload)
 
     def test_known_inventory_requires_complete_unique_slot_accounting(self) -> None:
         for label, mutate in (

@@ -816,11 +816,11 @@ class _ArduinoHIDTransport:
         if self._serial is None:
             return
         try:
-            self._write_line("STOP_ALL")
-            try:
-                self._read_line()
-            except Exception:
-                pass
+            # Keep even the emergency cleanup inside the authoritative command
+            # ledger.  A raw write/read left the record at ACK_READ without the
+            # parsed firmware tokens, which made an otherwise acknowledged
+            # rejection impossible for InputCoordinator to report safely.
+            self._send("STOP_ALL", require_ack=True, expected_token="STOP_ALL")
             self._status.stop_all_sent = True
         except Exception:  # noqa: BLE001
             pass
@@ -1629,13 +1629,24 @@ class _ArduinoHIDTransport:
         self._legacy_click_at(int(plan.click_point.x), int(plan.click_point.y), button=button)
 
     def _legacy_key_down(self, key: str) -> None:
-        self._send_armed(f"KEY_DOWN {key}", require_ack=True)
+        self._send_armed(f"KEY_DOWN {str(key).strip().lower()}", require_ack=True)
 
     def _legacy_key_up(self, key: str) -> None:
-        self._send_armed(f"KEY_UP {key}", require_ack=True)
+        self._send_armed(f"KEY_UP {str(key).strip().lower()}", require_ack=True)
 
-    def _press(self, key: str) -> None:
-        self._send_armed(f"KEY_PRESS {key} 50", require_ack=True)
+    def _press(self, key: str, hold_millis: int = 50) -> None:
+        # ApprovedKeyIntent deliberately stores a canonical uppercase token,
+        # while arduino_hid.v1 names multi-character keys in lowercase.
+        if (
+            not isinstance(hold_millis, int)
+            or isinstance(hold_millis, bool)
+            or not 1 <= hold_millis <= 250
+        ):
+            raise ArduinoHIDError("key hold must be between 1 and 250 milliseconds")
+        self._send_armed(
+            f"KEY_PRESS {str(key).strip().lower()} {hold_millis}",
+            require_ack=True,
+        )
 
     def _assert_foreground(
         self,

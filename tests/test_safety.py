@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from osrs_bot.model import (
     Action,
     ActionKind,
+    CameraConstraint,
     DialogueOption,
     DialogueOptionConstraint,
     InterfaceConstraint,
@@ -21,6 +22,8 @@ from osrs_bot.model import (
     ScreenPoint,
     TargetGeometry,
     TaskConstraints,
+    VerificationKind,
+    VerificationSpec,
     WidgetObservation,
     WidgetTarget,
     WorldPoint,
@@ -85,6 +88,9 @@ def observation(
     menu_point: ScreenPoint | None = TREE_POINT,
     menu_open: bool = False,
     menu_bounds: ScreenBounds | None = None,
+    location: WorldPoint = WorldPoint(3197, 3200, 0),
+    camera_yaw: int | None = None,
+    geometry_frame_id: str | None = None,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -92,8 +98,8 @@ def observation(
     frame_id = f"test-frame-{tick}"
     return Observation(
         player=PlayerObservation(),
-        location=WorldPoint(3197, 3200, 0),
-        plane=0,
+        location=location,
+        plane=location.plane,
         inventory=items or inventory(1511),
         nearby_objects=nearby_objects if nearby_objects is not None else (tree(),),
         menus=menus,
@@ -115,13 +121,14 @@ def observation(
         client_process_id=process_id,
         assembled_at=timestamp,
         frame_id=frame_id,
-        geometry_frame_id=frame_id,
+        geometry_frame_id=geometry_frame_id or frame_id,
         source_coherent=True,
         menu_fresh=True,
         menu_source_tick=tick,
         menu_timestamp=timestamp,
         menu_session_id=session_id,
         menu_process_id=process_id,
+        camera_yaw=camera_yaw,
     )
 
 
@@ -187,6 +194,71 @@ def walk_hover() -> MenuEntry:
         identifier=0,
         param0=49,
         param1=52,
+    )
+
+
+def camera_target(*, actionable: bool = False) -> NearbyObject:
+    point = TREE_POINT if actionable else None
+    return NearbyObject(
+        key="route:west_approach_bridge",
+        object_id=0,
+        name="route:west_approach_bridge",
+        kind="NAVIGATION_TILE",
+        actions=("Walk here",),
+        location=WorldPoint(3200, 3238, 0),
+        distance=10,
+        geometry=TargetGeometry(
+            available=actionable,
+            on_screen=actionable,
+            visible=actionable,
+            actionable=actionable,
+            screen_point=point,
+            screen_bounds=(ScreenBounds(300, 220, 40, 40) if actionable else None),
+        ),
+        scene_x=56,
+        scene_y=38,
+        route_candidate=True,
+    )
+
+
+def camera_action() -> Action:
+    source = WorldPoint(3195, 3248, 0)
+    target = WorldPoint(3200, 3238, 0)
+    verification = VerificationSpec(
+        VerificationKind.CAMERA_POSE_CHANGED,
+        before_tick=100,
+        deadline_tick=110,
+        before_location=source,
+        source_session_id="session-1",
+        before_camera_yaw=0,
+        before_geometry_frame_id="camera-frame-0",
+        camera_key="left",
+    )
+    return Action(
+        ActionKind.PRESS_KEY,
+        "Turn camera toward west_approach_bridge",
+        100,
+        option="Turn camera left",
+        target_key="route:west_approach_bridge",
+        target_name="route:west_approach_bridge",
+        target_id=0,
+        key="left",
+        key_hold_millis=250,
+        verification=verification,
+        target_param0=56,
+        target_param1=38,
+        source_session_id="session-1",
+        task_constraints=TaskConstraints(
+            camera=CameraConstraint(
+                target_key="route:west_approach_bridge",
+                target_location=target,
+                source_location=source,
+                source_geometry_frame_id="camera-frame-0",
+                before_yaw=0,
+                direction="left",
+                hold_millis=250,
+            )
+        ),
     )
 
 
@@ -1107,6 +1179,76 @@ class SafetyGateTest(unittest.TestCase):
         )
 
         self.assertTrue(result.allowed)
+
+    def test_camera_key_requires_exact_stale_projection_pose_and_later_sample(self) -> None:
+        action = camera_action()
+        source = WorldPoint(3195, 3248, 0)
+        target = camera_target()
+        before = observation(
+            tick=100,
+            nearby_objects=(target,),
+            location=source,
+            camera_yaw=0,
+            geometry_frame_id="camera-frame-0",
+        )
+        later = observation(
+            tick=101,
+            nearby_objects=(target,),
+            location=source,
+            camera_yaw=0,
+            geometry_frame_id="camera-frame-0",
+        )
+
+        self.assertTrue(self.gate.validate_pre_move(action, before).allowed)
+        self.assertEqual(
+            "camera_sample_not_newer",
+            self.gate.validate_post_move(action, before).reason,
+        )
+        self.assertTrue(self.gate.validate_post_move(action, later).allowed)
+        self.assertEqual(
+            "unsafe_key",
+            self.gate.validate_pre_move(replace(action, key="up"), before).reason,
+        )
+        self.assertEqual(
+            "camera_key_shape_mismatch",
+            self.gate.validate_pre_move(
+                replace(action, key_hold_millis=50), before
+            ).reason,
+        )
+        self.assertEqual(
+            "camera_projection_already_actionable",
+            self.gate.validate_post_move(
+                action,
+                replace(later, nearby_objects=(camera_target(actionable=True),)),
+            ).reason,
+        )
+        self.assertEqual(
+            "camera_pose_changed",
+            self.gate.validate_post_move(
+                action,
+                replace(later, camera_yaw=1_000),
+            ).reason,
+        )
+        for expected, changed in (
+            (
+                "camera_source_location_changed",
+                replace(later, location=WorldPoint(3196, 3248, 0)),
+            ),
+            (
+                "camera_geometry_frame_changed",
+                replace(later, geometry_frame_id="camera-frame-other"),
+            ),
+            ("camera_target_missing", replace(later, nearby_objects=())),
+            (
+                "camera_target_identity_mismatch",
+                replace(later, nearby_objects=(replace(target, scene_x=57),)),
+            ),
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    expected,
+                    self.gate.validate_post_move(action, changed).reason,
+                )
 
     def test_dialogue_constraint_allows_only_the_exact_numbered_choice(self) -> None:
         widgets = WidgetObservation(

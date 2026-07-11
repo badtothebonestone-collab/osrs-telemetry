@@ -64,6 +64,7 @@ class FakeBackend:
         self.divergent_move_count = divergent_move_count
         self.device_pixel_scale = device_pixel_scale
         self.positions: list[tuple[int, int]] = [start]
+        self.key_presses: list[tuple[str, int]] = []
         self.events: list[str] = []
         self.records: list[dict[str, Any]] = []
         self.sequence = 0
@@ -166,7 +167,8 @@ class FakeBackend:
         self.events.append(f"mouse_up:{button}")
         self._record("MOUSE_UP")
 
-    def _press(self, key: str) -> None:
+    def _press(self, key: str, hold_millis: int = 50) -> None:
+        self.key_presses.append((key, hold_millis))
         self.events.append(f"press:{key}")
         self._record("KEY_PRESS")
 
@@ -352,10 +354,11 @@ class InputCoordinatorTests(unittest.TestCase):
     def test_key_validator_runs_after_arm_and_immediately_before_key(self) -> None:
         backend = FakeBackend()
         intent = ApprovedKeyIntent(
-            "escape-dialogue",
+            "camera-turn",
             InputPurpose.GAMEPLAY_KEY,
-            "esc",
+            "right",
             321,
+            250,
         )
 
         def validate(_intent: ApprovedKeyIntent) -> InputValidation:
@@ -366,7 +369,8 @@ class InputCoordinatorTests(unittest.TestCase):
 
         self.assertTrue(receipt.successful)
         self.assertLess(backend.events.index("arm"), backend.events.index("key_validator"))
-        self.assertLess(backend.events.index("key_validator"), backend.events.index("press:ESC"))
+        self.assertLess(backend.events.index("key_validator"), backend.events.index("press:RIGHT"))
+        self.assertEqual([("RIGHT", 250)], backend.key_presses)
         self.assertEqual(
             [command.command for command in receipt.commands],
             [
@@ -1362,6 +1366,16 @@ class InputCoordinatorTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             ApprovedKeyIntent("bad", InputPurpose.GAMEPLAY_KEY, "secret text", 321)
+        for hold_millis in (0, 251, True):
+            with self.subTest(hold_millis=hold_millis):
+                with self.assertRaises(ValueError):
+                    ApprovedKeyIntent(
+                        "bad-hold",
+                        InputPurpose.GAMEPLAY_KEY,
+                        "RIGHT",
+                        321,
+                        hold_millis,
+                    )
         with self.assertRaises(ValueError):
             ApprovedPointerIntent(
                 "bad",

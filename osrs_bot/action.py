@@ -370,13 +370,15 @@ class CoordinatedActionInterface:
             purpose=InputPurpose.GAMEPLAY_KEY,
             key=action.key,
             expected_pid=self._required_pid(observation),
+            hold_millis=action.key_hold_millis,
         )
         interface = action.task_constraints.interface
-        retry_reason = (
-            "interface_sample_not_newer"
-            if interface is not None and interface.require_keyboard_close
-            else "dialogue_sample_not_newer"
-        )
+        if interface is not None and interface.require_keyboard_close:
+            retry_reason = "interface_sample_not_newer"
+        elif action.task_constraints.camera is not None:
+            retry_reason = "camera_sample_not_newer"
+        else:
+            retry_reason = "dialogue_sample_not_newer"
 
         def validate(_intent: ApprovedKeyIntent) -> InputValidation:
             post, result, _ = self._await_post_move(

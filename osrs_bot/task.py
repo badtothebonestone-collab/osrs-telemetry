@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from math import atan2, pi
 
 from .definition import FixedRouteStep
 from .model import (
     Action,
     ActionKind,
     BANK_INTERFACE_NAME,
+    CAMERA_YAW_UNITS,
+    CameraConstraint,
     CLOSE_BANK_WIDGET_KEY,
     DEPOSIT_INVENTORY_WIDGET_KEY,
     DialogueOption,
@@ -37,6 +40,8 @@ from .verification import OutcomeKind, VerificationResult
 
 
 WOODCUT_BANK_TASK_ID = "woodcut_bank"
+CAMERA_RECOVERY_MAX_ATTEMPTS = 8
+CAMERA_RECOVERY_HOLD_MILLIS = 250
 
 
 class TaskPhase(str, Enum):
@@ -82,6 +87,10 @@ class WoodcutBankTask:
         self._movement_verified = False
         self._route_settle_location: WorldPoint | None = None
         self._route_settle_since_tick: int | None = None
+        self._camera_recovery_step_id: str | None = None
+        self._camera_recovery_attempts = 0
+        self._route_projection_wait_since_tick: int | None = None
+        self._pending_camera_step_id: str | None = None
 
     def observation_request(self) -> ObservationRequest:
         """Request only the current fixed walk target for projection."""
@@ -200,6 +209,19 @@ class WoodcutBankTask:
             self._movement_verified = True
             self._route_settle_location = None
             self._route_settle_since_tick = None
+            return
+        if pending.kind is VerificationKind.CAMERA_POSE_CHANGED:
+            if outcome is not OutcomeKind.CAMERA_POSE_CHANGED:
+                return self._block_verification_outcome(pending, outcome)
+            if (
+                self._pending_camera_step_id is None
+                or self._pending_camera_step_id != self._camera_recovery_step_id
+            ):
+                self._set_blocked("camera pose proof arrived outside route recovery")
+                return
+            self._camera_recovery_attempts += 1
+            self._pending_camera_step_id = None
+            self._route_projection_wait_since_tick = None
             return
         if pending.kind is VerificationKind.ROUTE_TRANSITION:
             if outcome is OutcomeKind.DIALOGUE_OPTION_APPEARED:
@@ -386,12 +408,14 @@ class WoodcutBankTask:
 
         if step.is_walk:
             if observation.location.distance_to(step.location) <= step.arrival_radius:
+                self._reset_camera_recovery()
                 self.progress.route_index += 1
                 if self.progress.route_index >= len(route):
                     self._finish_route()
                 return self._wait(observation, f"arrived at route step {step.step_id}")
             target = observation.object_by_key(step.target_key)
             if target is None:
+                self._route_projection_wait_since_tick = None
                 return self._wait(
                     observation,
                     f"waiting for route projection {step.step_id}",
@@ -407,15 +431,8 @@ class WoodcutBankTask:
                     ),
                 )
             if not self._has_geometry(target):
-                return self._wait(
-                    observation,
-                    f"waiting for actionable route projection {step.step_id}",
-                    evidence=self._object_decision_evidence(
-                        observation,
-                        action=step.action,
-                        rejected=((target, self._geometry_rejection_codes(target)),),
-                    ),
-                )
+                return self._recover_route_projection(observation, step, target)
+            self._reset_camera_recovery()
             verification = VerificationSpec(
                 VerificationKind.MOVED_CLOSER,
                 before_tick=observation.tick,
@@ -498,6 +515,145 @@ class WoodcutBankTask:
                 candidate_actions=route_actions,
             ),
         )
+
+    def _recover_route_projection(
+        self,
+        observation: Observation,
+        step: FixedRouteStep,
+        target: NearbyObject,
+    ) -> Decision:
+        if self._camera_recovery_step_id != step.step_id:
+            self._reset_camera_recovery()
+            self._camera_recovery_step_id = step.step_id
+        if self._route_projection_wait_since_tick is None:
+            self._route_projection_wait_since_tick = observation.tick
+            return self._wait(
+                observation,
+                f"waiting for stable route projection {step.step_id}",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=step.action,
+                    rejected=((target, self._geometry_rejection_codes(target)),),
+                ),
+            )
+        if observation.tick <= self._route_projection_wait_since_tick:
+            return self._wait(
+                observation,
+                f"waiting for a later route projection {step.step_id}",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=step.action,
+                    rejected=((target, self._geometry_rejection_codes(target)),),
+                ),
+            )
+        if self._camera_recovery_attempts >= CAMERA_RECOVERY_MAX_ATTEMPTS:
+            return self._block(
+                observation,
+                f"camera recovery exhausted for route projection {step.step_id}",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=step.action,
+                    rejected=((target, self._geometry_rejection_codes(target)),),
+                ),
+            )
+        if observation.camera_yaw is None or observation.geometry_frame_id is None:
+            return self._block(
+                observation,
+                f"camera pose unavailable for route projection {step.step_id}",
+            )
+        direction = self._camera_turn_direction(
+            observation.location, step.location, observation.camera_yaw
+        )
+        if direction is None:
+            return self._block(
+                observation,
+                f"route projection {step.step_id} is unavailable at the aligned camera yaw",
+            )
+        verification = VerificationSpec(
+            VerificationKind.CAMERA_POSE_CHANGED,
+            before_tick=observation.tick,
+            deadline_tick=(
+                observation.tick
+                + self.definition.verification.action_deadline_ticks
+            ),
+            before_location=observation.location,
+            source_session_id=observation.session_id,
+            before_camera_yaw=observation.camera_yaw,
+            before_geometry_frame_id=observation.geometry_frame_id,
+            camera_key=direction,
+        )
+        constraint = CameraConstraint(
+            target_key=step.target_key,
+            target_location=step.location,
+            source_location=observation.location,
+            source_geometry_frame_id=observation.geometry_frame_id,
+            before_yaw=observation.camera_yaw,
+            direction=direction,
+            hold_millis=CAMERA_RECOVERY_HOLD_MILLIS,
+        )
+        self.progress.pending = verification
+        self._pending_camera_step_id = step.step_id
+        return Decision(
+            self.progress.phase.value,
+            (
+                f"turn camera {direction} for route projection {step.step_id} "
+                f"({self._camera_recovery_attempts + 1}/"
+                f"{CAMERA_RECOVERY_MAX_ATTEMPTS})"
+            ),
+            Action(
+                ActionKind.PRESS_KEY,
+                f"Turn camera toward {step.step_id}",
+                observation.tick,
+                option=f"Turn camera {direction}",
+                target_key=target.key,
+                target_name=target.name,
+                target_id=target.object_id,
+                key=direction,
+                key_hold_millis=CAMERA_RECOVERY_HOLD_MILLIS,
+                verification=verification,
+                target_param0=target.scene_x,
+                target_param1=target.scene_y,
+                source_session_id=observation.session_id,
+                task_constraints=TaskConstraints(camera=constraint),
+            ),
+            self._object_decision_evidence(
+                observation,
+                action=f"Turn camera {direction}",
+                selected=target,
+                eligible=(target,),
+            ),
+        )
+
+    @staticmethod
+    def _camera_turn_direction(
+        source: WorldPoint,
+        target: WorldPoint,
+        camera_yaw: int,
+    ) -> str | None:
+        dx = target.x - source.x
+        dy = target.y - source.y
+        if dx == 0 and dy == 0:
+            return None
+        target_bearing = round(
+            (atan2(dx, -dy) % (2 * pi))
+            * CAMERA_YAW_UNITS
+            / (2 * pi)
+        ) % CAMERA_YAW_UNITS
+        desired_camera_yaw = (
+            target_bearing + CAMERA_YAW_UNITS // 2
+        ) % CAMERA_YAW_UNITS
+        error = (
+            desired_camera_yaw - camera_yaw + CAMERA_YAW_UNITS // 2
+        ) % CAMERA_YAW_UNITS - CAMERA_YAW_UNITS // 2
+        if error == 0:
+            return None
+        return "right" if error > 0 else "left"
+
+    def _reset_camera_recovery(self) -> None:
+        self._camera_recovery_step_id = None
+        self._camera_recovery_attempts = 0
+        self._route_projection_wait_since_tick = None
+        self._pending_camera_step_id = None
 
     def _choose_stair_direction(self, observation: Observation) -> Decision:
         route = self._current_route()

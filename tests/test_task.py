@@ -96,6 +96,9 @@ def observation(
     widgets: WidgetObservation | None = None,
     tick: int = 10,
     fresh: bool = True,
+    camera_yaw: int | None = 0,
+    camera_pitch: int | None = 1024,
+    geometry_frame_id: str | None = None,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -123,13 +126,15 @@ def observation(
         client_process_id=process_id,
         assembled_at=timestamp,
         frame_id=frame_id,
-        geometry_frame_id=frame_id,
+        geometry_frame_id=geometry_frame_id or frame_id,
         source_coherent=True,
         menu_fresh=True,
         menu_source_tick=tick,
         menu_timestamp=timestamp,
         menu_session_id=session_id,
         menu_process_id=process_id,
+        camera_yaw=camera_yaw,
+        camera_pitch=camera_pitch,
     )
 
 
@@ -176,7 +181,7 @@ def tree(**overrides: object) -> NearbyObject:
     return scene_object(**values)
 
 
-def route_tile(step) -> NearbyObject:
+def route_tile(step, *, geometry: TargetGeometry = GEOMETRY) -> NearbyObject:
     return NearbyObject(
         key=step.target_key,
         object_id=0,
@@ -185,7 +190,7 @@ def route_tile(step) -> NearbyObject:
         actions=("Walk here",),
         location=step.location,
         distance=8,
-        geometry=GEOMETRY,
+        geometry=geometry,
         scene_x=49,
         scene_y=52,
         route_candidate=False,
@@ -544,6 +549,130 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.WAIT, settled.action.kind)
         self.assertEqual(1, task.progress.route_index)
+
+    def test_route_projection_camera_recovery_is_typed_bounded_and_resumable(self) -> None:
+        task = WoodcutBankTask()
+        task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
+        step = ROUTE_TO_BANK[0]
+        source = WorldPoint(3195, 3248, 0)
+        target = route_tile(step, geometry=TargetGeometry())
+
+        first = task.decide(
+            observation(
+                location=source,
+                inv=inventory(logs=28, full=True),
+                objects=(target,),
+                tick=10,
+                camera_yaw=0,
+                geometry_frame_id="camera-frame-0",
+            )
+        )
+        self.assertEqual(ActionKind.WAIT, first.action.kind)
+        self.assertIn("stable route projection", first.reason)
+
+        camera = task.decide(
+            observation(
+                location=source,
+                inv=inventory(logs=28, full=True),
+                objects=(target,),
+                tick=11,
+                camera_yaw=0,
+                geometry_frame_id="camera-frame-0",
+            )
+        )
+        self.assertEqual(ActionKind.PRESS_KEY, camera.action.kind)
+        self.assertEqual("left", camera.action.key)
+        self.assertEqual(250, camera.action.key_hold_millis)
+        self.assertEqual(
+            VerificationKind.CAMERA_POSE_CHANGED,
+            camera.action.verification.kind,
+        )
+        self.assertEqual(step.target_key, camera.action.target_key)
+        self.assertEqual(step.location, camera.action.task_constraints.camera.target_location)
+        self.assertEqual(0, task.progress.route_index)
+
+        task.apply_verification(
+            verification_pass(OutcomeKind.CAMERA_POSE_CHANGED, tick=12)
+        )
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
+        self.assertEqual(0, task.progress.route_index)
+
+        walk = task.decide(
+            observation(
+                location=source,
+                inv=inventory(logs=28, full=True),
+                objects=(route_tile(step),),
+                tick=13,
+                camera_yaw=9_000,
+                geometry_frame_id="camera-frame-9000",
+            )
+        )
+        self.assertEqual(ActionKind.WALK, walk.action.kind)
+        self.assertEqual(0, task._camera_recovery_attempts)
+
+    def test_route_projection_camera_recovery_exhausts_after_eight_verified_turns(self) -> None:
+        task = WoodcutBankTask()
+        task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
+        step = ROUTE_TO_BANK[0]
+        source = WorldPoint(3195, 3248, 0)
+        target = route_tile(step, geometry=TargetGeometry())
+        tick = 10
+
+        for attempt in range(8):
+            wait = task.decide(
+                observation(
+                    location=source,
+                    inv=inventory(logs=28, full=True),
+                    objects=(target,),
+                    tick=tick,
+                    camera_yaw=(attempt * 1_000) % 16_384,
+                )
+            )
+            self.assertEqual(ActionKind.WAIT, wait.action.kind)
+            camera = task.decide(
+                observation(
+                    location=source,
+                    inv=inventory(logs=28, full=True),
+                    objects=(target,),
+                    tick=tick + 1,
+                    camera_yaw=(attempt * 1_000) % 16_384,
+                )
+            )
+            self.assertEqual(ActionKind.PRESS_KEY, camera.action.kind)
+            task.apply_verification(
+                verification_pass(OutcomeKind.CAMERA_POSE_CHANGED, tick=tick + 2)
+            )
+            tick += 2
+
+        self.assertEqual(8, task._camera_recovery_attempts)
+        task.decide(
+            observation(
+                location=source,
+                inv=inventory(logs=28, full=True),
+                objects=(target,),
+                tick=tick,
+                camera_yaw=8_000,
+            )
+        )
+        blocked = task.decide(
+            observation(
+                location=source,
+                inv=inventory(logs=28, full=True),
+                objects=(target,),
+                tick=tick + 1,
+                camera_yaw=8_000,
+            )
+        )
+        self.assertEqual(TaskPhase.BLOCKED.value, blocked.state)
+        self.assertIn("camera recovery exhausted", blocked.reason)
+
+    def test_camera_turn_direction_uses_shortest_fixed_point_arc(self) -> None:
+        source = WorldPoint(3195, 3248, 0)
+        target = WorldPoint(3200, 3238, 0)
+
+        self.assertEqual("left", WoodcutBankTask._camera_turn_direction(source, target, 0))
+        self.assertEqual("right", WoodcutBankTask._camera_turn_direction(source, target, 9_000))
+        self.assertEqual("left", WoodcutBankTask._camera_turn_direction(source, target, 10_000))
 
     def test_route_object_evidence_uses_the_actual_ranked_selection(self) -> None:
         index = next(

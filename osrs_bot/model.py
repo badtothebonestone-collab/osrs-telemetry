@@ -9,6 +9,7 @@ MAX_FUTURE_CLOCK_SKEW_SECONDS = 2.0
 BANK_INTERFACE_NAME = "bank"
 DEPOSIT_INVENTORY_WIDGET_KEY = "deposit_inventory"
 CLOSE_BANK_WIDGET_KEY = "close_bank"
+CAMERA_YAW_UNITS = 16_384
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +196,8 @@ class Observation:
     menu_timestamp: datetime | None = None
     menu_session_id: str | None = None
     menu_process_id: int | None = None
+    camera_yaw: int | None = None
+    camera_pitch: int | None = None
 
     @property
     def loaded_scene(self) -> bool:
@@ -258,6 +261,7 @@ class VerificationKind(str, Enum):
     INTERFACE_OPENED = "interface_opened"
     INTERFACE_CLOSED = "interface_closed"
     ROUTE_TRANSITION = "route_transition"
+    CAMERA_POSE_CHANGED = "camera_pose_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +280,9 @@ class VerificationSpec:
     interface_name: str | None = None
     dialogue_prompt_contains: str | None = None
     dialogue_option_contains: str | None = None
+    before_camera_yaw: int | None = None
+    before_geometry_frame_id: str | None = None
+    camera_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,16 +355,58 @@ class DialogueOptionConstraint:
 
 
 @dataclass(frozen=True, slots=True)
+class CameraConstraint:
+    target_key: str
+    target_location: WorldPoint
+    source_location: WorldPoint
+    source_geometry_frame_id: str
+    before_yaw: int
+    direction: str
+    hold_millis: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("target_key", "source_geometry_frame_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if not isinstance(self.target_location, WorldPoint):
+            raise TypeError("target_location must be WorldPoint")
+        if not isinstance(self.source_location, WorldPoint):
+            raise TypeError("source_location must be WorldPoint")
+        if (
+            not isinstance(self.before_yaw, int)
+            or isinstance(self.before_yaw, bool)
+            or not 0 <= self.before_yaw < CAMERA_YAW_UNITS
+        ):
+            raise ValueError("before_yaw must be a valid fixed-point camera yaw")
+        if self.direction not in {"left", "right"}:
+            raise ValueError("direction must be left or right")
+        if (
+            not isinstance(self.hold_millis, int)
+            or isinstance(self.hold_millis, bool)
+            or not 1 <= self.hold_millis <= 250
+        ):
+            raise ValueError("hold_millis must be between 1 and 250")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskConstraints:
     inventory: InventoryConstraint | None = None
     interface: InterfaceConstraint | None = None
     dialogue: DialogueOptionConstraint | None = None
+    camera: CameraConstraint | None = None
 
     def __post_init__(self) -> None:
-        if self.interface is not None and self.dialogue is not None:
+        exclusive = sum(
+            value is not None
+            for value in (self.interface, self.dialogue, self.camera)
+        )
+        if exclusive > 1:
             raise ValueError(
-                "an action cannot carry interface and dialogue constraints together"
+                "an action cannot combine interface, dialogue, and camera constraints"
             )
+        if self.camera is not None and self.inventory is not None:
+            raise ValueError("a camera action cannot carry an inventory constraint")
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,3 +427,4 @@ class Action:
     source_session_id: str | None = None
     source_dialogue_client_tick: int | None = None
     task_constraints: TaskConstraints = field(default_factory=TaskConstraints)
+    key_hold_millis: int = 50

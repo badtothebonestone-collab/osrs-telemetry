@@ -92,7 +92,7 @@ class ArduinoCommandLedgerTests(unittest.TestCase):
         self.assertNotIn(secret, encoded)
         self.assertEqual("ARM", evidence["records"][0]["command"])
 
-    def test_timeout_and_best_effort_cleanup_remain_explicitly_unresolved(self) -> None:
+    def test_timeout_and_best_effort_cleanup_retains_terminal_evidence(self) -> None:
         backend = _backend(_FakeSerial([b"", b"OK STOP_ALL\n"]))
         backend._begin_command_ledger()
 
@@ -103,9 +103,41 @@ class ArduinoCommandLedgerTests(unittest.TestCase):
         self.assertEqual("ACK_TIMEOUT_OR_READ_FAIL", evidence["records"][0]["status"])
         self.assertFalse(evidence["records"][0]["ackReceived"])
         self.assertEqual("STOP_ALL", evidence["records"][1]["command"])
-        self.assertEqual("ACK_READ", evidence["records"][1]["status"])
-        self.assertEqual(1, evidence["unresolvedCount"])
+        self.assertEqual("PASS", evidence["records"][1]["status"])
+        self.assertEqual(
+            {"responseToken": "OK", "payloadToken": "STOP_ALL"},
+            evidence["records"][1]["firmwareAck"],
+        )
+        self.assertEqual(0, evidence["unresolvedCount"])
+        self.assertEqual(1, evidence["failedCount"])
         self.assertGreaterEqual(evidence["ackMissingCount"], 1)
+
+    def test_symbolic_key_uses_firmware_wire_spelling(self) -> None:
+        serial = _FakeSerial([b"OK KEY_PRESS\n"])
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._begin_command_ledger()
+
+        backend._press("RIGHT", 10)
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual([b"KEY_PRESS right 10\n"], serial.writes)
+        self.assertEqual("PASS", evidence["records"][0]["status"])
+
+    def test_rejected_key_retains_acknowledged_emergency_cleanup_evidence(self) -> None:
+        serial = _FakeSerial([b"ERR BAD_ARGS KEY_PRESS\n", b"OK STOP_ALL\n"])
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._begin_command_ledger()
+
+        with self.assertRaisesRegex(ArduinoHIDError, "rejected KEY_PRESS"):
+            backend._press("RIGHT")
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual(["REJECTED", "PASS"], [r["status"] for r in evidence["records"]])
+        self.assertEqual(["KEY_PRESS", "STOP_ALL"], [r["command"] for r in evidence["records"]])
+        self.assertTrue(all(r["ackReceived"] for r in evidence["records"]))
+        self.assertEqual(0, evidence["unresolvedCount"])
 
     def test_rejection_and_write_failure_are_terminal_failure_records(self) -> None:
         rejected = _backend(_FakeSerial([b"ERR refused\n"]))

@@ -23,6 +23,7 @@ from osrs_bot.input_coordinator import (
 from osrs_bot.model import (
     Action,
     ActionKind,
+    CameraConstraint,
     CLOSE_BANK_WIDGET_KEY,
     DialogueOption,
     DialogueOptionConstraint,
@@ -36,6 +37,8 @@ from osrs_bot.model import (
     ScreenPoint,
     TargetGeometry,
     TaskConstraints,
+    VerificationKind,
+    VerificationSpec,
     WidgetObservation,
     WidgetTarget,
     WorldPoint,
@@ -56,6 +59,9 @@ def observation(
     menu_point: ScreenPoint = POINT,
     widgets: WidgetObservation | None = None,
     location: WorldPoint = WorldPoint(3192, 3244, 0),
+    nearby_objects: tuple[NearbyObject, ...] | None = None,
+    camera_yaw: int | None = None,
+    geometry_frame_id: str | None = None,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -87,7 +93,7 @@ def observation(
         location=location,
         plane=location.plane,
         inventory=InventoryObservation(known=True),
-        nearby_objects=(tree,),
+        nearby_objects=(tree,) if nearby_objects is None else nearby_objects,
         menus=menus,
         widgets=widgets or WidgetObservation(bank_known=True),
         canvas_bounds=CANVAS,
@@ -107,13 +113,14 @@ def observation(
         client_process_id=process_id,
         assembled_at=timestamp,
         frame_id=frame_id,
-        geometry_frame_id=frame_id,
+        geometry_frame_id=geometry_frame_id or frame_id,
         source_coherent=True,
         menu_fresh=True,
         menu_source_tick=tick,
         menu_timestamp=timestamp,
         menu_session_id=session_id,
         menu_process_id=process_id,
+        camera_yaw=camera_yaw,
     )
 
 
@@ -798,6 +805,84 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(InputPurpose.GAMEPLAY_KEY, intent.purpose)
         self.assertEqual("1", intent.key)
         self.assertEqual(501, fresh.widgets.dialogue_client_tick)
+
+    def test_camera_key_rechecks_pose_and_submits_bounded_hold(self) -> None:
+        source = WorldPoint(3195, 3248, 0)
+        target_location = WorldPoint(3200, 3238, 0)
+        target = NearbyObject(
+            key="route:west_approach_bridge",
+            object_id=0,
+            name="route:west_approach_bridge",
+            kind="NAVIGATION_TILE",
+            actions=("Walk here",),
+            location=target_location,
+            distance=10,
+            geometry=TargetGeometry(),
+            scene_x=56,
+            scene_y=38,
+            route_candidate=True,
+        )
+        verification = VerificationSpec(
+            VerificationKind.CAMERA_POSE_CHANGED,
+            before_tick=10,
+            deadline_tick=20,
+            before_location=source,
+            source_session_id="session-1",
+            before_camera_yaw=0,
+            before_geometry_frame_id="camera-frame-0",
+            camera_key="left",
+        )
+        action = Action(
+            ActionKind.PRESS_KEY,
+            "Turn camera toward route",
+            10,
+            option="Turn camera left",
+            target_key=target.key,
+            target_name=target.name,
+            target_id=0,
+            key="left",
+            key_hold_millis=250,
+            verification=verification,
+            target_param0=56,
+            target_param1=38,
+            source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                camera=CameraConstraint(
+                    target.key,
+                    target_location,
+                    source,
+                    "camera-frame-0",
+                    0,
+                    "left",
+                    250,
+                )
+            ),
+        )
+        pre = observation(
+            menus=(),
+            tick=10,
+            location=source,
+            nearby_objects=(target,),
+            camera_yaw=0,
+            geometry_frame_id="camera-frame-0",
+        )
+        fresh = observation(
+            menus=(),
+            tick=11,
+            location=source,
+            nearby_objects=(target,),
+            camera_yaw=0,
+            geometry_frame_id="camera-frame-0",
+        )
+        coordinator = FakeCoordinator()
+
+        result = self.interface(coordinator, fresh).execute(action, pre)
+
+        self.assertEqual("SENT", result.status)
+        intent = coordinator.key_intents[0]
+        self.assertEqual("LEFT", intent.key)
+        self.assertEqual(250, intent.hold_millis)
+        self.assertEqual(11, result.post_move_tick)
 
     def test_dialogue_key_waits_boundedly_for_new_widget_evidence(self) -> None:
         widgets = WidgetObservation(

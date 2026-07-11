@@ -44,6 +44,8 @@ class ObservationReference:
     session_id: str | None
     process_id: int | None
     canvas_bounds: ScreenBounds | None
+    camera_yaw: int | None = None
+    camera_pitch: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_tick, int) or isinstance(self.source_tick, bool):
@@ -64,6 +66,14 @@ class ObservationReference:
             self.canvas_bounds, ScreenBounds
         ):
             raise TypeError("canvas_bounds must be ScreenBounds or None")
+        for name in ("camera_yaw", "camera_pitch"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be non-negative or None")
 
     @classmethod
     def from_observation(cls, observation: Observation) -> "ObservationReference":
@@ -77,6 +87,8 @@ class ObservationReference:
             session_id=observation.session_id,
             process_id=observation.client_process_id,
             canvas_bounds=observation.canvas_bounds,
+            camera_yaw=observation.camera_yaw,
+            camera_pitch=observation.camera_pitch,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +100,8 @@ class ObservationReference:
             "sessionId": self.session_id,
             "processId": self.process_id,
             "canvasBounds": _bounds_dict(self.canvas_bounds),
+            "cameraYaw": self.camera_yaw,
+            "cameraPitch": self.camera_pitch,
         }
 
 
@@ -435,6 +449,8 @@ def _action_dict(action: Action) -> dict[str, Any]:
         "targetKey": action.target_key,
         "targetName": action.target_name,
         "targetId": action.target_id,
+        "key": action.key,
+        "keyHoldMillis": action.key_hold_millis,
         "point": _point_dict(action.screen_point),
     }
 
@@ -457,6 +473,9 @@ def _verification_spec_dict(specification: VerificationSpec | None) -> dict[str,
         "interfaceName": specification.interface_name,
         "dialoguePromptContains": specification.dialogue_prompt_contains,
         "dialogueOptionContains": specification.dialogue_option_contains,
+        "beforeCameraYaw": specification.before_camera_yaw,
+        "beforeGeometryFrameId": specification.before_geometry_frame_id,
+        "cameraKey": specification.camera_key,
     }
 
 

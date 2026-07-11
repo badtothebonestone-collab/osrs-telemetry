@@ -137,6 +137,7 @@ class ApprovedKeyIntent:
     purpose: InputPurpose
     key: str
     expected_pid: int
+    hold_millis: int = 50
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -152,6 +153,8 @@ class ApprovedKeyIntent:
         object.__setattr__(self, "key", normalized)
         if not _is_int(self.expected_pid) or self.expected_pid <= 0:
             raise ValueError("expected_pid must be a positive integer")
+        if not _is_int(self.hold_millis) or not 1 <= self.hold_millis <= 250:
+            raise ValueError("hold_millis must be between 1 and 250")
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,7 +560,7 @@ class _Backend(Protocol):
 
     def _mouse_up(self, *, button: str = "left") -> None: ...
 
-    def _press(self, key: str) -> None: ...
+    def _press(self, key: str, hold_millis: int = 50) -> None: ...
 
     def _stop_all(self) -> dict[str, Any]: ...
 
@@ -957,7 +960,8 @@ class InputCoordinator:
                 transaction, phase="before_key_activation"
             )
             acknowledged, _ = transaction.invoke(
-                "KEY_PRESS", lambda: transaction.backend._press(intent.key)
+                "KEY_PRESS",
+                lambda: transaction.backend._press(intent.key, intent.hold_millis),
             )
             if not acknowledged:
                 raise _TransactionAbort("key_press_not_acknowledged")

@@ -222,7 +222,7 @@ class FakeBackend:
         self._call("mouse_up")
         self._record("MOUSE_UP", fail_name="mouse_up")
 
-    def _press(self, key: str) -> None:
+    def _press(self, key: str, hold_millis: int = 50) -> None:
         self._call("press", key)
         self._record("KEY_PRESS", fail_name="press")
 
