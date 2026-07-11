@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from array import array
 import ctypes
 import json
 import os
@@ -27,6 +28,7 @@ MAX_LOGIN_CLICKS = 4
 MAX_LOGIN_SECONDS = 180.0
 TRANSITION_SECONDS = 15.0
 CLIENT_MARGIN_PX = 8
+MAX_TEMPLATE_SEARCH_ZONE_PIXELS = 4_000_000
 SUPPORTED_SURFACES = ("play_now", "click_here_to_play", "disconnected_ok")
 _TEMPLATE_SURFACES = ("play_now", "click_here_to_play")
 TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "login"
@@ -141,6 +143,28 @@ def _best_template_match(
     hay_pixels = haystack.load()
     left, top, right, bottom = zone
     best: tuple[int, int, int, int, float] | None = None
+    if (
+        left < 0
+        or top < 0
+        or right <= left
+        or bottom <= top
+        or right > haystack.width
+        or bottom > haystack.height
+        or (right - left) * (bottom - top) > MAX_TEMPLATE_SEARCH_ZONE_PIXELS
+        or haystack.width * haystack.height > 0xFFFFFFFF
+    ):
+        raise LoginSafetyError(
+            "login template search zone is invalid or exceeds the bounded limit"
+        )
+    # The search region is identical for every allowed template scale. Build
+    # its bright-pixel index once so fresh post-move validation stays inside
+    # the firmware lease without narrowing the full ambiguity scan.
+    bright_screen_indices = array("I")
+    for screen_y in range(top, bottom):
+        row_offset = screen_y * haystack.width
+        for screen_x in range(left, right):
+            if _bright(hay_pixels[screen_x, screen_y]):
+                bright_screen_indices.append(row_offset + screen_x)
 
     for needle in _scaled_templates(template):
         width, height = needle.size
@@ -167,10 +191,15 @@ def _best_template_match(
         negative_samples = _even_samples(negative, 96)
         anchor_x, anchor_y = anchors[0]
         candidate_origins: set[tuple[int, int]] = set()
-        for screen_y in range(top + anchor_y, bottom - height + anchor_y + 1):
-            for screen_x in range(left + anchor_x, right - width + anchor_x + 1):
-                if _bright(hay_pixels[screen_x, screen_y]):
-                    candidate_origins.add((screen_x - anchor_x, screen_y - anchor_y))
+        for screen_index in bright_screen_indices:
+            screen_y, screen_x = divmod(screen_index, haystack.width)
+            if (
+                left + anchor_x <= screen_x <= right - width + anchor_x
+                and top + anchor_y <= screen_y <= bottom - height + anchor_y
+            ):
+                candidate_origins.add(
+                    (screen_x - anchor_x, screen_y - anchor_y)
+                )
 
         for x, y in candidate_origins:
             anchor_hits = sum(

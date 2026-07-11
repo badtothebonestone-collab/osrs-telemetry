@@ -88,6 +88,12 @@ to gameplay, credentials, MFA, text entry, or a bank PIN.
 The helper verifies that its active Windows thread is per-monitor-v2 DPI aware
 before trusting native bounds, screenshots, or cursor feedback; inability to
 prove that coordinate context blocks before any hardware connection.
+Both the initial and post-move login checks still scan the complete configured
+zones for every supported authenticated template, so ambiguity is never
+narrowed to an earlier candidate. Within one fresh screenshot only, the matcher
+indexes each zone's bright pixels once and reuses that bounded index across its
+allowed template scales. An invalid or greater-than-four-million-pixel search
+zone blocks instead of becoming a no-match or disconnect candidate.
 
 The coordinator checks focus/PID and actual cursor feedback throughout the
 trajectory. Every correction is another bounded deterministic plan. Immediately

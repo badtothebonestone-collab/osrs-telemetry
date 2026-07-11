@@ -317,6 +317,38 @@ class LoginDetectionTests(unittest.TestCase):
                 screenshot.putpixel((x, y), (220, 220, 220))
         self.assertEqual(detect_login_surfaces(screenshot), ())
 
+    def test_full_detector_preserves_cross_template_ambiguity(self) -> None:
+        screenshot = Image.new("RGB", (1200, 800), (55, 18, 14))
+        placements = {
+            "play_now": (470, 330),
+            "click_here_to_play": (400, 500),
+        }
+        expected_bounds: dict[str, tuple[int, int, int, int]] = {}
+        for name, placement in placements.items():
+            with Image.open(Path(TEMPLATE_DIR) / f"{name}.png") as template:
+                image = template.convert("RGB")
+                screenshot.paste(image, placement)
+                expected_bounds[name] = (*placement, image.width, image.height)
+
+        candidates = detect_login_surfaces(screenshot)
+
+        self.assertEqual(
+            {"play_now", "click_here_to_play"},
+            {candidate.name for candidate in candidates},
+        )
+        self.assertEqual(
+            expected_bounds,
+            {
+                candidate.name: (
+                    candidate.match_bounds.x,
+                    candidate.match_bounds.y,
+                    candidate.match_bounds.width,
+                    candidate.match_bounds.height,
+                )
+                for candidate in candidates
+            },
+        )
+
     def test_detects_narrow_idle_disconnect_dialog_geometry(self) -> None:
         screenshot = Image.new("RGB", (1000, 700), (55, 18, 14))
         for x in range(250, 750):
@@ -353,6 +385,62 @@ class LoginDetectionTests(unittest.TestCase):
         candidates = detect_login_surfaces(screenshot)
 
         self.assertEqual([candidate.name for candidate in candidates], ["play_now"])
+        self.assertEqual(
+            (966, 760, scaled.width, scaled.height),
+            (
+                candidates[0].match_bounds.x,
+                candidates[0].match_bounds.y,
+                candidates[0].match_bounds.width,
+                candidates[0].match_bounds.height,
+            ),
+        )
+
+    def test_template_matcher_scans_each_search_zone_once_across_scales(self) -> None:
+        screenshot = Image.new("RGB", (1200, 800), (20, 20, 20))
+        with Image.open(Path(TEMPLATE_DIR) / "click_here_to_play.png") as opened:
+            template = opened.convert("RGB")
+        x1, y1, x2, y2 = login_module._SEARCH_ZONES["click_here_to_play"]
+        zone = (
+            round(screenshot.width * x1),
+            round(screenshot.height * y1),
+            round(screenshot.width * x2),
+            round(screenshot.height * y2),
+        )
+        bright_calls = 0
+        original_bright = login_module._bright
+
+        def counting_bright(pixel: tuple[int, int, int]) -> bool:
+            nonlocal bright_calls
+            bright_calls += 1
+            return original_bright(pixel)
+
+        with patch.object(login_module, "_bright", side_effect=counting_bright):
+            match = login_module._best_template_match(screenshot, template, zone)
+
+        zone_pixels = (zone[2] - zone[0]) * (zone[3] - zone[1])
+        scaled_template_work = sum(
+            needle.width * needle.height
+            + len(range(0, needle.height, max(1, needle.height // 20)))
+            * len(range(0, needle.width, max(1, needle.width // 32)))
+            for needle in login_module._scaled_templates(template)
+        )
+        self.assertIsNone(match)
+        self.assertEqual(zone_pixels + scaled_template_work, bright_calls)
+
+    def test_oversized_template_search_zone_fails_closed(self) -> None:
+        screenshot = Image.new("RGB", (3000, 2000), (20, 20, 20))
+        with Image.open(Path(TEMPLATE_DIR) / "play_now.png") as opened:
+            template = opened.convert("RGB")
+
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "exceeds the bounded limit",
+        ):
+            login_module._best_template_match(
+                screenshot,
+                template,
+                (0, 0, 2500, 1800),
+            )
 
 
 class DpiAwarenessTests(unittest.TestCase):
@@ -693,6 +781,61 @@ class LoginHelperTests(unittest.TestCase):
         self.assertNotIn("mouse_down", backends[0].calls)
         self.assertIn("stop_all", backends[0].calls)
         self.assertIn("disarm", backends[0].calls)
+
+    def test_prompt_ambiguity_after_move_blocks_click_and_cleans_up(self) -> None:
+        backends: list[FakeBackend] = []
+        detections = iter(((PLAY,), (PLAY, WELCOME)))
+        helper = build_helper(
+            FakeObservations([observation("LOGIN_SCREEN", 1)]),
+            lambda image: next(detections),
+            backends=backends,
+        )
+
+        result = helper.run()
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("ambiguous", result.reason)
+        self.assertNotIn("mouse_down", backends[0].calls)
+        self.assertIn("stop_all", backends[0].calls)
+        self.assertIn("disarm", backends[0].calls)
+
+    def test_prompt_identity_or_geometry_change_after_move_blocks_click(self) -> None:
+        point_shifted = replace(
+            PLAY,
+            point=ScreenPoint(PLAY.point.x + 5, PLAY.point.y),
+        )
+        bounds_shifted = replace(
+            PLAY,
+            match_bounds=ScreenBounds(
+                PLAY.match_bounds.x + 7,
+                PLAY.match_bounds.y,
+                PLAY.match_bounds.width,
+                PLAY.match_bounds.height,
+            ),
+        )
+        for label, refreshed in (
+            ("identity", WELCOME),
+            ("point", point_shifted),
+            ("bounds", bounds_shifted),
+        ):
+            with self.subTest(label=label):
+                backends: list[FakeBackend] = []
+                detections = iter(((PLAY,), (refreshed,)))
+                helper = build_helper(
+                    FakeObservations([observation("LOGIN_SCREEN", 1)]),
+                    lambda image: next(detections),
+                    backends=backends,
+                )
+
+                result = helper.run()
+
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertIn("prompt changed", result.reason)
+                self.assertNotIn("mouse_down", backends[0].calls)
+                self.assertTrue(
+                    result.clicks[-1].receipt.firmware_status
+                    and result.clicks[-1].receipt.firmware_status.safe
+                )
 
     def test_cleanup_failure_overrides_prior_connected_attempt_result(self) -> None:
         for failure in ("stop_all", "disarm"):
