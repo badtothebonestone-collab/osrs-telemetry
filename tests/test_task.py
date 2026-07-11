@@ -722,6 +722,161 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, task.progress.phase)
         self.assertEqual(expected, task.progress.route_index)
 
+    def test_fresh_task_reconciles_full_inventory_on_exact_bank_route(self) -> None:
+        task = WoodcutBankTask()
+        location = WorldPoint(3205, 3215, 2)
+        expected = max(
+            index
+            for index, step in enumerate(ROUTE_TO_BANK)
+            if location.plane == step.location.plane
+            and location.distance_to(step.location) <= step.arrival_radius
+        )
+
+        resumed = task.decide(
+            observation(
+                location=location,
+                inv=inventory(logs=28, full=True),
+            )
+        )
+
+        self.assertEqual(ActionKind.WAIT, resumed.action.kind)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
+        self.assertEqual(expected, task.progress.route_index)
+        self.assertIsNone(task.progress.pending)
+        self.assertIsNone(task.progress.target_key)
+        self.assertEqual(
+            "reobserved full inventory on the validated bank route",
+            resumed.reason,
+        )
+
+        arrived = task.decide(
+            observation(
+                location=location,
+                inv=inventory(logs=28, full=True),
+                tick=11,
+            )
+        )
+        self.assertEqual(ActionKind.WAIT, arrived.action.kind)
+        self.assertEqual(expected + 1, task.progress.route_index)
+
+        task.progress.phase = TaskPhase.NAVIGATE_TO_TREES
+        task.progress.route_index = len(ROUTE_TO_TREES)
+        completed_resume = task.decide(
+            observation(location=TREE_AREA, inv=inventory(), tick=12)
+        )
+        self.assertEqual(ActionKind.WAIT, completed_resume.action.kind)
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertEqual(0, task.progress.cycles_completed)
+        self.assertEqual(0, task.progress.route_index)
+
+    def test_verified_final_log_inside_work_area_keeps_normal_cycle_credit(self) -> None:
+        task = WoodcutBankTask()
+        location = ROUTE_TO_BANK[0].location
+        target = tree(location=location)
+        state = observation(
+            location=location,
+            inv=inventory(logs=27),
+            objects=(target,),
+            tick=20,
+        )
+        task.decide(state)
+        task.decide(state)
+        task.apply_verification(
+            verification_pass(OutcomeKind.ITEM_QUANTITY_INCREASED, tick=21)
+        )
+
+        full = task.decide(
+            observation(
+                location=location,
+                inv=inventory(logs=28, full=True),
+                tick=22,
+            )
+        )
+
+        self.assertEqual(
+            "inventory is full; fixed bank route selected",
+            full.reason,
+        )
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
+        self.assertEqual(0, task.progress.route_index)
+        self.assertFalse(task._restart_reconciled_without_cycle_credit)
+
+    def test_bank_route_reconciliation_uses_furthest_matching_step(self) -> None:
+        task = WoodcutBankTask()
+        location = WorldPoint(3205, 3213, 2)
+        expected = max(
+            index
+            for index, step in enumerate(ROUTE_TO_BANK)
+            if location.plane == step.location.plane
+            and location.distance_to(step.location) <= step.arrival_radius
+        )
+
+        task.decide(
+            observation(
+                location=location,
+                inv=inventory(logs=28, full=True),
+            )
+        )
+
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
+        self.assertEqual(expected, task.progress.route_index)
+
+    def test_bank_anchor_restart_advances_directly_to_open_bank(self) -> None:
+        task = WoodcutBankTask()
+        task.decide(
+            observation(
+                location=BANK_ANCHOR,
+                inv=inventory(logs=28, full=True),
+            )
+        )
+
+        self.assertEqual(len(ROUTE_TO_BANK) - 1, task.progress.route_index)
+
+        arrived = task.decide(
+            observation(
+                location=BANK_ANCHOR,
+                inv=inventory(logs=28, full=True),
+                tick=11,
+            )
+        )
+
+        self.assertEqual(ActionKind.WAIT, arrived.action.kind)
+        self.assertEqual(TaskPhase.OPEN_BANK, task.progress.phase)
+
+    def test_bank_route_reconciliation_rejects_partial_or_off_route_state(self) -> None:
+        for label, location, inv in (
+            (
+                "partial logs",
+                WorldPoint(3205, 3215, 2),
+                inventory(logs=27),
+            ),
+            (
+                "off route",
+                WorldPoint(3300, 3300, 2),
+                inventory(logs=28, full=True),
+            ),
+        ):
+            with self.subTest(label=label):
+                task = WoodcutBankTask()
+                task.decide(observation(location=location, inv=inv))
+
+                self.assertFalse(task._restart_reconciled_without_cycle_credit)
+                if label == "off route":
+                    self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
+                    self.assertEqual(0, task.progress.route_index)
+                else:
+                    self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
+
+        wrong_plane = WoodcutBankTask()
+        wrong_plane.decide(
+            observation(
+                location=WorldPoint(3205, 3215, 1),
+                inv=inventory(logs=28, full=True),
+            )
+        )
+        self.assertFalse(wrong_plane._restart_reconciled_without_cycle_credit)
+        self.assertEqual(0, wrong_plane.progress.route_index)
+
     def test_return_route_reconciliation_rejects_ambiguous_inventory_or_location(self) -> None:
         for label, location, inv in (
             (

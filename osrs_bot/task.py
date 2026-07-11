@@ -96,7 +96,7 @@ class WoodcutBankTask:
         self._camera_recovery_attempts = 0
         self._route_projection_wait_since_tick: int | None = None
         self._pending_camera_step_id: str | None = None
-        self._return_route_reconciled_without_cycle_credit = False
+        self._restart_reconciled_without_cycle_credit = False
         self._next_resource_suppression: tuple[str, str] | None = None
         self._resource_no_yield_retries = 0
 
@@ -353,6 +353,7 @@ class WoodcutBankTask:
         if self.progress.cycles_completed >= self.binding.profile.cycle_goal:
             self.progress.phase = TaskPhase.COMPLETE
             return self._wait(observation, "profile cycle goal is complete")
+        work_area = self.definition.resource.work_area
         if observation.inventory.full:
             if (
                 self.definition.inventory.require_produced_item_when_full
@@ -362,10 +363,31 @@ class WoodcutBankTask:
                     observation,
                     "inventory is full without the definition's produced item",
                 )
+            outside_work_area = bool(
+                observation.plane != work_area.anchor.plane
+                or observation.location.distance_to(work_area.anchor)
+                > work_area.radius
+            )
+            resume_index = (
+                self._bank_route_resume_index(observation)
+                if outside_work_area
+                else None
+            )
             self.progress.phase = TaskPhase.NAVIGATE_TO_BANK
-            self.progress.route_index = 0
+            self.progress.route_index = 0 if resume_index is None else resume_index
+            if resume_index is not None:
+                self.progress.target_key = None
+                self.progress.pending = None
+                self._restart_reconciled_without_cycle_credit = True
+                self._movement_verified = False
+                self._route_settle_location = None
+                self._route_settle_since_tick = None
+                self._reset_camera_recovery()
+                return self._wait(
+                    observation,
+                    "reobserved full inventory on the validated bank route",
+                )
             return self._wait(observation, "inventory is full; fixed bank route selected")
-        work_area = self.definition.resource.work_area
         if (
             observation.plane != work_area.anchor.plane
             or observation.location.distance_to(work_area.anchor) > work_area.radius
@@ -376,7 +398,7 @@ class WoodcutBankTask:
                 self.progress.pending = None
                 self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
                 self.progress.route_index = resume_index
-                self._return_route_reconciled_without_cycle_credit = True
+                self._restart_reconciled_without_cycle_credit = True
                 self._movement_verified = False
                 self._route_settle_location = None
                 self._route_settle_since_tick = None
@@ -434,6 +456,20 @@ class WoodcutBankTask:
         matches = [
             index
             for index, step in enumerate(self.definition.route_to_resource.steps)
+            if observation.plane == step.location.plane
+            and observation.location.distance_to(step.location)
+            <= step.arrival_radius
+        ]
+        return max(matches) if matches else None
+
+    def _bank_route_resume_index(
+        self, observation: Observation
+    ) -> int | None:
+        if not observation.inventory.full:
+            return None
+        matches = [
+            index
+            for index, step in enumerate(self.definition.route_to_bank.steps)
             if observation.plane == step.location.plane
             and observation.location.distance_to(step.location)
             <= step.arrival_radius
@@ -1234,8 +1270,8 @@ class WoodcutBankTask:
         if self.progress.phase == TaskPhase.NAVIGATE_TO_BANK:
             self.progress.phase = TaskPhase.OPEN_BANK
         elif self.progress.phase == TaskPhase.NAVIGATE_TO_TREES:
-            if self._return_route_reconciled_without_cycle_credit:
-                self._return_route_reconciled_without_cycle_credit = False
+            if self._restart_reconciled_without_cycle_credit:
+                self._restart_reconciled_without_cycle_credit = False
                 self.progress.route_index = 0
                 self.progress.phase = TaskPhase.FIND_TREE
                 return
