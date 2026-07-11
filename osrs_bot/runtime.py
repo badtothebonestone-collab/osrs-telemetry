@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Protocol
 
@@ -22,6 +22,27 @@ from .verification import VerificationResult, VerificationStatus, Verifier
 
 
 LIVE_FOCUS_HANDOFF_SECONDS = 15.0
+
+
+def _verification_after_input(
+    specification: VerificationSpec,
+    post_move_tick: int | None,
+) -> VerificationSpec:
+    """Start the tick budget after the final pre-activation observation.
+
+    Pointer movement and fresh hover revalidation can span several game ticks.
+    Those ticks happen before the click or key press and therefore cannot count
+    against the bounded post-action verification window.
+    """
+
+    if post_move_tick is None or post_move_tick <= specification.before_tick:
+        return specification
+    tick_budget = specification.deadline_tick - specification.before_tick
+    return replace(
+        specification,
+        before_tick=post_move_tick,
+        deadline_tick=post_move_tick + tick_budget,
+    )
 
 
 class RuntimeControlState(str, Enum):
@@ -556,6 +577,13 @@ class TaskRuntime:
                 True, "RUNNING", None, observations, actions, last_tick
             )
             self._frame_execution = execution
+            verification = decision.action.verification
+            if execution.sent:
+                verification = _verification_after_input(
+                    verification,
+                    execution.post_move_tick,
+                )
+                self._frame_pending = verification
             self._publish_frame(EngineStage.EXECUTED, task_snapshot=task_snapshot)
             if not execution.sent:
                 failure_reason = (
@@ -613,9 +641,7 @@ class TaskRuntime:
                 self._frame_observation = candidate
                 self._publish_frame(EngineStage.OBSERVED)
                 try:
-                    result = self._verifier.evaluate(
-                        decision.action.verification, candidate
-                    )
+                    result = self._verifier.evaluate(verification, candidate)
                 except Exception as error:
                     failure_reason = f"verifier failed: {type(error).__name__}: {error}"
                     transition_error = self._apply_failure(failure_reason)

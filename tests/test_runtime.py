@@ -19,6 +19,7 @@ from osrs_bot.input_coordinator import (
 from osrs_bot.model import (
     Action,
     ActionKind,
+    InventoryItem,
     InventoryObservation,
     MenuEntry,
     NearbyObject,
@@ -493,6 +494,7 @@ class TaskRuntimeTests(unittest.TestCase):
                 _probe_observation(10, WorldPoint(3198, 3200, 0)),
                 _probe_observation(11, _PROBE_TARGET),
                 _probe_observation(12, _PROBE_TARGET),
+                _probe_observation(13, _PROBE_TARGET),
             ),
             task,
             Verifier(max_observation_age_seconds=10.0),
@@ -663,6 +665,155 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(1, result.actions)
         self.assertEqual(3, result.observations)
         self.assertIs(result.task_snapshot.status, TaskStatus.COMPLETE)
+
+    def test_verification_tick_budget_starts_after_pre_activation_revalidation(self) -> None:
+        decision, original = _executable(10)
+        task = _Task([decision, _wait(20, "complete")])
+        execution = _sent_execution(decision.action, 10, 13)
+        gained_log = replace(
+            _observation(19),
+            inventory=InventoryObservation(
+                items=(InventoryItem(slot=0, item_id=1511, quantity=1),),
+                occupied_slots=1,
+                free_slots=27,
+                known=True,
+            ),
+        )
+        publisher = _RecordingPublisher()
+        runtime = TaskRuntime(
+            _Client(_observation(10), gained_log, _observation(20)),
+            task,
+            Verifier(max_observation_age_seconds=10.0),
+            _ActionInterface(execution),
+            frame_publisher=publisher,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        executed = next(
+            frame for frame in publisher.frames if frame.stage is EngineStage.EXECUTED
+        )
+        self.assertEqual(13, executed.pending_verification.before_tick)
+        self.assertEqual(21, executed.pending_verification.deadline_tick)
+        self.assertEqual(10, original.before_tick)
+        self.assertEqual(18, original.deadline_tick)
+
+    def test_missing_post_move_tick_keeps_original_verification_window(self) -> None:
+        decision, original = _executable(10)
+        complete = _wait(12, "complete")
+        task = _Task([decision, complete])
+        execution = _sent_execution(decision.action, 10, None)
+        passed = VerificationResult(
+            VerificationStatus.PASS,
+            "log_gained",
+            Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 11),
+        )
+        publisher = _RecordingPublisher()
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11), _observation(12)),
+            task,
+            _Verifier(passed),
+            _ActionInterface(execution),
+            frame_publisher=publisher,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        executed = next(
+            frame for frame in publisher.frames if frame.stage is EngineStage.EXECUTED
+        )
+        self.assertIs(original, executed.pending_verification)
+
+    def test_rebased_walk_window_accepts_the_observed_late_arrival(self) -> None:
+        before = WorldPoint(3195, 3248, 0)
+        target = WorldPoint(3200, 3238, 0)
+        arrived = WorldPoint(3200, 3239, 0)
+        verification = VerificationSpec(
+            VerificationKind.MOVED_CLOSER,
+            before_tick=817,
+            deadline_tick=825,
+            before_location=before,
+            target_location=target,
+            target_radius=1,
+            source_session_id="runtime-session",
+        )
+        action = Action(
+            ActionKind.WALK,
+            "Walk to west_approach_bridge",
+            817,
+            verification=verification,
+        )
+        task = _Task([
+            Decision("navigate_to_bank", "walk fixed route step", action),
+            _wait(827, "complete"),
+        ])
+        publisher = _RecordingPublisher()
+        runtime = TaskRuntime(
+            _Client(
+                replace(_observation(817), location=before),
+                replace(_observation(825), location=before),
+                replace(_observation(826), location=arrived),
+                replace(_observation(827), location=arrived),
+            ),
+            task,
+            Verifier(max_observation_age_seconds=10.0),
+            _ActionInterface(_sent_execution(action, 817, 820)),
+            frame_publisher=publisher,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        self.assertEqual(OutcomeKind.ARRIVED, task.applied[0].outcome.kind)
+        self.assertEqual(826, task.applied[0].outcome.observed_tick)
+        executed = next(
+            frame for frame in publisher.frames if frame.stage is EngineStage.EXECUTED
+        )
+        effective = executed.pending_verification
+        self.assertEqual((820, 828), (effective.before_tick, effective.deadline_tick))
+        self.assertEqual(before, effective.before_location)
+        self.assertEqual(target, effective.target_location)
+        self.assertEqual(1, effective.target_radius)
+        self.assertEqual("runtime-session", effective.source_session_id)
+
+    def test_rebased_walk_window_still_fails_at_its_effective_deadline(self) -> None:
+        before = WorldPoint(3195, 3248, 0)
+        target = WorldPoint(3200, 3238, 0)
+        verification = VerificationSpec(
+            VerificationKind.MOVED_CLOSER,
+            before_tick=817,
+            deadline_tick=825,
+            before_location=before,
+            target_location=target,
+            target_radius=1,
+            source_session_id="runtime-session",
+        )
+        action = Action(ActionKind.WALK, "Walk", 817, verification=verification)
+        task = _Task([
+            Decision("navigate_to_bank", "walk fixed route step", action),
+        ])
+        runtime = TaskRuntime(
+            _Client(
+                replace(_observation(817), location=before),
+                replace(_observation(825), location=before),
+                replace(_observation(828), location=before),
+            ),
+            task,
+            Verifier(max_observation_age_seconds=10.0),
+            _ActionInterface(_sent_execution(action, 817, 820)),
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("deadline_exceeded", task.applied[0].reason)
+        self.assertEqual(828, result.last_tick)
 
     def test_engine_frame_retains_real_receipt_outcome_and_terminal_state(self) -> None:
         decision, verification = _executable(10)
