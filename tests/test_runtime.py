@@ -44,6 +44,7 @@ from osrs_bot.task_contract import (
 from osrs_bot.verification import (
     Outcome,
     OutcomeKind,
+    VerificationFailureKind,
     VerificationResult,
     VerificationStatus,
     Verifier,
@@ -265,6 +266,30 @@ class _Task:
 
     def snapshot(self) -> TaskSnapshot:
         return TaskSnapshot("fake-task", self.status, self.state, self.blocker)
+
+
+class _RecoveringVerificationTask(_Task):
+    def apply_verification(self, result: VerificationResult) -> None:
+        if (
+            result.failure_kind
+            is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+        ):
+            self.applied.append(result)
+            self.status = TaskStatus.RUNNING
+            self.state = "recovered"
+            return
+        super().apply_verification(result)
+
+
+class _FaultyFailureTask(_Task):
+    def __init__(self, decisions: list[Decision], *, complete: bool = False) -> None:
+        super().__init__(decisions)
+        self._complete = complete
+
+    def apply_verification(self, result: VerificationResult) -> None:
+        self.applied.append(result)
+        self.status = TaskStatus.COMPLETE if self._complete else TaskStatus.RUNNING
+        self.state = "complete" if self._complete else "incorrectly_running"
 
 
 class _Verifier:
@@ -971,7 +996,11 @@ class TaskRuntimeTests(unittest.TestCase):
         result = runtime.run(execute=True)
 
         self.assertEqual("BLOCKED", result.status)
-        self.assertEqual("deadline_exceeded", task.applied[0].reason)
+        self.assertEqual("condition_unmet_at_deadline", task.applied[0].reason)
+        self.assertIs(
+            VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE,
+            task.applied[0].failure_kind,
+        )
         self.assertEqual(828, result.last_tick)
 
     def test_engine_frame_retains_real_receipt_outcome_and_terminal_state(self) -> None:
@@ -1022,7 +1051,11 @@ class TaskRuntimeTests(unittest.TestCase):
         decision, _ = _executable(10)
         task = _Task([decision])
         execution = _sent_execution(decision.action, 10, 11)
-        failed = VerificationResult(VerificationStatus.FAIL, "deadline_exceeded")
+        failed = VerificationResult(
+            VerificationStatus.FAIL,
+            "deadline_exceeded",
+            failure_kind=VerificationFailureKind.DEADLINE_EXCEEDED,
+        )
         runtime = TaskRuntime(
             _Client(_observation(10), _observation(11)),
             task,
@@ -1036,6 +1069,76 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual("BLOCKED", result.status)
         self.assertEqual([failed], task.applied)
         self.assertEqual("deadline_exceeded", result.task_snapshot.blocker)
+
+    def test_typed_item_unchanged_failure_may_reobserve_after_task_recovery(self) -> None:
+        decision, _ = _executable(10)
+        complete = Decision(
+            "complete",
+            "resource retry later completed",
+            Action(ActionKind.WAIT, "Wait", 12),
+        )
+        task = _RecoveringVerificationTask([decision, complete])
+        failed = VerificationResult(
+            VerificationStatus.FAIL,
+            "item_quantity_unchanged_at_deadline",
+            failure_kind=(
+                VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+            ),
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11), _observation(12)),
+            task,
+            _Verifier(failed),
+            _ActionInterface(_sent_execution(decision.action, 10, 11)),
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        self.assertEqual([failed], task.applied)
+        self.assertEqual(1, result.actions)
+
+    def test_nonrecoverable_or_complete_failure_transition_is_contract_error(self) -> None:
+        failures = (
+            VerificationResult(
+                VerificationStatus.FAIL,
+                "session_changed",
+                failure_kind=VerificationFailureKind.SESSION_CHANGED,
+            ),
+            VerificationResult(
+                VerificationStatus.FAIL,
+                "item_quantity_unchanged_at_deadline",
+                failure_kind=(
+                    VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+                ),
+            ),
+        )
+        for failure, complete_after_failure in (
+            (failures[0], False),
+            (failures[1], True),
+        ):
+            with self.subTest(
+                failure=failure.failure_kind,
+                complete=complete_after_failure,
+            ):
+                decision, _ = _executable(10)
+                task = _FaultyFailureTask(
+                    [decision],
+                    complete=complete_after_failure,
+                )
+                runtime = TaskRuntime(
+                    _Client(_observation(10), _observation(11)),
+                    task,
+                    _Verifier(failure),
+                    _ActionInterface(_sent_execution(decision.action, 10, 11)),
+                    sleep=lambda _: None,
+                )
+
+                result = runtime.run(execute=True)
+
+                self.assertEqual("ERROR", result.status)
+                self.assertIn("non-recoverable", result.reason)
 
     def test_observation_failure_is_reported_without_action(self) -> None:
         task = _Task([_wait(1)])

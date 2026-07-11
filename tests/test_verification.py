@@ -19,6 +19,7 @@ from osrs_bot.model import (
 from osrs_bot.verification import (
     Outcome,
     OutcomeKind,
+    VerificationFailureKind,
     VerificationResult,
     VerificationStatus,
     Verifier,
@@ -114,6 +115,16 @@ class VerifierTest(unittest.TestCase):
         )
 
         self.assertTrue(present.passed)
+
+    def test_fail_requires_a_typed_failure_and_only_fail_may_carry_it(self) -> None:
+        with self.assertRaises(ValueError):
+            VerificationResult(VerificationStatus.FAIL, "missing_failure_kind")
+        with self.assertRaises(ValueError):
+            VerificationResult(
+                VerificationStatus.PENDING,
+                "not_failed",
+                failure_kind=VerificationFailureKind.RUNTIME_FAILURE,
+            )
 
     def test_waits_for_an_observation_later_than_the_action(self) -> None:
         result = self.verifier.evaluate(
@@ -364,6 +375,10 @@ class VerifierTest(unittest.TestCase):
 
         self.assertTrue(result.failed)
         self.assertEqual("bank_pin_open", result.reason)
+        self.assertIs(
+            VerificationFailureKind.BANK_PIN_OPEN,
+            result.failure_kind,
+        )
         self.assertIsNone(result.outcome)
 
     def test_session_change_fails_instead_of_proving_an_action(self) -> None:
@@ -380,6 +395,10 @@ class VerifierTest(unittest.TestCase):
 
         self.assertTrue(result.failed)
         self.assertEqual("session_changed", result.reason)
+        self.assertIs(
+            VerificationFailureKind.SESSION_CHANGED,
+            result.failure_kind,
+        )
 
     def test_unmet_condition_is_pending_before_deadline(self) -> None:
         result = self.verifier.evaluate(
@@ -447,8 +466,16 @@ class VerifierTest(unittest.TestCase):
 
         self.assertTrue(unmet.failed)
         self.assertTrue(stale.failed)
-        self.assertEqual("deadline_exceeded", unmet.reason)
-        self.assertEqual("deadline_exceeded", stale.reason)
+        self.assertEqual("item_quantity_unchanged_at_deadline", unmet.reason)
+        self.assertIs(
+            VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE,
+            unmet.failure_kind,
+        )
+        self.assertEqual("observation_unusable_at_deadline", stale.reason)
+        self.assertIs(
+            VerificationFailureKind.OBSERVATION_UNUSABLE_AT_DEADLINE,
+            stale.failure_kind,
+        )
 
     def test_success_seen_only_after_deadline_fails_closed(self) -> None:
         result = self.verifier.evaluate(
@@ -462,6 +489,34 @@ class VerifierTest(unittest.TestCase):
 
         self.assertTrue(result.failed)
         self.assertEqual("deadline_exceeded", result.reason)
+        self.assertIs(
+            VerificationFailureKind.DEADLINE_EXCEEDED,
+            result.failure_kind,
+        )
+
+    def test_unknown_or_decreased_item_quantity_is_not_recoverable_no_yield(self) -> None:
+        spec = specification(
+            VerificationKind.ITEM_QUANTITY_INCREASED,
+            item_id=ITEM_ID,
+            before_quantity=1,
+        )
+        unknown = self.verifier.evaluate(
+            spec,
+            observation(tick=105, inventory=item_inventory(0, known=False)),
+        )
+        decreased = self.verifier.evaluate(
+            spec,
+            observation(tick=105, inventory=item_inventory(0)),
+        )
+
+        self.assertIs(
+            VerificationFailureKind.OBSERVATION_UNUSABLE_AT_DEADLINE,
+            unknown.failure_kind,
+        )
+        self.assertIs(
+            VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE,
+            decreased.failure_kind,
+        )
 
     def test_unknown_inventory_cannot_prove_item_outcomes(self) -> None:
         unknown = item_inventory(0, known=False)
@@ -547,6 +602,10 @@ class VerifierTest(unittest.TestCase):
                 result = self.verifier.evaluate(spec, observation())
                 self.assertTrue(result.failed)
                 self.assertIsNone(result.outcome)
+                self.assertIs(
+                    VerificationFailureKind.INVALID_SPECIFICATION,
+                    result.failure_kind,
+                )
 
 
 if __name__ == "__main__":

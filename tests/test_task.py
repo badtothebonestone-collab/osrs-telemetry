@@ -28,6 +28,7 @@ from osrs_bot.task import TaskPhase, WoodcutBankTask
 from osrs_bot.verification import (
     Outcome,
     OutcomeKind,
+    VerificationFailureKind,
     VerificationResult,
     VerificationStatus,
 )
@@ -57,8 +58,15 @@ def verification_pass(
     )
 
 
-def verification_fail(reason: str) -> VerificationResult:
-    return VerificationResult(VerificationStatus.FAIL, reason)
+def verification_fail(
+    reason: str,
+    failure_kind: VerificationFailureKind = VerificationFailureKind.RUNTIME_FAILURE,
+) -> VerificationResult:
+    return VerificationResult(
+        VerificationStatus.FAIL,
+        reason,
+        failure_kind=failure_kind,
+    )
 
 
 SCREEN = ScreenPoint(1400, 2200)
@@ -446,6 +454,78 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
         self.assertIn("deadline expired", task.progress.failures[-1])
         self.assertEqual(ActionKind.WAIT, task.decide(state).action.kind)
+
+    def test_one_typed_resource_no_yield_failure_reselects_then_second_blocks(self) -> None:
+        task = WoodcutBankTask()
+        failed = tree(
+            key="resource:no-yield",
+            location=WorldPoint(3195, 3248, 0),
+        )
+        alternate = tree(
+            key="resource:alternate-yield",
+            location=WorldPoint(3197, 3249, 0),
+        )
+        state = observation(objects=(failed, alternate), tick=20)
+        task.decide(state)
+        task.decide(state)
+
+        no_yield = verification_fail(
+            "diagnostic resource timeout text",
+            VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE,
+        )
+        task.apply_verification(no_yield)
+
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertEqual([], task.progress.failures)
+        replanned = task.decide(replace(state, tick=21))
+        self.assertEqual(alternate.key, task.progress.target_key)
+        self.assertEqual(
+            ("resource_no_yield",),
+            next(
+                rejected.rejection_codes
+                for rejected in replanned.evidence.rejected
+                if rejected.target.key == failed.key
+            ),
+        )
+
+        task.decide(replace(state, tick=21))
+        task.apply_verification(no_yield)
+
+        self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
+        self.assertIn(
+            "diagnostic resource timeout text",
+            task.progress.failures[-1],
+        )
+
+    def test_successful_log_gain_resets_resource_no_yield_retry(self) -> None:
+        task = WoodcutBankTask()
+        state = observation(objects=(tree(),), tick=20)
+        task.decide(state)
+        task.decide(state)
+        task.apply_verification(
+            verification_fail(
+                "item_quantity_unchanged_at_deadline",
+                VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE,
+            )
+        )
+        task.decide(replace(state, tick=21))
+        task.decide(replace(state, tick=22))
+        task.decide(replace(state, tick=22))
+        task.apply_verification(
+            verification_pass(OutcomeKind.ITEM_QUANTITY_INCREASED)
+        )
+
+        task.decide(replace(state, tick=23))
+        task.decide(replace(state, tick=23))
+        task.apply_verification(
+            verification_fail(
+                "item_quantity_unchanged_at_deadline",
+                VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE,
+            )
+        )
+
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertEqual([], task.progress.failures)
 
     def test_unsent_chop_proposal_discards_pending_target_for_fresh_selection(self) -> None:
         task = WoodcutBankTask()

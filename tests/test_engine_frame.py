@@ -38,6 +38,7 @@ from osrs_bot.task_contract import (
 from osrs_bot.verification import (
     Outcome,
     OutcomeKind,
+    VerificationFailureKind,
     VerificationResult,
     VerificationStatus,
 )
@@ -186,6 +187,7 @@ class EngineFrameTests(unittest.TestCase):
         self.assertEqual("lumbridge_west_trees_v1", payload["task"]["definitionId"])
         self.assertEqual("tree:selected", payload["selectedTarget"]["key"])
         self.assertEqual("item_quantity_increased", payload["lastVerification"]["outcome"]["kind"])
+        self.assertIsNone(payload["lastVerification"]["failureKind"])
         self.assertIn("cameraYaw", payload["observation"])
         self.assertIn("keyHoldMillis", payload["decision"]["action"])
         self.assertEqual(1511, payload["pendingVerification"]["itemId"])
@@ -194,6 +196,27 @@ class EngineFrameTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             frame.stage = EngineStage.TERMINAL  # type: ignore[misc]
         self.assertFalse(hasattr(frame, "__dict__"))
+
+    def test_typed_verification_failure_is_serialized(self) -> None:
+        failure = VerificationResult(
+            VerificationStatus.FAIL,
+            "item_quantity_unchanged_at_deadline",
+            failure_kind=(
+                VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+            ),
+        )
+        frame = EngineFramePublisher().publish(
+            stage=EngineStage.VERIFIED,
+            task=TaskSnapshot("woodcut_bank", TaskStatus.RUNNING, "find_tree"),
+            last_verification=failure,
+        )
+
+        payload = frame.to_dict()["lastVerification"]
+        self.assertEqual(
+            "item_quantity_unchanged_at_deadline",
+            payload["failureKind"],
+        )
+        self.assertIsNone(payload["outcome"])
 
     def test_sequence_is_monotonic_and_wait_returns_only_newer_frames(self) -> None:
         publisher = EngineFramePublisher()

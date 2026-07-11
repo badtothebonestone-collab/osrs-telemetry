@@ -36,12 +36,17 @@ from .task_contract import (
     TaskSnapshot,
     TaskStatus,
 )
-from .verification import OutcomeKind, VerificationResult
+from .verification import (
+    OutcomeKind,
+    VerificationFailureKind,
+    VerificationResult,
+)
 
 
 WOODCUT_BANK_TASK_ID = "woodcut_bank"
 CAMERA_RECOVERY_MAX_ATTEMPTS = 8
 CAMERA_RECOVERY_HOLD_MILLIS = 250
+RESOURCE_NO_YIELD_MAX_RETRIES = 1
 
 
 class TaskPhase(str, Enum):
@@ -92,7 +97,8 @@ class WoodcutBankTask:
         self._route_projection_wait_since_tick: int | None = None
         self._pending_camera_step_id: str | None = None
         self._return_route_reconciled_without_cycle_credit = False
-        self._unsent_target_suppression_key: str | None = None
+        self._next_resource_suppression: tuple[str, str] | None = None
+        self._resource_no_yield_retries = 0
 
     def observation_request(self) -> ObservationRequest:
         """Request only the current fixed walk target for projection."""
@@ -194,6 +200,24 @@ class WoodcutBankTask:
         self.progress.pending = None
 
         if not result.passed or result.outcome is None:
+            if (
+                pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED
+                and self.progress.phase is TaskPhase.VERIFY_LOGS
+                and result.failure_kind
+                is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+                and self._resource_no_yield_retries
+                < RESOURCE_NO_YIELD_MAX_RETRIES
+                and isinstance(self.progress.target_key, str)
+                and bool(self.progress.target_key)
+            ):
+                self._resource_no_yield_retries += 1
+                self._next_resource_suppression = (
+                    self.progress.target_key,
+                    "resource_no_yield",
+                )
+                self.progress.target_key = None
+                self.progress.phase = TaskPhase.FIND_TREE
+                return
             self._set_blocked(f"verification failed: {result.reason}")
             return
 
@@ -204,6 +228,7 @@ class WoodcutBankTask:
                 return self._block_verification_outcome(pending, outcome)
             self.progress.target_key = None
             self.progress.phase = TaskPhase.FIND_TREE
+            self._resource_no_yield_retries = 0
             return
         if pending.kind is VerificationKind.MOVED_CLOSER:
             if outcome not in {OutcomeKind.MOVED_CLOSER, OutcomeKind.ARRIVED}:
@@ -301,7 +326,11 @@ class WoodcutBankTask:
 
         self.progress.pending = None
         if pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED:
-            self._unsent_target_suppression_key = self.progress.target_key
+            if self.progress.target_key is not None:
+                self._next_resource_suppression = (
+                    self.progress.target_key,
+                    "preactivation_target_invalidated",
+                )
             self.progress.target_key = None
             self.progress.phase = TaskPhase.FIND_TREE
         elif pending.kind is VerificationKind.ITEM_QUANTITY_EQUALS:
@@ -317,8 +346,10 @@ class WoodcutBankTask:
         )
 
     def _find_tree(self, observation: Observation) -> Decision:
-        suppressed_key = self._unsent_target_suppression_key
-        self._unsent_target_suppression_key = None
+        suppression = self._next_resource_suppression
+        self._next_resource_suppression = None
+        suppressed_key = suppression[0] if suppression is not None else None
+        suppression_code = suppression[1] if suppression is not None else None
         if self.progress.cycles_completed >= self.binding.profile.cycle_goal:
             self.progress.phase = TaskPhase.COMPLETE
             return self._wait(observation, "profile cycle goal is complete")
@@ -358,6 +389,7 @@ class WoodcutBankTask:
 
         candidates, rejected = self._classify_trees(observation)
         if suppressed_key is not None:
+            assert suppression_code is not None
             suppressed = tuple(
                 target for target in candidates if target.key == suppressed_key
             )
@@ -365,7 +397,7 @@ class WoodcutBankTask:
                 target for target in candidates if target.key != suppressed_key
             )
             rejected += tuple(
-                (target, ("preactivation_target_invalidated",))
+                (target, (suppression_code,))
                 for target in suppressed
             )
         evidence = self._object_decision_evidence(

@@ -288,6 +288,11 @@ class EngineFrame:
                 else {
                     "status": self.last_verification.status.value,
                     "reason": self.last_verification.reason,
+                    "failureKind": (
+                        self.last_verification.failure_kind.value
+                        if self.last_verification.failure_kind is not None
+                        else None
+                    ),
                     "outcome": (
                         None
                         if outcome is None

@@ -22,7 +22,11 @@ from osrs_bot.task_contract import (
     TaskSnapshot,
     TaskStatus,
 )
-from osrs_bot.verification import VerificationResult, VerificationStatus
+from osrs_bot.verification import (
+    VerificationFailureKind,
+    VerificationResult,
+    VerificationStatus,
+)
 
 
 def _wait_action() -> Action:
@@ -212,7 +216,11 @@ class TaskContractTests(unittest.TestCase):
 
         self.assertIsInstance(task, Task)
         self.assertNotIsInstance(object(), Task)
-        result = VerificationResult(VerificationStatus.FAIL, "blocked")
+        result = VerificationResult(
+            VerificationStatus.FAIL,
+            "blocked",
+            failure_kind=VerificationFailureKind.RUNTIME_FAILURE,
+        )
         task.apply_verification(result)
         self.assertIs(result, task.verification)
 

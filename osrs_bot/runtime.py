@@ -22,7 +22,12 @@ from .input_coordinator import InputCoordinator
 from .model import Action, ActionKind, Observation, VerificationSpec
 from .observation import ObservationClient
 from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
-from .verification import VerificationResult, VerificationStatus, Verifier
+from .verification import (
+    VerificationFailureKind,
+    VerificationResult,
+    VerificationStatus,
+    Verifier,
+)
 
 
 LIVE_FOCUS_HANDOFF_SECONDS = 15.0
@@ -774,17 +779,59 @@ class TaskRuntime:
                         execution,
                     )
                 self._frame_pending = None
-                self._publish_frame(EngineStage.VERIFIED)
-                verification_done = True
-                if result.failed:
+                post_verification_snapshot, snapshot_error = (
+                    self._read_task_snapshot()
+                )
+                if snapshot_error is not None:
                     return self._result(
-                        "BLOCKED",
-                        f"verification failed: {result.reason}",
+                        "ERROR",
+                        "task snapshot failed after verification: "
+                        f"{snapshot_error}",
                         observations,
                         actions,
                         last_tick,
                         decision,
                         execution,
+                        task_snapshot=self._snapshot_failure(snapshot_error),
+                    )
+                assert post_verification_snapshot is not None
+                self._publish_frame(
+                    EngineStage.VERIFIED,
+                    task_snapshot=post_verification_snapshot,
+                )
+                verification_done = True
+                if result.failed:
+                    if post_verification_snapshot.status is TaskStatus.BLOCKED:
+                        return self._result(
+                            "BLOCKED",
+                            post_verification_snapshot.blocker
+                            or f"verification failed: {result.reason}",
+                            observations,
+                            actions,
+                            last_tick,
+                            decision,
+                            execution,
+                            task_snapshot=post_verification_snapshot,
+                        )
+                    recoverable_failure = (
+                        result.failure_kind
+                        is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+                    )
+                    if (
+                        recoverable_failure
+                        and post_verification_snapshot.status
+                        is TaskStatus.RUNNING
+                    ):
+                        break
+                    return self._result(
+                        "ERROR",
+                        "task accepted a non-recoverable verification failure",
+                        observations,
+                        actions,
+                        last_tick,
+                        decision,
+                        execution,
+                        task_snapshot=post_verification_snapshot,
                     )
                 break
 
@@ -913,7 +960,11 @@ class TaskRuntime:
         return self._client.fetch(request.tile_projections)
 
     def _apply_failure(self, reason: str) -> str | None:
-        result = VerificationResult(VerificationStatus.FAIL, reason)
+        result = VerificationResult(
+            VerificationStatus.FAIL,
+            reason,
+            failure_kind=VerificationFailureKind.RUNTIME_FAILURE,
+        )
         try:
             self._task.apply_verification(result)
         except Exception as error:

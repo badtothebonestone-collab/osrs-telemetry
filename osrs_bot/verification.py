@@ -19,6 +19,19 @@ class VerificationStatus(str, Enum):
     FAIL = "fail"
 
 
+class VerificationFailureKind(str, Enum):
+    INVALID_SPECIFICATION = "invalid_specification"
+    SESSION_CHANGED = "session_changed"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    OBSERVATION_UNUSABLE_AT_DEADLINE = "observation_unusable_at_deadline"
+    CONDITION_UNMET_AT_DEADLINE = "condition_unmet_at_deadline"
+    ITEM_QUANTITY_UNCHANGED_AT_DEADLINE = (
+        "item_quantity_unchanged_at_deadline"
+    )
+    BANK_PIN_OPEN = "bank_pin_open"
+    RUNTIME_FAILURE = "runtime_failure"
+
+
 class OutcomeKind(str, Enum):
     ITEM_QUANTITY_INCREASED = "item_quantity_increased"
     ITEM_QUANTITY_EQUALS = "item_quantity_equals"
@@ -48,6 +61,7 @@ class VerificationResult:
     status: VerificationStatus
     reason: str
     outcome: Outcome | None = None
+    failure_kind: VerificationFailureKind | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, VerificationStatus):
@@ -60,6 +74,12 @@ class VerificationResult:
             raise ValueError("PASS requires a typed Outcome")
         if self.status is not VerificationStatus.PASS and self.outcome is not None:
             raise ValueError("only PASS may carry an Outcome")
+        if self.status is VerificationStatus.FAIL and not isinstance(
+            self.failure_kind, VerificationFailureKind
+        ):
+            raise ValueError("FAIL requires a typed VerificationFailureKind")
+        if self.status is not VerificationStatus.FAIL and self.failure_kind is not None:
+            raise ValueError("only FAIL may carry a VerificationFailureKind")
 
     @property
     def pending(self) -> bool:
@@ -87,27 +107,59 @@ class Verifier:
     ) -> VerificationResult:
         invalid_reason = _invalid_specification_reason(specification)
         if invalid_reason is not None:
-            return _fail(invalid_reason)
+            return _fail(
+                invalid_reason,
+                VerificationFailureKind.INVALID_SPECIFICATION,
+            )
 
         if observation.session_id != specification.source_session_id:
-            return _fail("session_changed")
+            return _fail(
+                "session_changed",
+                VerificationFailureKind.SESSION_CHANGED,
+            )
 
         if observation.tick <= specification.before_tick:
             return _pending("awaiting_later_observation")
         if observation.tick > specification.deadline_tick:
-            return _fail("deadline_exceeded")
+            return _fail(
+                "deadline_exceeded",
+                VerificationFailureKind.DEADLINE_EXCEEDED,
+            )
         if not self._observation_usable(observation):
             if observation.tick == specification.deadline_tick:
-                return _fail("deadline_exceeded")
+                return _fail(
+                    "observation_unusable_at_deadline",
+                    VerificationFailureKind.OBSERVATION_UNUSABLE_AT_DEADLINE,
+                )
             return _pending("observation_not_usable")
         if observation.widgets.bank_pin_open:
-            return _fail("bank_pin_open")
+            return _fail(
+                "bank_pin_open",
+                VerificationFailureKind.BANK_PIN_OPEN,
+            )
 
         outcome = _successful_outcome(specification, observation)
         if outcome is not None:
             return _pass(outcome)
         if observation.tick == specification.deadline_tick:
-            return _fail("deadline_exceeded")
+            if specification.kind is VerificationKind.ITEM_QUANTITY_INCREASED:
+                if not observation.inventory.known:
+                    return _fail(
+                        "item_quantity_unavailable_at_deadline",
+                        VerificationFailureKind.OBSERVATION_UNUSABLE_AT_DEADLINE,
+                    )
+                if (
+                    observation.inventory.quantity(specification.item_id)
+                    == specification.before_quantity
+                ):
+                    return _fail(
+                        "item_quantity_unchanged_at_deadline",
+                        VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE,
+                    )
+            return _fail(
+                "condition_unmet_at_deadline",
+                VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE,
+            )
         return _pending("condition_not_met")
 
     def _observation_usable(self, observation: Observation) -> bool:
@@ -339,5 +391,12 @@ def _pass(outcome: Outcome) -> VerificationResult:
     return VerificationResult(VerificationStatus.PASS, outcome.kind.value, outcome)
 
 
-def _fail(reason: str) -> VerificationResult:
-    return VerificationResult(VerificationStatus.FAIL, reason)
+def _fail(
+    reason: str,
+    failure_kind: VerificationFailureKind,
+) -> VerificationResult:
+    return VerificationResult(
+        VerificationStatus.FAIL,
+        reason,
+        failure_kind=failure_kind,
+    )
