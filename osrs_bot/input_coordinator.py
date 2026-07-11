@@ -24,6 +24,7 @@ MAX_POINTER_FEEDBACK_PLANS = 64
 MAX_FEEDBACK_PLAN_AXIS_DELTA = 64
 MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT = 4
 CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT = 8
+MAX_INITIAL_AXIS_NO_EFFECT_RETRIES = 1
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
 DEFAULT_CLICK_HOLD_SECONDS = 0.06
 _COMMAND_ID = re.compile(r"^cmd-[0-9]{8,}$")
@@ -1363,6 +1364,8 @@ class InputCoordinator:
         actual = start
         x_calibrated = False
         y_calibrated = False
+        x_no_effect_retries = 0
+        y_no_effect_retries = 0
         for plan_index in range(self._max_correction_plans + 1):
             if transaction.pointer_plan_count >= self._max_correction_plans + 1:
                 raise _TransactionAbort(
@@ -1388,6 +1391,7 @@ class InputCoordinator:
                     - 1
                 ),
                 calibrated=x_calibrated,
+                no_effect_retries=x_no_effect_retries,
                 axis="x",
             )
             command_dy = self._feedback_axis_command(
@@ -1400,6 +1404,7 @@ class InputCoordinator:
                     - 1
                 ),
                 calibrated=y_calibrated,
+                no_effect_retries=y_no_effect_retries,
                 axis="y",
             )
             command_dx, command_dy = self._clamp_feedback_waypoint_to_envelope(
@@ -1466,16 +1471,18 @@ class InputCoordinator:
                 self._assert_foreground(backend, intent.expected_pid)
                 if not intent.movement_bounds.contains(actual):
                     raise _TransactionAbort("cursor_left_verified_movement_bounds")
-                x_calibrated = self._validate_axis_transfer(
+                x_calibrated, x_no_effect_retries = self._validate_axis_transfer(
                     commanded=step.dx,
                     observed=actual.x - before.x,
                     calibrated=x_calibrated,
+                    no_effect_retries=x_no_effect_retries,
                     axis="x",
                 )
-                y_calibrated = self._validate_axis_transfer(
+                y_calibrated, y_no_effect_retries = self._validate_axis_transfer(
                     commanded=step.dy,
                     observed=actual.y - before.y,
                     calibrated=y_calibrated,
+                    no_effect_retries=y_no_effect_retries,
                     axis="y",
                 )
 
@@ -1517,13 +1524,14 @@ class InputCoordinator:
         lower: int,
         upper: int,
         calibrated: bool,
+        no_effect_retries: int,
         axis: str,
     ) -> int:
         if remaining == 0:
             return 0
         direction = 1 if remaining > 0 else -1
         if not calibrated:
-            magnitude = 1
+            magnitude = 1 + no_effect_retries
         else:
             magnitude = max(
                 1,
@@ -1624,15 +1632,21 @@ class InputCoordinator:
         commanded: int,
         observed: int,
         calibrated: bool,
+        no_effect_retries: int,
         axis: str,
-    ) -> bool:
+    ) -> tuple[bool, int]:
         if commanded == 0:
             if observed != 0:
                 raise _TransactionAbort(
                     f"cursor_feedback_uncommanded_axis_{axis}"
                 )
-            return calibrated
+            return calibrated, no_effect_retries
         if observed == 0:
+            if (
+                not calibrated
+                and no_effect_retries < MAX_INITIAL_AXIS_NO_EFFECT_RETRIES
+            ):
+                return False, no_effect_retries + 1
             raise _TransactionAbort(f"cursor_feedback_no_effect_{axis}")
         if (commanded > 0) != (observed > 0):
             raise _TransactionAbort(
@@ -1645,7 +1659,7 @@ class InputCoordinator:
             raise _TransactionAbort(
                 f"cursor_transfer_gain_exceeded_{axis}"
             )
-        return True
+        return True, 0
 
     def _validate_pointer(
         self,
