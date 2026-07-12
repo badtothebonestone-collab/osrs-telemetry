@@ -2,16 +2,19 @@
 
 ## Current milestone
 
-**Phase 8 is complete - external-cursor final regression is active.**
+**Phase 8 and the external-cursor final regression are complete.**
 
 The host/input stack through delayed-MOVE checkpoint `6eef48c` passes its
 offline and live gates. Displaced login/gameplay recovery, one directly
-observed 78 ms delayed MOVE, and a complete current-checkpoint default cycle are
-**PASS** at the retained fixed-client 175% layout. The user-performed
-demonstration, artifact inspection, and post-demo cleanup remain
-**NOT YET EVALUATED**.
+observed 78 ms delayed MOVE, a complete current-checkpoint default cycle, a
+user-performed `Walk here` demonstration, public artifact inspection, and
+post-demo cleanup are **PASS** at the retained fixed-client 175% layout.
 
 Current input checkpoint: `6eef48c input: await bounded cursor move feedback`.
+
+Current demonstration checkpoints: `c8888bb demonstrations: tolerate bounded
+world model handoff` and `000a886 demonstrations: settle manual movement
+evidence`.
 
 Current input contract: the source-blind 500 ms owned-button bound plus the
 absolute 200 ms MOVE-effect / 240 ms stability contract, conservative
@@ -443,6 +446,23 @@ the geometry condition and recovery behavior rather than source attribution.
   this direct regression required no manual mouse positioning or assistance.
   All `6eef48c` artifacts are retained under
   `_run_proofs/final_regression/20260711_cursor_handoff_complete_cycle/`.
+- The final demonstration login first rejected the physical cursor at exact
+  desktop x=0 before opening COM or sending a command. After the user moved it
+  into RuneLite, the next Arduino-only attempt freshly sampled and adopted that
+  position, completed login, and passed loaded-scene plus authoritative cleanup
+  checks. This directly proves manual cursor repositioning is current observed
+  state rather than hidden coordinate history.
+- The accepted read-only demonstration at clean commit `000a886` recorded a
+  semantic `Walk here` click at source tick 1060 and the resulting player-world
+  change from `(3197,3238,0)` to `(3196,3237,0)` at tick 1064. Its 45-second
+  artifact contains 3,897 events and two bounded screenshots, is `valid: true`,
+  and has no errors or ambiguities. `run.cmd inspect-demo` independently
+  returned `VERIFIED_WITH_GAPS`; its candidates remain review-only and
+  `never_automatic`.
+- Post-demo shutdown first requested graceful close of the exact bound RuneLite
+  PID. When it did not exit within 15 seconds, only that PID was force-stopped.
+  The bound PID, listeners 8893/8890, OSRS Python workers, repository Java
+  processes, and Arduino lease were then all confirmed absent.
 - The current client log also contains unrelated/nonfatal startup and plugin
   noise: a reflective-access exception, repeated NpcAggroArea null-player
   subscriber exceptions during login-state transitions, World Hopper ping/DNS
@@ -563,6 +583,19 @@ the geometry condition and recovery behavior rather than source attribution.
   2,214 observations, and 810.725564 seconds. Terminal and post-run cleanup were
   safe; the retained post-observation was loaded/fresh/coherent with no warnings
   or missing capabilities. No Python bot or Arduino lease remained.
+- Final demonstration hardening gate at `000a886`: all 570 Python tests passed,
+  including the focused 30-test recorder/inspector set; golden replay passed
+  2/2; `python -m compileall`, `run.cmd test`, and `git diff --check` passed.
+  The accepted artifact is
+  `demo_runs/20260712T170027843742Z_final-manual-walk-000a886-final/`. Its
+  `events.jsonl`, `manifest.json`, `summary.json`, and `timeline.md` SHA-256
+  values are respectively
+  `582488FD366CC7F08C9D848890B181C0CD9B130599E9F57325D779A88916C26E`,
+  `CC28419C61E60A87FD8DDCB39A1301230CD8228D464CD4FB1B279E5871488EC4`,
+  `63F49A69FB4C8073A3ED2C347B6B4C6D733123ACAB0AC1EF38FB58544A5B555C`,
+  and `76FA67BCD398388186D0DAD69DE79BA26CAADD0C30E9A843288187DF68A8F1C6`.
+  The retained public-inspector proof SHA-256 is
+  `CBF2FD726E7FE1B5CAF770E9686CC4EA5063C76F0D07CA2A6B8264583965AA16`.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -590,9 +623,9 @@ the geometry condition and recovery behavior rather than source attribution.
 - The four-device-pixel menu correlation bound is proven only on the retained
   fixed-client 175% layout. Arbitrary layouts require fresh measurement; the
   activation, canonical-aim, target-bound, and exact-menu gates remain strict.
-- One short user-performed manual demonstration and `inspect-demo` verification
-  plus post-demo endpoint/client cleanup are **NOT YET EVALUATED**. The current
-  client may remain available for that explicit human step.
+- The final user-performed manual demonstration, `inspect-demo` verification,
+  and post-demo endpoint/client cleanup are **PASS**. No live client was left
+  available after acceptance.
 - The pre-audit proof package retains only the terminal gameplay receipt rather than
   all 82 transaction receipts. The runtime result and plugin timeline strongly
   prove the cycle outcome, but the artifact is not a full action-by-action audit.
@@ -609,7 +642,12 @@ the geometry condition and recovery behavior rather than source attribution.
 - The RuneLite endpoint does not expose global raw mouse-button or keyboard
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.
+- A client-thread world-model query can occasionally land one sensor tick after
+  the endpoint's immutable frame. The endpoint still rejects that mismatched
+  model. The recorder tolerates only the exact, bounded absence shape while
+  retaining independent hot-tail continuity; identity, session, tick, payload,
+  warning, or capability contradictions remain terminal.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
-  demonstration, and frontend composition contracts are implemented. Manual
-  demo/inspection and final confirmation that no client or proof endpoint
-  remains are pending.
+  demonstration, and frontend composition contracts are implemented. The final
+  manual demo/inspection is accepted, and no client, endpoint, worker, Java
+  process, or Arduino lease remained after shutdown.

@@ -226,7 +226,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | In progress | Displaced login/gameplay recovery, direct delayed-MOVE settlement, and a complete current-checkpoint bank-and-return cycle are **PASS** at the retained layout. The user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup are **NOT YET EVALUATED**. |
+| Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
 
@@ -434,7 +434,7 @@ runtime logic.
   fresh 51-test Java suite passed across 6 suites, facade catalog/schema/profile
   commands succeeded, and `git diff --check` passed.
 
-## Final regression hardening in progress
+## Final regression hardening complete
 
 - Made RuneLite publish available canvas/window bounds only as Win32
   virtual-desktop device pixels. AWT user-space origin and extents are scaled
@@ -690,6 +690,34 @@ runtime logic.
   `B91B1025CD9343991A46ABB55045CA63DA5DB978748466338E7B264CAF83130D`). The
   retained post-observation was loaded/fresh/coherent with no warnings or
   missing capabilities. No bot process or Arduino lease remained.
+- **PASS - manual cursor resampling.** The final login safely blocked before COM
+  connect while the physical cursor was at desktop x=0. After the user moved it
+  into RuneLite, the next attempt freshly observed that position, completed the
+  Arduino-only prompt flow, passed `loaded_scene_verified`, and closed with
+  acknowledged `STOP_ALL`, `DISARM`, safe zero-held status, zero unresolved
+  commands, and no lease.
+- Checkpoints `c8888bb` and `000a886` retain a demonstration through the
+  endpoint's bounded sensor-frame/world-model handoff without weakening the
+  Java mismatch rejection. Only the exact all-dynamic-payloads-absent shape is
+  tolerated for five monotonic seconds; session/PID, core scene, tick, hot-tail,
+  raw-payload, warning, or capability contradictions still stop capture.
+- **PASS - accepted manual demonstration.** The clean-commit `000a886` artifact
+  `demo_runs/20260712T170027843742Z_final-manual-walk-000a886-final/` records a
+  semantic `Walk here` click at source tick 1060 and player movement from
+  `(3197,3238,0)` to `(3196,3237,0)` at tick 1064. It is `valid: true`, has no
+  errors or ambiguities, and the public `run.cmd inspect-demo` command returned
+  `VERIFIED_WITH_GAPS`. Its generated candidates are review-only and
+  `never_automatic`.
+- Final gate: 570 Python tests, focused demonstration tests 30/30, golden replay
+  2/2, compileall, `run.cmd test`, and diff-check passed. The accepted
+  `events.jsonl` SHA-256 is
+  `582488FD366CC7F08C9D848890B181C0CD9B130599E9F57325D779A88916C26E`;
+  the inspector proof SHA-256 is
+  `CBF2FD726E7FE1B5CAF770E9686CC4EA5063C76F0D07CA2A6B8264583965AA16`.
+- **PASS - final shutdown.** Graceful close of exact RuneLite PID `12712` timed
+  out after 15 seconds, so only that bound PID was force-stopped. PID `12712`,
+  listeners 8893/8890, OSRS Python workers, repository Java processes, and the
+  Arduino lease were all then confirmed absent.
 
 ## Prohibited during this mission
 
@@ -712,8 +740,11 @@ runtime logic.
   now proves displaced login/gameplay recovery, direct 78 ms delayed-MOVE
   settlement, and a complete current-checkpoint bank-and-return cycle.
 - Each new source tick can still force a world-model refresh behind a 250 ms
-  provider wait. The final pre/post observations were fresh, coherent, and
-  warning-free, but this remains a latency cost rather than a second cache.
+  provider wait. A client-thread query can also return at the next sensor tick;
+  the endpoint correctly rejects that mismatch, while demonstration recording
+  now tolerates only the exact bounded all-dynamic-payloads-absent handoff. This
+  remains a thin acquisition-latency hardening opportunity, not a second cache
+  or a final-regression blocker.
 - The later RuneLite GPU errors and Gradle-wrapper PID `500` native-memory
   failure are launch-stack stability limitations, not engine/input cleanup
   failures. Their error and replay logs remain in the ignored proof directory.
@@ -724,9 +755,9 @@ runtime logic.
   declares those coverage gaps in every manifest.
 - The implemented facade intentionally has no full GUI, daemon, or IPC layer.
   The overlay has been visually compared against live route, camera, target,
-  verification, and cleanup evidence. One short user-performed demonstration
-  and its inspected artifact plus post-demo client cleanup remain final-
-  regression evidence.
+  verification, and cleanup evidence. The user-performed demonstration, public
+  inspection, and post-demo client cleanup are now accepted final-regression
+  evidence.
 - The four-device-pixel menu correlation is proven only for the retained
   fixed-client layout on the 175% display. A different layout requires fresh
   measurement; activation authority remains at +/-3 pixels everywhere.
