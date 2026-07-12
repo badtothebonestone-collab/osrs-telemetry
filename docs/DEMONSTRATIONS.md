@@ -61,7 +61,7 @@ game tick or geometry publication crosses the read-only query handoff. Recording
 still begins only from a fully loaded, fully bound response. After that start,
 only the exact `world_model_provenance_mismatch` response with precisely
 `scene_object_census`, `actor_census`, and `collision_window` unavailable may be
-omitted and reported as a coverage gap for at most one monotonic second. Its
+omitted and reported as a coverage gap for at most five monotonic seconds. Its
 independently bound hot-event tail is retained. Any additional warning or
 missing capability, persistent unavailability, source-tick regression, hot
 sequence reset, session/PID change, or core loaded-scene loss remains terminal.

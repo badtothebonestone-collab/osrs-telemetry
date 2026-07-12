@@ -571,6 +571,67 @@ class DemonstrationRecorderTests(unittest.TestCase):
             self.assertIn("missing_after_observation", result.coverage_gaps)
             self.assertEqual((), result.state_changes)
 
+    def test_transient_walk_click_receives_later_complete_movement_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "world-model-walk-outcome",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            recorder.start(_evidence(_base_observation(), _hot()))
+            unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+            walk = {
+                "eventSequence": 1,
+                "eventLane": "menu_option_clicked",
+                "clientTick": 901,
+                "gameTickAtSample": 175,
+                "wallTimeMillis": 1100,
+                "option": "Walk here",
+                "target": "",
+                "type": "WALK",
+                "identifier": 0,
+            }
+
+            self.assertTrue(
+                recorder.add(
+                    _transient_world_model_evidence(unavailable, _hot(walk))
+                )
+            )
+            self.assertTrue(
+                recorder.add(_evidence(_base_observation(tick=176), _hot(walk)))
+            )
+            artifact = recorder.finish("test")
+            events = [
+                json.loads(line)
+                for line in (artifact / "events.jsonl").read_text().splitlines()
+            ]
+            result = inspect_demonstration(artifact)
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertEqual(
+                1,
+                sum(event["kind"] == "menu_option_clicked" for event in events),
+            )
+            self.assertNotIn("missing_after_observation", result.coverage_gaps)
+            self.assertTrue(
+                any(change["field"] == "player.world" for change in result.state_changes)
+            )
+            self.assertTrue(
+                any(
+                    value.startswith("selected Walk here")
+                    for value in result.semantic_summary
+                )
+            )
+
     def test_other_loaded_scene_loss_remains_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             recorder = DemonstrationRecorder(
