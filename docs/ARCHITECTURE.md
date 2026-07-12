@@ -228,32 +228,39 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    empty safely-unsent receipt, discards every stale coordinate, and requires a
    fresh login scan or newer same-identity gameplay tick before another intent;
 4. only after a valid preflight opens and arms the private Arduino transport;
-5. when the fresh cursor is just outside the canvas but still inside the exact
+5. requires two identical PMv2 cursor samples one timestep apart, then a fresh
+   physical-button quiet proof and a final unchanged cursor/foreground sample
+   before the first MOVE, accepting a stationary manual position as current
+   truth while typing continued motion or a late prior report as cursor
+   invalidation;
+6. when the fresh cursor is just outside the canvas but still inside the exact
    pinned outer window on one axis, performs only the bounded movement-only
    ingress and proves stable canvas headroom before continuing;
-6. retains the canonical action identity/aim separately from the actual settled
+7. retains the canonical action identity/aim separately from the actual settled
    cursor, selects bounded command-space waypoints toward the exact observed
    screen point, runs the pure exact planner for each waypoint with bounded velocity,
    acceleration, braking, four-sided transfer headroom, transaction-wide plan
    and MOVE caps, and actual-feedback correction, then accepts only a complete-
    plan settled endpoint inside the caller's explicit activation region;
-7. if an acknowledged MOVE has an unchanged ordinary sample, polls once more
-   without another MOVE and independently validates both sample intervals before
-   applying the existing bounded delayed/no-effect accounting;
-8. passes that actual stable device-pixel endpoint to the caller's
+8. if an acknowledged MOVE has an unchanged ordinary sample, polls once more
+   without another MOVE, ends the precomputed trajectory, and uses the existing
+   plan-settle sample before any further MOVE; a settled report replans from the
+   observed point, while unresolved credit becomes typed cursor-state
+   invalidation and can never be stacked with another command;
+9. passes that actual stable device-pixel endpoint to the caller's
    lane-specific validator under a checked firmware-watchdog lease; if that
    validator outlives the lease, performs at most one explicit safe rearm and
    reruns the same semantic validator, while a second expiry blocks input;
-9. for pointer lanes, repeatedly requires quiet physical buttons and exact
+10. for pointer lanes, repeatedly requires quiet physical buttons and exact
    `WindowFromPoint` root ownership around the newer menu/widget proof; typed
    key lanes instead require their exact camera/interface/dialogue constraint;
-10. when the exact action is a unique lower context entry, opens the menu,
+11. when the exact action is a unique lower context entry, opens the menu,
    derives that row from RuneLite menu geometry, moves to it, revalidates the
    fresh open-menu sample and pointer, and clicks it once;
-11. otherwise clicks the exact default entry or submits the one approved key,
+12. otherwise clicks the exact default entry or submits the one approved key,
     then consumes only its own acknowledged Windows button transition;
-12. records each command and firmware acknowledgement without truncation; and
-13. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
+13. records each command and firmware acknowledgement without truncation; and
+14. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
    wire `STATUS` proving disarmed with zero held inputs before closing.
 
 The immutable `InputReceipt` is successful only when the activation and final

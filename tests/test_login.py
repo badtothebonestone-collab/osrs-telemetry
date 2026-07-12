@@ -326,6 +326,8 @@ class FakeBackend:
             "schema": "physical_mouse_quiet.v1",
             "buttonsUp": True,
             "activityClear": True,
+            "historicalActivityConsumed": False,
+            "sampleCount": 3,
         }
 
     def _consume_owned_mouse_transition(self, button: str) -> dict[str, object]:
@@ -1578,7 +1580,7 @@ class LoginHelperTests(unittest.TestCase):
             lambda image: next(detections),
             backends=backends,
             cursor_start=(600, 440),
-            cursor_change_calls=[6, None],
+            cursor_change_calls=[8, None],
         )
 
         result = helper.run(max_clicks=1, timeout_seconds=10)

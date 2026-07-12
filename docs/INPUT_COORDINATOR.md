@@ -15,7 +15,13 @@ fallback. Static boundary tests reject another production importer or caller.
 
 ## Transaction and receipt
 
-Every coordinator transaction is non-reentrant and follows one bounded lane:
+Every coordinator transaction is non-reentrant. It creates one private backend,
+begins an empty command ledger, and acquires the shared cross-process input
+lease before any serial connection or pointer preflight. Pointer lanes then run
+the no-input cursor/window preflight. A permitted window-under-cursor handoff
+ends there with an empty safely-unsent receipt, closed ledger/backend, and no
+serial input; the caller must rebuild the intent from fresh evidence. Every
+connected input transaction follows this bounded lane:
 
 ```text
 begin command ledger
@@ -58,8 +64,10 @@ access. The private transport independently rejects zero moves and deltas over
 The coordinator aims at the center/proposed safe point but separately evaluates
 observed arrival because integer Arduino HID counts and Win32 device pixels need
 not share a one-pixel lattice at scaled display settings. It feeds the pure
-planner exact, bounded command-space waypoints, lets each plan finish at rest,
-then replans from actual cursor feedback. The complete Arduino transaction,
+planner exact, bounded command-space waypoints and normally lets each plan finish
+at rest before replanning from actual cursor feedback. If delayed command credit
+interrupts a trajectory, the coordinator discards its remainder and requires a
+fresh correction or zero-step confirmation plan after settlement. The complete Arduino transaction,
 including context-row movement, is capped at 64 plans and 512 MOVE commands.
 Only a settled endpoint inside an explicit caller-
 approved activation region may authorize a click; a transient crossing cannot.
@@ -120,18 +128,37 @@ larger response aborts before activation. Containment remains conditional on
 the declared eight-pixel physical-transfer envelope; an unbounded or faulty
 external transfer cannot be made safe by software alone.
 
+Before the first MOVE in each transaction, the coordinator samples the current
+PMv2 cursor twice with one deterministic timestep between reads and rechecks the
+pinned foreground window. After those reads agree, it re-proves physical-button
+quiet, rejecting any button transition consumed since the earlier baseline, and
+takes one final unchanged cursor/foreground sample. A manually
+displaced but now stationary cursor is therefore the new starting truth;
+continuing movement, button activity during the dwell, or a late report from a
+prior cleaned transaction becomes typed cursor-state invalidation before any
+new MOVE. This no-input quiescence gate also precedes the one allowed
+lane-specific retry: login re-finds and re-screens the exact current client,
+while gameplay requires a newer tick from the same PID/session.
+
 If the ordinary post-MOVE sample is unchanged on any commanded axis, the
 coordinator waits one more deterministic timestep and samples again without
 sending another MOVE. Direction, gain, uncommanded-axis, movement bounds, and
 foreground checks apply independently to both the first prefix and the
 incremental second sample, so unrelated/manual motion cannot mask a bad report.
-Only a combined zero-effect observation enters the existing isolated retry
-lane: that axis remains uncalibrated and a needed correction plan uses a larger
-bounded probe. A second consecutive zero-effect sample on the same axis aborts.
-Successful transfer resets that axis's consecutive count, but the complete
-transaction may contain at most eight isolated zero-effect events; the ninth
-aborts. These retries consume the same 64-plan and 512-MOVE transaction caps and
-never authorize activation without a settled point and fresh validation.
+If both are unchanged, the acknowledged command becomes outstanding credit and
+the remaining precomputed trajectory is discarded. The existing plan-settle
+sample is then a third no-input observation. A bounded same-direction/in-gain
+result clears only that one command and forces a replan from the observed point.
+An unchanged settle becomes typed cursor-state invalidation before another MOVE
+or activation; the existing runtime/login lane may reobserve once, and
+repetition blocks.
+
+No path may hold a nonzero delayed command while sending another nonzero command
+on that axis, even in the same direction. This prevents an observation from
+ambiguously clearing two reports while one may still be pending, and preserves
+four-sided headroom accounting. Helper-level guards enforce the rule in addition
+to the trajectory-loop boundary. All transfer, plan, step, focus, owner, bounds,
+physical-button, cleanup, and fresh-validation checks remain unchanged.
 
 Normal gameplay transit is confined to the loaded-scene telemetry canvas in
 Win32 device pixels. The optional telemetry `clientWindow*` bounds are the outer

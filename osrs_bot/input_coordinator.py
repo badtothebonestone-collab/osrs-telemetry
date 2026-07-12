@@ -29,10 +29,9 @@ MAX_CURSOR_REACQUISITION_STEPS = 72
 CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX = 32
 CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS = 0.05
 AWT_NATIVE_OUTER_ORIGIN_TOLERANCE_DEVICE_PX = 1
-MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES = 1
-MAX_TRANSACTION_NO_EFFECT_EVENTS = 8
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
 DEFAULT_CLICK_HOLD_SECONDS = 0.06
+MIN_PHYSICAL_MOUSE_QUIET_SAMPLE_COUNT = 3
 _COMMAND_ID = re.compile(r"^cmd-[0-9]{8,}$")
 _SAFE_KEY = re.compile(r"^[A-Z0-9_]{1,16}$")
 _ARM_SECRET = re.compile(r"(?i)(\bARM\s+)(\S+)")
@@ -839,7 +838,6 @@ class _Transaction:
         self.ledger_complete = True
         self.pointer_plan_count = 0
         self.pointer_step_count = 0
-        self.pointer_no_effect_count = 0
         self.pointer_hwnd: int | None = None
 
     def add_error(self, reason: object) -> None:
@@ -1534,7 +1532,9 @@ class InputCoordinator:
         """
 
         self._require_physical_mouse_quiet(
-            backend, phase="pointer_preflight"
+            backend,
+            phase="pointer_preflight",
+            allow_historical_activity=True,
         )
         envelope = intent.reacquisition_bounds
         if intent.purpose is InputPurpose.LOGIN_PROMPT:
@@ -1631,6 +1631,7 @@ class InputCoordinator:
         backend: _Backend,
         *,
         phase: str,
+        allow_historical_activity: bool = False,
     ) -> None:
         try:
             raw = backend._verify_physical_mouse_quiet()
@@ -1644,9 +1645,19 @@ class InputCoordinator:
             or raw.get("schema") != "physical_mouse_quiet.v1"
             or raw.get("buttonsUp") is not True
             or raw.get("activityClear") is not True
+            or not isinstance(raw.get("historicalActivityConsumed"), bool)
+            or not _is_int(raw.get("sampleCount"))
+            or raw["sampleCount"] < MIN_PHYSICAL_MOUSE_QUIET_SAMPLE_COUNT
         ):
             raise _cursor_state_invalidated(
                 f"physical_mouse_quiet_evidence_invalid_{phase}"
+            )
+        if (
+            raw["historicalActivityConsumed"] is True
+            and not allow_historical_activity
+        ):
+            raise _cursor_state_invalidated(
+                f"physical_mouse_activity_since_prior_proof_{phase}"
             )
 
     @staticmethod
@@ -1893,6 +1904,23 @@ class InputCoordinator:
             backend, phase="before_pointer_motion"
         )
         start = self._current_position(backend)
+        self._sleep(self._pointer_timestep_seconds)
+        settled_start = self._current_position(backend)
+        self._assert_pointer_foreground(transaction, intent)
+        if settled_start != start:
+            raise _cursor_state_invalidated(
+                "cursor_changed_before_pointer_motion"
+            )
+        self._require_physical_mouse_quiet(
+            backend, phase="after_pointer_quiescence"
+        )
+        final_start = self._current_position(backend)
+        self._assert_pointer_foreground(transaction, intent)
+        if final_start != settled_start:
+            raise _cursor_state_invalidated(
+                "cursor_changed_before_pointer_motion"
+            )
+        start = final_start
         if not intent.movement_bounds.contains(start):
             start = self._reacquire_cursor_start(
                 transaction,
@@ -1902,8 +1930,6 @@ class InputCoordinator:
         actual = start
         x_calibrated = False
         y_calibrated = False
-        x_no_effect_retries = 0
-        y_no_effect_retries = 0
         x_delayed_command = 0
         y_delayed_command = 0
         for plan_index in range(self._max_correction_plans + 1):
@@ -1931,7 +1957,6 @@ class InputCoordinator:
                     - 1
                 ),
                 calibrated=x_calibrated,
-                no_effect_retries=x_no_effect_retries,
                 axis="x",
             )
             command_dy = self._feedback_axis_command(
@@ -1944,7 +1969,6 @@ class InputCoordinator:
                     - 1
                 ),
                 calibrated=y_calibrated,
-                no_effect_retries=y_no_effect_retries,
                 axis="y",
             )
             command_dx, command_dy = self._clamp_feedback_waypoint_to_envelope(
@@ -1985,6 +2009,7 @@ class InputCoordinator:
             ):
                 raise _TransactionAbort("pointer motion exceeds the total step limit")
             transaction.pointer_plan_count += 1
+            plan_interrupted_by_delayed_credit = False
 
             for step in plan.steps:
                 self._assert_pointer_foreground(transaction, intent)
@@ -2073,32 +2098,29 @@ class InputCoordinator:
                         axis="y",
                         phase="delayed_sample",
                     )
-                (
-                    x_calibrated,
-                    x_no_effect_retries,
-                    x_delayed_command,
-                ) = self._validate_axis_transfer(
+                x_calibrated, x_delayed_command = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=step.dx,
                     observed=actual.x - before.x,
                     calibrated=x_calibrated,
-                    no_effect_retries=x_no_effect_retries,
                     delayed_command=x_delayed_command,
                     axis="x",
                 )
-                (
-                    y_calibrated,
-                    y_no_effect_retries,
-                    y_delayed_command,
-                ) = self._validate_axis_transfer(
+                y_calibrated, y_delayed_command = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=step.dy,
                     observed=actual.y - before.y,
                     calibrated=y_calibrated,
-                    no_effect_retries=y_no_effect_retries,
                     delayed_command=y_delayed_command,
                     axis="y",
                 )
+                if x_delayed_command != 0 or y_delayed_command != 0:
+                    # Never stack another HID report on top of unobserved
+                    # command credit.  The remaining precomputed trajectory is
+                    # stale until the existing plan-settle sample either proves
+                    # that transfer or leaves the cursor state invalidated.
+                    plan_interrupted_by_delayed_credit = True
+                    break
 
             # Each planner trajectory ends at rest.  Give cursor feedback one
             # full deterministic timestep to settle before deciding whether a
@@ -2106,30 +2128,24 @@ class InputCoordinator:
             self._sleep(plan.timestep_seconds)
             settled = self._current_position(backend)
             self._assert_pointer_foreground(transaction, intent)
-            if settled != actual:
-                (
-                    x_calibrated,
-                    x_no_effect_retries,
-                    x_delayed_command,
-                ) = self._validate_axis_transfer(
+            if (
+                settled != actual
+                or x_delayed_command != 0
+                or y_delayed_command != 0
+            ):
+                x_calibrated, x_delayed_command = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=0,
                     observed=settled.x - actual.x,
                     calibrated=x_calibrated,
-                    no_effect_retries=x_no_effect_retries,
                     delayed_command=x_delayed_command,
                     axis="x",
                 )
-                (
-                    y_calibrated,
-                    y_no_effect_retries,
-                    y_delayed_command,
-                ) = self._validate_axis_transfer(
+                y_calibrated, y_delayed_command = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=0,
                     observed=settled.y - actual.y,
                     calibrated=y_calibrated,
-                    no_effect_retries=y_no_effect_retries,
                     delayed_command=y_delayed_command,
                     axis="y",
                 )
@@ -2138,16 +2154,29 @@ class InputCoordinator:
                 raise _cursor_state_invalidated(
                     "cursor_left_verified_movement_bounds"
                 )
+            if x_delayed_command != 0 or y_delayed_command != 0:
+                raise _cursor_state_invalidated(
+                    "cursor_feedback_unresolved_delayed_command:"
+                    f"x={x_delayed_command}:y={y_delayed_command}:"
+                    f"plan={transaction.pointer_plan_count}:"
+                    f"step={transaction.pointer_step_count}"
+                )
+            if plan_interrupted_by_delayed_credit:
+                # Settlement proves only the previously unobserved command,
+                # not completion of the discarded trajectory.  Require a
+                # fresh correction (or zero-step confirmation) plan before
+                # the endpoint may authorize activation.
+                if plan_index >= self._max_correction_plans:
+                    raise _TransactionAbort(
+                        "cursor_feedback_correction_limit_exceeded"
+                    )
+                continue
             # Device-pixel coordinates and integer Arduino HID deltas need not
             # share a one-pixel lattice (for example at 175% display scaling).
             # Accept only a fully settled plan endpoint inside the caller's
             # pre-verified target region. A zero-step plan can prove an already
             # stable point; a transient mid-trajectory crossing cannot.
             if intent.target_bounds.contains(actual):
-                if x_delayed_command != 0 or y_delayed_command != 0:
-                    raise _TransactionAbort(
-                        "cursor_feedback_unresolved_delayed_command"
-                    )
                 break
             if plan_index >= self._max_correction_plans:
                 raise _TransactionAbort(
@@ -2366,20 +2395,18 @@ class InputCoordinator:
         lower: int,
         upper: int,
         calibrated: bool,
-        no_effect_retries: int,
         axis: str,
     ) -> int:
         if remaining == 0:
             return 0
         direction = 1 if remaining > 0 else -1
         if not calibrated:
-            magnitude = 1 + no_effect_retries
+            magnitude = 1
         else:
             magnitude = max(
                 1,
                 abs(remaining) // MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT,
             )
-            magnitude = max(magnitude, 1 + no_effect_retries)
             magnitude = min(magnitude, MAX_FEEDBACK_PLAN_AXIS_DELTA)
         clearance = upper - coordinate if direction > 0 else coordinate - lower
         safe_magnitude = (
@@ -2517,13 +2544,9 @@ class InputCoordinator:
         commanded: int,
         axis: str,
     ) -> None:
-        if (
-            delayed != 0
-            and commanded != 0
-            and (delayed > 0) != (commanded > 0)
-        ):
+        if delayed != 0 and commanded != 0:
             raise _TransactionAbort(
-                f"cursor_feedback_delayed_direction_mismatch_{axis}"
+                f"cursor_feedback_unresolved_delayed_command_before_move_{axis}"
             )
 
     @staticmethod
@@ -2533,19 +2556,22 @@ class InputCoordinator:
         commanded: int,
         observed: int,
         calibrated: bool,
-        no_effect_retries: int,
         delayed_command: int,
         axis: str,
-    ) -> tuple[bool, int, int]:
+    ) -> tuple[bool, int]:
+        if commanded != 0 and delayed_command != 0:
+            raise _TransactionAbort(
+                f"cursor_feedback_unresolved_delayed_command_before_move_{axis}"
+            )
         if commanded == 0:
             if delayed_command == 0:
                 if observed != 0:
                     raise _cursor_state_invalidated(
                         f"cursor_feedback_uncommanded_axis_{axis}"
                     )
-                return calibrated, no_effect_retries, 0
+                return calibrated, 0
             if observed == 0:
-                return calibrated, no_effect_retries, delayed_command
+                return calibrated, delayed_command
             if (delayed_command > 0) != (observed > 0):
                 raise _TransactionAbort(
                     f"cursor_feedback_delayed_direction_mismatch_{axis}"
@@ -2561,37 +2587,16 @@ class InputCoordinator:
                     f"plan={transaction.pointer_plan_count}:"
                     f"step={transaction.pointer_step_count}"
                 )
-            return True, 0, 0
+            return True, 0
         if observed == 0:
-            transaction.pointer_no_effect_count += 1
-            if (
-                transaction.pointer_no_effect_count
-                > MAX_TRANSACTION_NO_EFFECT_EVENTS
-            ):
-                raise _TransactionAbort(
-                    "cursor_feedback_no_effect_transaction_limit_exceeded"
-                )
-            if no_effect_retries < MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES:
-                return False, no_effect_retries + 1, commanded
-            raise _TransactionAbort(
-                f"cursor_feedback_no_effect_{axis}:"
-                f"commanded={commanded}:observed=0:"
-                f"delayed={delayed_command}:"
-                f"plan={transaction.pointer_plan_count}:"
-                f"step={transaction.pointer_step_count}"
-            )
+            return calibrated, commanded
         if (commanded > 0) != (observed > 0):
             raise _cursor_state_invalidated(
                 f"cursor_feedback_direction_mismatch_{axis}"
             )
-        if delayed_command != 0 and (delayed_command > 0) != (commanded > 0):
-            raise _TransactionAbort(
-                f"cursor_feedback_delayed_direction_mismatch_{axis}"
-            )
-        supported_command = abs(commanded) + abs(delayed_command)
         if (
             abs(observed)
-            > supported_command * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+            > abs(commanded) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
         ):
             raise _TransactionAbort(
                 f"cursor_transfer_gain_exceeded_{axis}:"
@@ -2600,7 +2605,7 @@ class InputCoordinator:
                 f"plan={transaction.pointer_plan_count}:"
                 f"step={transaction.pointer_step_count}"
             )
-        return True, 0, 0
+        return True, 0
 
     @staticmethod
     def _assert_feedback_sample_delta(
@@ -2612,6 +2617,10 @@ class InputCoordinator:
         axis: str,
         phase: str,
     ) -> None:
+        if commanded != 0 and delayed_command != 0:
+            raise _TransactionAbort(
+                f"cursor_feedback_unresolved_delayed_command_before_move_{axis}"
+            )
         supported = commanded if commanded != 0 else delayed_command
         if supported == 0:
             if observed != 0:
@@ -2625,7 +2634,7 @@ class InputCoordinator:
             raise _cursor_state_invalidated(
                 f"cursor_feedback_direction_mismatch_{axis}:{phase}"
             )
-        supported_magnitude = abs(commanded) + abs(delayed_command)
+        supported_magnitude = abs(supported)
         if (
             abs(observed)
             > supported_magnitude * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT

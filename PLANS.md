@@ -137,12 +137,19 @@ runtime logic.
   thread. A fresh cursor inside the RuneLite outer envelope may enter through a
   movement-only, exact-owner, one-axis bounded lane; unsupported displacement
   becomes typed cursor-state invalidation and may receive one safe
-  reobservation without suppressing the target.
+  reobservation without suppressing the target. Before a first MOVE, two
+  timestep-separated identical samples, a fresh physical-button quiet proof,
+  and one final unchanged cursor/foreground sample accept a stationary manual
+  position as current truth and reject continuing motion or a late prior report.
 - **D027 — Serial ACK is not Windows cursor proof:** an acknowledged MOVE with
   an unchanged ordinary sample receives one additional no-input poll before any
-  new MOVE. Both the first and incremental samples independently enforce
-  direction, gain, bounds, focus, and uncommanded-axis rules; persistent
-  no-effect remains bounded and fail-closed.
+  new MOVE. If still unchanged, the current trajectory ends and its plan-settle
+  read must clear that single command before replanning. Delayed and current
+  command credit may never coexist; unresolved credit becomes typed cursor-state
+  invalidation for at most one lane-specific fresh reobservation: login re-finds
+  and re-screens the exact current client, while gameplay requires a newer
+  same-identity tick. Both sample intervals and settlement enforce direction,
+  gain, bounds, focus, and uncommanded-axis rules; repetition remains fail-closed.
 - **D028 — Loaded-scene login proof is absence-only:** if the normal prompt
   matcher caps on a coherent loaded scene, one larger bounded scan may search
   only the exact retained templates. The broad disconnect heuristic remains a

@@ -65,6 +65,7 @@ class FakeBackend:
         window_handoff_evidence_overrides: dict[str, Any] | None = None,
         window_geometry_evidence_overrides: dict[str, Any] | None = None,
         physical_mouse_errors: list[Exception | None] | None = None,
+        physical_mouse_historical_calls: set[int] | None = None,
         physical_mouse_evidence_overrides: dict[str, Any] | None = None,
         owned_transition_error: Exception | None = None,
         input_lease_error: Exception | None = None,
@@ -108,6 +109,10 @@ class FakeBackend:
             window_geometry_evidence_overrides or {}
         )
         self.physical_mouse_errors = list(physical_mouse_errors or ())
+        self.physical_mouse_historical_calls = set(
+            physical_mouse_historical_calls or ()
+        )
+        self.physical_mouse_call_count = 0
         self.physical_mouse_evidence_overrides = dict(
             physical_mouse_evidence_overrides or {}
         )
@@ -370,6 +375,7 @@ class FakeBackend:
 
     def _verify_physical_mouse_quiet(self) -> dict[str, Any]:
         self.events.append("physical_mouse_quiet")
+        self.physical_mouse_call_count += 1
         if self.owned_transition_pending is not None:
             raise ArduinoHIDError("owned Arduino mouse transition was not consumed")
         if self.physical_mouse_errors:
@@ -380,6 +386,11 @@ class FakeBackend:
             "schema": "physical_mouse_quiet.v1",
             "buttonsUp": True,
             "activityClear": True,
+            "historicalActivityConsumed": (
+                self.physical_mouse_call_count
+                in self.physical_mouse_historical_calls
+            ),
+            "sampleCount": 3,
         }
         evidence.update(self.physical_mouse_evidence_overrides)
         return evidence
@@ -581,6 +592,62 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertTrue(second_receipt.successful)
         self.assertTrue(second.target_bounds.contains(ScreenPoint(*backend.position)))
 
+    def test_cursor_moving_before_first_move_requires_fresh_reobservation(self) -> None:
+        backend = FakeBackend(
+            start=(20, 20),
+            position_samples=[(20, 20), (21, 20)],
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(
+                target=ScreenPoint(70, 70),
+                target_bounds=ScreenBounds(67, 67, 7, 7),
+            ),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertIn("cursor_changed_before_pointer_motion", receipt.reason)
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in backend.events
+        ))
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_late_cursor_change_after_quiescence_blocks_before_first_move(self) -> None:
+        backend = FakeBackend(
+            start=(20, 20),
+            position_samples=[(20, 20), (20, 20), (21, 20)],
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(
+                target=ScreenPoint(70, 70),
+                target_bounds=ScreenBounds(67, 67, 7, 7),
+            ),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertIn("cursor_changed_before_pointer_motion", receipt.reason)
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in backend.events
+        ))
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
     def test_physical_mouse_activity_blocks_before_serial_connect(self) -> None:
         backend = FakeBackend(
             physical_mouse_errors=[
@@ -608,9 +675,57 @@ class InputCoordinatorTests(unittest.TestCase):
             for event in backend.events
         ))
 
+    def test_button_activity_during_cursor_quiescence_blocks_before_move(self) -> None:
+        backend = FakeBackend(
+            physical_mouse_historical_calls={3},
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertFalse(receipt.safely_unsent)
+        self.assertIn(
+            "physical_mouse_activity_since_prior_proof_after_pointer_quiescence",
+            receipt.reason,
+        )
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in backend.events
+        ))
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_button_activity_after_preflight_blocks_before_first_move(self) -> None:
+        backend = FakeBackend(
+            physical_mouse_historical_calls={2},
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn(
+            "physical_mouse_activity_since_prior_proof_before_pointer_motion",
+            receipt.reason,
+        )
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in backend.events
+        ))
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
     def test_physical_mouse_activity_during_transaction_blocks_activation(self) -> None:
         backend = FakeBackend(
             physical_mouse_errors=[
+                None,
                 None,
                 None,
                 ArduinoHIDError(
@@ -1214,7 +1329,7 @@ class InputCoordinatorTests(unittest.TestCase):
         delayed = FakeBackend(
             start=(305, 150),
             delayed_x_move_indices={1},
-            release_delayed_x_on_position_call=3,
+            release_delayed_x_on_position_call=5,
         )
         validated: list[ScreenPoint] = []
 
@@ -1893,22 +2008,26 @@ class InputCoordinatorTests(unittest.TestCase):
             [command.command for command in receipt.commands].count("MOVE"), 3
         )
 
-    def test_initial_axis_no_effect_uses_one_larger_bounded_probe(self) -> None:
-        backend = FakeBackend(start=(50, 50), no_effect_x_move_count=1)
+    def test_initial_delayed_axis_settles_without_a_second_move(self) -> None:
+        backend = FakeBackend(
+            start=(50, 50),
+            delayed_x_move_indices={1},
+            release_delayed_x_on_position_call=5,
+        )
         receipt = coordinator(backend).execute_pointer(
-            pointer_intent(target=ScreenPoint(54, 54)),
+            pointer_intent(target=ScreenPoint(51, 51)),
             validate=lambda _intent, _actual: InputValidation.allow(),
         )
 
-        self.assertTrue(receipt.successful)
-        self.assertEqual((54, 54), backend.position)
-        moves = [event for event in backend.events if event.startswith("move:")]
-        self.assertEqual("move:1,1", moves[0])
-        self.assertEqual("move:2,1", moves[1])
+        self.assertTrue(receipt.successful, receipt.reason)
+        self.assertEqual(
+            ["move:1,1"],
+            [event for event in backend.events if event.startswith("move:")],
+        )
         self.assertIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
-    def test_persistent_initial_axis_no_effect_blocks_before_click(self) -> None:
+    def test_persistent_initial_axis_no_effect_never_stacks_credit(self) -> None:
         backend = FakeBackend(start=(50, 50), no_effect_x_move_count=2)
         receipt = coordinator(backend).execute_pointer(
             pointer_intent(target=ScreenPoint(54, 54)),
@@ -1916,70 +2035,28 @@ class InputCoordinatorTests(unittest.TestCase):
         )
 
         self.assertFalse(receipt.successful)
-        self.assertIn("cursor_feedback_no_effect_x", receipt.reason)
         self.assertEqual(
-            ["move:1,1", "move:2,1"],
+            "cursor_feedback_unresolved_delayed_command:"
+            "x=1:y=0:plan=1:step=1",
+            receipt.reason,
+        )
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertEqual(
+            ["move:1,1"],
             [event for event in backend.events if event.startswith("move:")],
         )
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
-    def test_one_calibrated_axis_no_effect_uses_a_bounded_replan(self) -> None:
-        backend = FakeBackend(
-            start=(50, 50),
-            no_effect_x_move_indices={3},
-        )
-        receipt = coordinator(backend).execute_pointer(
-            pointer_intent(target=ScreenPoint(70, 70)),
-            validate=lambda _intent, _actual: InputValidation.allow(),
-        )
-
-        self.assertTrue(receipt.successful)
-        self.assertEqual((70, 70), backend.position)
-        self.assertGreaterEqual(backend.move_call_count, 4)
-        self.assertIn("mouse_down:left", backend.events)
-        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
-
-    def test_consecutive_calibrated_axis_no_effect_blocks_before_click(self) -> None:
-        backend = FakeBackend(
-            start=(50, 50),
-            no_effect_x_move_indices={3, 4},
-        )
-        receipt = coordinator(backend).execute_pointer(
-            pointer_intent(target=ScreenPoint(70, 70)),
-            validate=lambda _intent, _actual: InputValidation.allow(),
-        )
-
-        self.assertFalse(receipt.successful)
-        self.assertIn("cursor_feedback_no_effect_x", receipt.reason)
-        self.assertEqual(4, backend.move_call_count)
-        self.assertNotIn("mouse_down:left", backend.events)
-        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
-
-    def test_intermittent_no_effect_events_share_a_transaction_cap(self) -> None:
-        backend = FakeBackend(
-            start=(50, 50),
-            no_effect_x_move_indices=set(range(3, 40, 2)),
-        )
-        receipt = coordinator(backend).execute_pointer(
-            pointer_intent(target=ScreenPoint(80, 80)),
-            validate=lambda _intent, _actual: InputValidation.allow(),
-        )
-
-        self.assertFalse(receipt.successful)
-        self.assertIn(
-            "cursor_feedback_no_effect_transaction_limit_exceeded",
-            receipt.reason,
-        )
-        self.assertIs(receipt.failure_kind, InputFailureKind.NONE)
-        self.assertNotIn("mouse_down:left", backend.events)
-        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
-
-    def test_one_delayed_same_direction_report_uses_prior_command_credit(self) -> None:
+    def test_one_delayed_same_direction_report_clears_during_settle(self) -> None:
         backend = FakeBackend(
             start=(150, 150),
             device_pixel_scale=4.0,
             delayed_x_move_indices={2},
+            release_delayed_x_on_position_call=8,
         )
         intent = ApprovedPointerIntent(
             intent_id="delayed-coalesced",
@@ -1996,7 +2073,7 @@ class InputCoordinatorTests(unittest.TestCase):
         )
 
         self.assertTrue(receipt.successful)
-        self.assertEqual((178, 150), backend.position)
+        self.assertEqual((170, 150), backend.position)
         self.assertIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
@@ -2004,7 +2081,7 @@ class InputCoordinatorTests(unittest.TestCase):
         backend = FakeBackend(
             start=(100, 250),
             delayed_x_move_indices={2},
-            release_delayed_x_on_position_call=5,
+            release_delayed_x_on_position_call=7,
         )
         intent = ApprovedPointerIntent(
             intent_id="intermediate-delayed-report",
@@ -2040,14 +2117,99 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
+    def test_calibrated_delayed_report_settles_before_another_move(self) -> None:
+        backend = FakeBackend(
+            start=(500, 500),
+            device_pixel_scale=1.75,
+            delayed_x_move_indices={3},
+            release_delayed_x_on_position_call=9,
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="calibrated-delayed-plan-settle",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(610, 500),
+            movement_bounds=ScreenBounds(0, 0, 1200, 1000),
+            target_bounds=ScreenBounds(607, 497, 7, 7),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful, receipt.reason)
+        move_indices = [
+            index
+            for index, event in enumerate(backend.events)
+            if event.startswith("move:")
+        ]
+        self.assertGreaterEqual(len(move_indices), 4)
+        between_third_and_fourth = backend.events[
+            move_indices[2] + 1 : move_indices[3]
+        ]
+        self.assertGreaterEqual(
+            sum(
+                event.startswith("position:")
+                for event in between_third_and_fourth
+            ),
+            3,
+        )
+        self.assertIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_calibrated_persistent_no_effect_never_stacks_another_move(self) -> None:
+        backend = FakeBackend(
+            start=(500, 500),
+            device_pixel_scale=1.75,
+            no_effect_x_move_indices={3, 4},
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="calibrated-persistent-no-effect",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(610, 500),
+            movement_bounds=ScreenBounds(0, 0, 1200, 1000),
+            target_bounds=ScreenBounds(607, 497, 7, 7),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertEqual(
+            "cursor_feedback_unresolved_delayed_command:"
+            "x=13:y=0:plan=2:step=3",
+            receipt.reason,
+        )
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertEqual(
+            [1, 8, 13],
+            [
+                int(event.split(":", 1)[1].split(",", 1)[0])
+                for event in backend.events
+                if event.startswith("move:")
+            ],
+        )
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
     def test_delayed_poll_cannot_mask_wrong_initial_direction(self) -> None:
         class MaskedInitialDirectionBackend(FakeBackend):
             def _current_position(self) -> tuple[int, int]:
                 self.position_call_count += 1
                 samples = {
                     1: (100, 100),
-                    2: (99, 100),
-                    3: (101, 101),
+                    2: (100, 100),
+                    3: (100, 100),
+                    4: (99, 100),
                 }
                 self.position = samples.get(
                     self.position_call_count, self.position
@@ -2077,7 +2239,7 @@ class InputCoordinatorTests(unittest.TestCase):
             "cursor_feedback_direction_mismatch_x:initial_sample",
             receipt.reason,
         )
-        self.assertEqual(2, backend.position_call_count)
+        self.assertEqual(4, backend.position_call_count)
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
@@ -2087,8 +2249,10 @@ class InputCoordinatorTests(unittest.TestCase):
                 self.position_call_count += 1
                 samples = {
                     1: (100, 100),
-                    2: (100, 102),
-                    3: (101, 101),
+                    2: (100, 100),
+                    3: (100, 100),
+                    4: (100, 102),
+                    5: (101, 101),
                 }
                 self.position = samples.get(
                     self.position_call_count, self.position
@@ -2118,23 +2282,24 @@ class InputCoordinatorTests(unittest.TestCase):
             "cursor_feedback_direction_mismatch_y:delayed_sample",
             receipt.reason,
         )
-        self.assertEqual(3, backend.position_call_count)
+        self.assertEqual(5, backend.position_call_count)
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
-    def test_delayed_report_still_blocks_above_combined_transfer_budget(self) -> None:
+    def test_delayed_settle_still_blocks_above_transfer_budget(self) -> None:
         class ExcessiveDelayedBackend(FakeBackend):
-            def _move_relative(self, dx: int, dy: int) -> dict[str, Any]:
-                result = super()._move_relative(dx, dy)
-                if self.move_call_count == 3:
-                    self.position = (self.position[0] + 1, self.position[1])
-                    self.positions[-1] = self.position
-                return result
+            def _current_position(self) -> tuple[int, int]:
+                point = super()._current_position()
+                if self.position_call_count == 8:
+                    self.position = (point[0] + 1, point[1])
+                    self.positions.append(self.position)
+                return self.position
 
         backend = ExcessiveDelayedBackend(
             start=(150, 150),
             device_pixel_scale=4.0,
             delayed_x_move_indices={2},
+            release_delayed_x_on_position_call=8,
         )
         intent = ApprovedPointerIntent(
             intent_id="delayed-excessive",
@@ -2152,17 +2317,18 @@ class InputCoordinatorTests(unittest.TestCase):
 
         self.assertFalse(receipt.successful)
         self.assertEqual(
-            "cursor_transfer_gain_exceeded_x:commanded=2:observed=25:"
-            "delayed=4:plan=3:step=3",
+            "cursor_transfer_gain_exceeded_x:commanded=0:observed=17:"
+            "delayed=4:plan=2:step=2",
             receipt.reason,
         )
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
-    def test_delayed_report_can_arrive_during_other_axis_move(self) -> None:
+    def test_delayed_x_settles_before_other_axis_continues(self) -> None:
         backend = FakeBackend(
             start=(100, 100),
             delayed_x_move_indices={2},
+            release_delayed_x_on_position_call=8,
         )
         intent = ApprovedPointerIntent(
             intent_id="delayed-zero-current-axis",
@@ -2183,11 +2349,12 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertIn("move:0,1", backend.events)
         self.assertIn("mouse_down:left", backend.events)
 
-    def test_narrow_scaled_target_accepts_one_coalesced_final_report(self) -> None:
+    def test_narrow_scaled_target_accepts_final_report_at_settle(self) -> None:
         backend = FakeBackend(
             start=(2141, 1177),
             device_pixel_scale=2.25,
             delayed_y_move_indices={8},
+            release_delayed_y_on_position_call=17,
         )
         intent = ApprovedPointerIntent(
             intent_id="delayed-live-row-shape",
@@ -2204,7 +2371,7 @@ class InputCoordinatorTests(unittest.TestCase):
         )
 
         self.assertTrue(receipt.successful)
-        self.assertEqual((2141, 1280), backend.position)
+        self.assertEqual((2141, 1277), backend.position)
         self.assertEqual(9, backend.move_call_count)
         self.assertIn("mouse_down:left", backend.events)
 
@@ -2212,8 +2379,15 @@ class InputCoordinatorTests(unittest.TestCase):
         backend = FakeBackend(
             start=(100, 100),
             delayed_x_move_indices={1},
-            release_delayed_x_on_position_call=3,
+            release_delayed_x_on_position_call=6,
         )
+        plans = []
+
+        def recording_planner(*args, **kwargs):  # type: ignore[no-untyped-def]
+            plan = plan_pointer_motion(*args, **kwargs)
+            plans.append(plan)
+            return plan
+
         intent = ApprovedPointerIntent(
             intent_id="delayed-plan-settle",
             purpose=InputPurpose.GAMEPLAY_OBJECT,
@@ -2223,7 +2397,12 @@ class InputCoordinatorTests(unittest.TestCase):
             expected_pid=321,
         )
 
-        receipt = coordinator(backend).execute_pointer(
+        receipt = InputCoordinator(
+            lambda: backend,
+            pointer_planner=recording_planner,
+            sleep=lambda _seconds: None,
+            pointer_timestep_seconds=0.02,
+        ).execute_pointer(
             intent,
             validate=lambda _intent, _actual: InputValidation.allow(),
         )
@@ -2231,6 +2410,9 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertTrue(receipt.successful)
         self.assertEqual((101, 100), backend.position)
         self.assertEqual(1, backend.move_call_count)
+        self.assertEqual(2, len(plans))
+        self.assertEqual((), plans[-1].steps)
+        self.assertEqual(plans[-1].start, plans[-1].target)
         self.assertIn("mouse_down:left", backend.events)
 
     def test_unresolved_delayed_command_blocks_activation(self) -> None:
@@ -2257,7 +2439,7 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertIn("unresolved_delayed_command", receipt.reason)
         self.assertNotIn("mouse_down:left", backend.events)
 
-    def test_combined_delayed_headroom_blocks_before_next_move(self) -> None:
+    def test_unresolved_delayed_credit_blocks_before_headroom_replan(self) -> None:
         backend = FakeBackend(
             start=(50, 50),
             device_pixel_scale=4.0,
@@ -2274,20 +2456,25 @@ class InputCoordinatorTests(unittest.TestCase):
         )
 
         self.assertFalse(receipt.successful)
-        self.assertIn("transfer_envelope_would_leave_bounds", receipt.reason)
+        self.assertIn("cursor_feedback_unresolved_delayed_command", receipt.reason)
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
         self.assertEqual(2, backend.move_call_count)
         self.assertNotIn("mouse_down:left", backend.events)
 
-    def test_opposite_delayed_command_is_rejected_before_transport(self) -> None:
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "cursor_feedback_delayed_direction_mismatch_x",
-        ):
-            InputCoordinator._assert_delayed_command_compatible(
-                delayed=4,
-                commanded=-1,
-                axis="x",
-            )
+    def test_any_delayed_command_is_rejected_before_another_move(self) -> None:
+        for commanded in (-1, 1):
+            with self.subTest(commanded=commanded), self.assertRaisesRegex(
+                RuntimeError,
+                "cursor_feedback_unresolved_delayed_command_before_move_x",
+            ):
+                InputCoordinator._assert_delayed_command_compatible(
+                    delayed=4,
+                    commanded=commanded,
+                    axis="x",
+                )
 
     def test_device_pixel_scaling_accepts_settled_login_region_endpoint(self) -> None:
         backend = FakeBackend(

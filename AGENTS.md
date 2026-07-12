@@ -70,6 +70,11 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Before pointer motion and again before activation, prove the physical mouse
   is quiet, the exact root HWND/PID still owns the point, and current Win32
   outer/client geometry agrees with the intent's outer/client/canvas facts.
+  The first MOVE also requires two identical PMv2 cursor samples separated by
+  one timestep, followed by a fresh physical-button quiet proof and one final
+  unchanged cursor/foreground sample. A stationary manual takeover is accepted
+  as current truth, while continuing motion or a late prior report requires
+  fresh reobservation.
   Gameplay may reconcile only a one-device-pixel AWT/native outer-origin
   quantization when outer size is exact and the native client still contains
   the exact canvas; login outer/client geometry remains exact.
@@ -78,9 +83,14 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   click; coincident same-button human input remains best effort, while other,
   new, or persistent manual activity blocks.
 - A firmware MOVE acknowledgement proves command handling, not Windows cursor
-  arrival. One late report may receive an additional no-input poll while all
-  direction, gain, ownership, focus, and bounds checks remain in force;
-  persistent no-effect blocks.
+  arrival. An unchanged ordinary sample receives one additional poll and then
+  the existing plan-settle sample before any new MOVE. Never stack another MOVE
+  on unobserved command credit. A valid settled report may replan from the
+  observed point; unresolved credit becomes typed cursor-state invalidation and
+  may receive only the existing lane-specific fresh reobservation: login
+  re-finds and re-screens the exact current client, while gameplay requires a
+  newer same-identity tick. Repetition blocks. Direction, gain, ownership,
+  focus, and bounds checks remain in force.
 - Require exact target identity, verified canvas geometry, and exact post-move
   lane evidence for every pointer activation: object hover/menu or widget
   geometry/state as appropriate. Typed key actions instead require their exact
