@@ -18,13 +18,13 @@ task/site remains Lumbridge west ordinary Trees -> Lumbridge Castle bank ->
 return. New flexibility comes from validated profiles and immutable task/site
 definitions, while every task retains its own explicit FSM.
 
-Never introduce a generic or high-level game-agent framework or planner that
-bypasses the explicit task FSM, nor a task language, task DSL, behavior-tree
-framework, knowledge fabric, learned control policy, automatic learning, MCP
-surface, compatibility layer for deleted architecture, or second telemetry
-endpoint. Bounded deterministic planners inside an owning boundary, such as a
-pointer trajectory planner, are allowed. Do not add another task or site during
-the active mission.
+Never introduce a generic or high-level game-agent framework, generic planner,
+task language, task DSL, behavior-tree framework, knowledge fabric, learned
+control policy, automatic learning, MCP surface, compatibility layer for
+deleted architecture, or second telemetry endpoint. Bounded deterministic
+algorithms local to one owning boundary, such as pointer trajectories, are
+allowed and may not bypass the explicit task FSM. Do not add another task or
+site during the active mission.
 
 Anti-detection, stealth, evasion, and randomization intended to avoid detection
 are not project goals.

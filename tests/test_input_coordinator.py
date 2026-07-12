@@ -67,6 +67,7 @@ class FakeBackend:
         physical_mouse_errors: list[Exception | None] | None = None,
         physical_mouse_evidence_overrides: dict[str, Any] | None = None,
         owned_transition_error: Exception | None = None,
+        input_lease_error: Exception | None = None,
     ) -> None:
         self.position = start
         self.fail_commands = set(fail_commands or ())
@@ -111,6 +112,7 @@ class FakeBackend:
             physical_mouse_evidence_overrides or {}
         )
         self.owned_transition_error = owned_transition_error
+        self.input_lease_error = input_lease_error
         self.owned_transition_pending: str | None = None
         self.last_window_handoff: dict[str, Any] | None = None
         self.last_foreground_hwnd = 77
@@ -126,6 +128,11 @@ class FakeBackend:
         self.events.append("ledger_begin")
         self.records = []
         self.ledger_active = True
+
+    def _acquire_input_lease(self) -> None:
+        self.events.append("input_lease")
+        if self.input_lease_error is not None:
+            raise self.input_lease_error
 
     def _command_evidence(self) -> dict[str, Any]:
         self.events.append("ledger_snapshot")
@@ -731,6 +738,10 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertEqual((), first_receipt.commands)
         self.assertIn("window_handoff", first_backend.events)
         self.assertNotIn("connect", first_backend.events)
+        self.assertLess(
+            first_backend.events.index("input_lease"),
+            first_backend.events.index("window_handoff"),
+        )
         self.assertFalse(any(
             event.startswith(("move:", "mouse_down:"))
             for event in first_backend.events
@@ -780,10 +791,47 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertTrue(second_receipt.successful)
         self.assertFalse(second_receipt.safely_unsent)
         self.assertNotIn("window_handoff", second_backend.events)
+        self.assertLess(
+            second_backend.events.index("input_lease"),
+            second_backend.events.index("connect"),
+        )
         self.assertTrue(all(
             fresh_client.contains(ScreenPoint(*point))
             for point in second_backend.positions
         ))
+
+    def test_input_lease_contention_cannot_mutate_window(self) -> None:
+        backend = FakeBackend(
+            start=(3446, 1631),
+            input_lease_error=ArduinoHIDError(
+                "Arduino serial port COM6 is already owned"
+            ),
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="contended-window-handoff",
+            purpose=InputPurpose.LOGIN_PROMPT,
+            target=ScreenPoint(2300, 1281),
+            movement_bounds=ScreenBounds(1191, 472, 2219, 1573),
+            target_bounds=ScreenBounds(2220, 1230, 160, 102),
+            expected_pid=321,
+            expected_hwnd=77,
+            reacquisition_bounds=ScreenBounds(1179, 472, 2243, 1585),
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.safely_unsent)
+        self.assertFalse(receipt.connected)
+        self.assertEqual((), receipt.commands)
+        self.assertIn("already owned", receipt.reason)
+        self.assertIn("input_lease", backend.events)
+        self.assertNotIn("window_handoff", backend.events)
+        self.assertNotIn("connect", backend.events)
+        self.assertTrue(receipt.ledger_closed)
+        self.assertTrue(receipt.backend_closed)
 
     def test_window_handoff_requires_stationary_cursor_and_complete_proof(self) -> None:
         intent = ApprovedPointerIntent(

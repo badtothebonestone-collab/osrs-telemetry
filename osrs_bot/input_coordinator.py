@@ -622,6 +622,8 @@ class InputReceipt:
 class _Backend(Protocol):
     def _begin_command_ledger(self) -> None: ...
 
+    def _acquire_input_lease(self) -> None: ...
+
     def _command_evidence(self) -> dict[str, Any]: ...
 
     def _end_command_ledger(self) -> dict[str, Any]: ...
@@ -1391,6 +1393,18 @@ class InputCoordinator:
                 )
                 backend._begin_command_ledger()
                 ledger_started = True
+                # The same cross-process lease covers both a pre-serial window
+                # handoff and the later Arduino session. Without it, another
+                # host process could mutate the pinned HWND during an active
+                # transaction even though each coordinator is locally locked.
+                try:
+                    backend._acquire_input_lease()
+                except Exception as error:
+                    raise _TransactionAbort(
+                        "input_process_lease_unavailable: "
+                        f"{type(error).__name__}: {error}",
+                        blocked=True,
+                    ) from error
                 if not transaction.sync() or transaction.snapshot.commands:
                     raise _TransactionAbort("command ledger did not begin empty")
                 if (

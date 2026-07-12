@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -1255,6 +1256,51 @@ class CursorWindowHandoffTests(unittest.TestCase):
             inset_px=16,
         )
         self.assertEqual([], serial.writes)
+
+
+class InputLeaseTests(unittest.TestCase):
+    def test_lease_blocks_second_owner_before_serial_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            first = _ArduinoHIDTransport(
+                port="COM-input-lease-test",
+                serial_lock_enabled=True,
+                serial_lock_dir=temporary,
+                serial_lock_timeout_ms=0,
+                serial_owner="first-owner",
+            )
+            second = _ArduinoHIDTransport(
+                port="COM-input-lease-test",
+                serial_lock_enabled=True,
+                serial_lock_dir=temporary,
+                serial_lock_timeout_ms=0,
+                serial_owner="second-owner",
+            )
+            try:
+                first._acquire_input_lease()
+
+                self.assertIsNone(first._serial)
+                self.assertIsNotNone(first._serial_lock)
+                with self.assertRaisesRegex(
+                    ArduinoHIDError,
+                    "already owned",
+                ):
+                    second._acquire_input_lease()
+                self.assertIsNone(second._serial)
+                self.assertIsNone(second._serial_lock)
+
+                held_lease = first._serial_lock
+                first.serial_factory = lambda *args, **kwargs: _FakeSerial()
+                first._connect()
+                self.assertIs(held_lease, first._serial_lock)
+                self.assertIsNotNone(first._serial)
+
+                first._close()
+                second._acquire_input_lease()
+                self.assertIsNone(second._serial)
+                self.assertIsNotNone(second._serial_lock)
+            finally:
+                first._close()
+                second._close()
 
 
 class ArduinoCommandLedgerTests(unittest.TestCase):

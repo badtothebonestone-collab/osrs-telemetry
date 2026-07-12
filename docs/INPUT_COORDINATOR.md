@@ -78,6 +78,13 @@ thread-context change, or a failed cursor read blocks and never substitutes
 `(0,0)` or the last commanded location.
 
 Every initial pointer intent has a no-input preflight before serial connect.
+Before that preflight can mutate a window, the backend acquires the same
+cross-process port lease that protects the later Arduino session, without
+opening or arming the device. The lease remains held through the transaction or
+handoff receipt until backend close. Contention blocks with an empty closed
+ledger and performs no `SetWindowPos`, serial open, MOVE, or activation; a
+second host process therefore cannot move RuneLite during another process's
+active input transaction.
 The first physical-button sample consumes only historical released-button bits,
 then two bounded all-clear samples must prove no held or new button activity.
 The exact foreground root HWND/PID is pinned, and native PMv2 Win32 geometry is

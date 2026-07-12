@@ -190,6 +190,9 @@ class FakeBackend:
     def _begin_command_ledger(self) -> None:
         self.records = []
 
+    def _acquire_input_lease(self) -> None:
+        self._call("input_lease")
+
     def _command_evidence(self) -> dict[str, object]:
         failed = sum(record["status"] != "PASS" for record in self.records)
         missing = sum(not record["ackReceived"] for record in self.records)

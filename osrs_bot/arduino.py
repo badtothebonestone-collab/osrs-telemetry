@@ -1459,24 +1459,7 @@ class _ArduinoHIDTransport:
     def _connect(self) -> None:
         if self._serial is not None:
             return
-        if not self.port:
-            raise ArduinoHIDError("Arduino serial port is not configured; pass --arduino-port COMx or set OSRS_TELEMETRY_ARDUINO_PORT")
-        if self.serial_lock_enabled and self._serial_lock is None:
-            lock = ArduinoSerialPortLock(
-                self.port,
-                owner=self.serial_owner,
-                lock_dir=self.serial_lock_dir,
-                timeout_ms=self.serial_lock_timeout_ms,
-                stale_ms=self.serial_lock_stale_ms,
-                sleep_func=self.sleep_func,
-            )
-            try:
-                self._status.serial_lock = lock.acquire()
-            except Exception as error:
-                self._status.serial_lock = lock.to_dict()
-                self._status.last_error = f"{type(error).__name__}: {error}"
-                raise
-            self._serial_lock = lock
+        self._acquire_input_lease()
         try:
             factory = self.serial_factory
             if factory is None:
@@ -1504,6 +1487,28 @@ class _ArduinoHIDTransport:
             self._status.last_error = f"{type(error).__name__}: {error}"
             self._close()
             raise
+
+    def _acquire_input_lease(self) -> None:
+        """Own the cross-process input/handoff lane without opening hardware."""
+
+        if not self.port:
+            raise ArduinoHIDError("Arduino serial port is not configured; pass --arduino-port COMx or set OSRS_TELEMETRY_ARDUINO_PORT")
+        if self.serial_lock_enabled and self._serial_lock is None:
+            lock = ArduinoSerialPortLock(
+                self.port,
+                owner=self.serial_owner,
+                lock_dir=self.serial_lock_dir,
+                timeout_ms=self.serial_lock_timeout_ms,
+                stale_ms=self.serial_lock_stale_ms,
+                sleep_func=self.sleep_func,
+            )
+            try:
+                self._status.serial_lock = lock.acquire()
+            except Exception as error:
+                self._status.serial_lock = lock.to_dict()
+                self._status.last_error = f"{type(error).__name__}: {error}"
+                raise
+            self._serial_lock = lock
 
     def _close(self) -> None:
         serial_obj = self._serial
