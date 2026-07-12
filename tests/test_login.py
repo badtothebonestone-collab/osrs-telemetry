@@ -686,6 +686,21 @@ class LoginDetectionTests(unittest.TestCase):
                         LoginPromptHelper._same_candidate(candidate, after[0])
                     )
 
+    def test_template_activation_target_cannot_stop_at_first_label_edge(self) -> None:
+        candidate = LoginCandidate(
+            "click_here_to_play",
+            ScreenPoint(451, 601),
+            ScreenBounds(400, 500, 421, 111),
+            0.95,
+        )
+
+        target = LoginPromptHelper._activation_target_bounds(candidate)
+
+        self.assertEqual(ScreenBounds(431, 598, 41, 7), target)
+        self.assertTrue(target.contains(candidate.point))
+        self.assertFalse(target.contains(ScreenPoint(400, 500)))
+        self.assertTrue(candidate.match_bounds.contains(ScreenPoint(400, 500)))
+
     def test_unknown_or_credential_like_surface_is_never_a_candidate(self) -> None:
         screenshot = Image.new("RGB", (1200, 800), (25, 25, 25))
         self.assertEqual(detect_login_surfaces(screenshot), ())
@@ -1469,6 +1484,16 @@ class LoginHelperTests(unittest.TestCase):
         self.assertTrue(result.clicks[0].receipt.successful)
         self.assertIn("stop_all", backends[0].calls)
         self.assertIn("disarm", backends[0].calls)
+        screen_candidate = LoginPromptHelper._to_screen_candidate(
+            PLAY,
+            WINDOW.client_bounds,
+        )
+        activation_target = LoginPromptHelper._activation_target_bounds(
+            screen_candidate
+        )
+        self.assertTrue(
+            activation_target.contains(ScreenPoint(*backends[0].position))
+        )
 
     def test_login_reacquires_cursor_from_exact_window_border(self) -> None:
         source = FakeObservations(
@@ -1499,6 +1524,39 @@ class LoginHelperTests(unittest.TestCase):
             result.clicks[0].receipt.firmware_status
             and result.clicks[0].receipt.firmware_status.safe
         )
+
+    def test_login_does_not_stop_at_semantic_match_edge(self) -> None:
+        source = FakeObservations(
+            [
+                observation("LOGIN_SCREEN", 1),
+                observation("LOGGING_IN", 2),
+                observation("LOGGED_IN", 3, loaded=True),
+                observation("LOGGED_IN", 4, loaded=True),
+                observation("LOGGED_IN", 5, loaded=True),
+            ]
+        )
+        detections = iter(((PLAY,), (PLAY,), (), ()))
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            source,
+            lambda image: next(detections),
+            backends=backends,
+            # Y is already inside the old full semantic-match target, exactly
+            # reproducing the path that used to stop as soon as X entered it.
+            cursor_start=(150, 400),
+        )
+
+        result = helper.run(timeout_seconds=10)
+
+        self.assertTrue(result.successful)
+        screen_candidate = LoginPromptHelper._to_screen_candidate(
+            PLAY,
+            WINDOW.client_bounds,
+        )
+        target = LoginPromptHelper._activation_target_bounds(screen_candidate)
+        actual = ScreenPoint(*backends[0].position)
+        self.assertTrue(target.contains(actual))
+        self.assertFalse(actual == ScreenPoint(520, 400))
 
     def test_login_reobserves_once_after_safe_cursor_interference(self) -> None:
         source = FakeObservations(

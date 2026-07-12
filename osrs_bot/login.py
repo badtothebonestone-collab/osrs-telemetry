@@ -51,6 +51,8 @@ _SEARCH_ZONES = {
 }
 _TEMPLATE_ACTIVATION_X_RATIO = 0.12
 _TEMPLATE_ACTIVATION_BOTTOM_INSET_RATIO = 0.08
+_TEMPLATE_ACTIVATION_TARGET_X_RADIUS_PX = 20
+_TEMPLATE_ACTIVATION_TARGET_Y_RADIUS_PX = 3
 _DISCONNECTED_ACTIVATION_ABOVE_CENTER_PX = 20
 _DPI_AWARENESS_SET = False
 
@@ -1056,12 +1058,13 @@ class LoginPromptHelper:
                 "recognized prompt is outside the exact RuneLite client"
             )
 
+        activation_bounds = self._activation_target_bounds(candidate)
         intent = ApprovedPointerIntent(
             intent_id=f"login:{candidate.name}:{observation.tick}",
             purpose=InputPurpose.LOGIN_PROMPT,
             target=candidate.point,
             movement_bounds=window.client_bounds,
-            target_bounds=candidate.match_bounds,
+            target_bounds=activation_bounds,
             expected_pid=window.pid,
             expected_hwnd=window.hwnd,
             button=MouseButton.LEFT,
@@ -1089,7 +1092,7 @@ class LoginPromptHelper:
                 refreshed is None
                 or not self._same_candidate(candidate, refreshed)
                 or not self._safe_candidate(window, refreshed)
-                or not refreshed.match_bounds.contains(actual_point)
+                or not activation_bounds.contains(actual_point)
             ):
                 # RuneLite can render its custom cursor one frame behind the
                 # already-settled Win32 cursor. One short no-input rescan keeps
@@ -1115,7 +1118,7 @@ class LoginPromptHelper:
             if (
                 not self._same_candidate(candidate, refreshed)
                 or not self._safe_candidate(window, refreshed)
-                or not refreshed.match_bounds.contains(actual_point)
+                or not activation_bounds.contains(actual_point)
             ):
                 return InputValidation.deny(
                     "recognized prompt changed after pointer movement"
@@ -1170,6 +1173,27 @@ class LoginPromptHelper:
             and all(safe.contains(corner) for corner in match_corners)
             and self._point_owner(window, candidate.point)
         )
+
+    @staticmethod
+    def _activation_target_bounds(candidate: LoginCandidate) -> ScreenBounds:
+        """Keep template transit from stopping on the semantic label itself."""
+
+        if candidate.name not in _TEMPLATE_SURFACES:
+            return candidate.match_bounds
+        match = candidate.match_bounds
+        x_radius = _TEMPLATE_ACTIVATION_TARGET_X_RADIUS_PX
+        y_radius = _TEMPLATE_ACTIVATION_TARGET_Y_RADIUS_PX
+        left = max(match.x, candidate.point.x - x_radius)
+        top = max(match.y, candidate.point.y - y_radius)
+        right = min(
+            match.x + match.width,
+            candidate.point.x + x_radius + 1,
+        )
+        bottom = min(
+            match.y + match.height,
+            candidate.point.y + y_radius + 1,
+        )
+        return ScreenBounds(left, top, right - left, bottom - top)
 
     @staticmethod
     def _same_candidate(before: LoginCandidate, after: LoginCandidate) -> bool:
