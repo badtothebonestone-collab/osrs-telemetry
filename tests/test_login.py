@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from osrs_bot import login as login_module
 from osrs_bot.input_coordinator import (
@@ -589,6 +589,55 @@ class LoginDetectionTests(unittest.TestCase):
                 candidates = detect_login_surfaces(screenshot)
                 self.assertEqual([candidate.name for candidate in candidates], [name])
                 self.assertGreaterEqual(candidates[0].confidence, 0.90)
+
+    def test_template_activation_point_preserves_post_move_label_proof(self) -> None:
+        cases = (
+            ("play_now", (470, 330), (287, 99)),
+            ("click_here_to_play", (400, 500), (421, 111)),
+        )
+        for name, placement, scaled_size in cases:
+            with self.subTest(name=name):
+                screenshot = Image.new("RGB", (1200, 800), (55, 18, 14))
+                with Image.open(Path(TEMPLATE_DIR) / f"{name}.png") as opened:
+                    template = opened.convert("RGB").resize(
+                        scaled_size,
+                        Image.Resampling.BILINEAR,
+                    )
+                screenshot.paste(template, placement)
+
+                before = detect_login_surfaces(screenshot)
+
+                self.assertEqual(1, len(before))
+                candidate = before[0]
+                self.assertEqual(name, candidate.name)
+                self.assertLess(
+                    candidate.point.x,
+                    candidate.match_bounds.x + candidate.match_bounds.width // 4,
+                )
+                self.assertGreater(
+                    candidate.point.y,
+                    candidate.match_bounds.y
+                    + candidate.match_bounds.height * 3 // 4,
+                )
+
+                occluded = screenshot.copy()
+                ImageDraw.Draw(occluded).rectangle(
+                    (
+                        candidate.point.x - 2,
+                        candidate.point.y - 2,
+                        candidate.point.x + 93,
+                        candidate.point.y + 93,
+                    ),
+                    fill=(0, 0, 0),
+                )
+
+                after = detect_login_surfaces(occluded)
+
+                self.assertEqual(1, len(after))
+                self.assertEqual(name, after[0].name)
+                self.assertTrue(
+                    LoginPromptHelper._same_candidate(candidate, after[0])
+                )
 
     def test_unknown_or_credential_like_surface_is_never_a_candidate(self) -> None:
         screenshot = Image.new("RGB", (1200, 800), (25, 25, 25))

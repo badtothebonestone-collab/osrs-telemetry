@@ -48,6 +48,8 @@ _SEARCH_ZONES = {
     "play_now": (0.24, 0.30, 0.76, 0.68),
     "click_here_to_play": (0.18, 0.45, 0.82, 0.86),
 }
+_TEMPLATE_ACTIVATION_X_RATIO = 0.12
+_TEMPLATE_ACTIVATION_BOTTOM_INSET_RATIO = 0.08
 _DPI_AWARENESS_SET = False
 
 
@@ -418,6 +420,25 @@ def _disconnected_dialog_candidate(
     )
 
 
+def _template_activation_point(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> ScreenPoint:
+    """Keep the cursor image below the label used for fresh prompt proof."""
+
+    inset_x = max(1, round(width * _TEMPLATE_ACTIVATION_X_RATIO))
+    bottom_inset = max(
+        1,
+        round(height * _TEMPLATE_ACTIVATION_BOTTOM_INSET_RATIO),
+    )
+    return ScreenPoint(
+        x + min(width - 1, inset_x),
+        y + max(0, height - 1 - bottom_inset),
+    )
+
+
 def _detect_login_surfaces_with_limits(
     screenshot: Image.Image,
     *,
@@ -461,7 +482,7 @@ def _detect_login_surfaces_with_limits(
         candidates.append(
             LoginCandidate(
                 name=name,
-                point=ScreenPoint(x + width // 2, y + height // 2),
+                point=_template_activation_point(x, y, width, height),
                 match_bounds=ScreenBounds(x, y, width, height),
                 confidence=confidence,
             )
