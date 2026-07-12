@@ -246,7 +246,11 @@ class _OperatorServicesProtocol(Protocol):
     ) -> ArduinoReadiness: ...
 
     def enable_overlay(
-        self, publisher: EngineFramePublisher
+        self,
+        publisher: EngineFramePublisher,
+        *,
+        presentation_provider: Callable[[], object] | None = None,
+        bound_run_id: str | None = None,
     ) -> OverlaySnapshot: ...
 
     def disable_overlay(self) -> OverlaySnapshot: ...
@@ -313,6 +317,7 @@ class EngineApplication:
             else operator_services
         )
         self._lock = threading.RLock()
+        self._overlay_lock = threading.Lock()
         self._next_run_id = 1
         self._next_capture_id = 1
         self._run_id: str | None = None
@@ -336,6 +341,9 @@ class EngineApplication:
         self._overlay_requested = False
         self._overlay_bound_run_id: str | None = None
         self._overlay_error: str | None = None
+        self._connection_snapshot: ConnectionSnapshot | None = None
+        self._run_process_id: int | None = None
+        self._run_session_id: str | None = None
 
     @staticmethod
     def list_tasks() -> tuple[TaskDescriptor, ...]:
@@ -388,13 +396,20 @@ class EngineApplication:
             return self._configuration
 
     def refresh_connection(self) -> ConnectionSnapshot:
-        return self._operator_services.connection_status()
+        snapshot = self._operator_services.connection_status()
+        if isinstance(snapshot, ConnectionSnapshot):
+            self._retain_connection_snapshot(snapshot)
+        return snapshot
 
     def launch_or_connect_runelite(self) -> RuneLiteLaunchResult:
-        return self._call_operator_while_idle(
+        result = self._call_operator_while_idle(
             "launch_or_connect_runelite",
             self._operator_services.launch_or_connect_runelite,
         )
+        connection = getattr(result, "connection", None)
+        if isinstance(connection, ConnectionSnapshot):
+            self._retain_connection_snapshot(connection)
+        return result
 
     def login_or_recover(self) -> SessionRecoveryResult:
         with self._lock:
@@ -413,7 +428,10 @@ class EngineApplication:
     def prepare_live_handoff(self) -> ConnectionSnapshot:
         """Delegate bounded exact-window focus without acquiring input authority."""
 
-        return self._operator_services.focus_runelite_for_live_handoff()
+        snapshot = self._operator_services.focus_runelite_for_live_handoff()
+        if isinstance(snapshot, ConnectionSnapshot):
+            self._retain_connection_snapshot(snapshot)
+        return snapshot
 
     def arduino_readiness(
         self, arduino_port: str | None = None
@@ -430,13 +448,13 @@ class EngineApplication:
             raise TypeError("enabled must be bool")
         with self._lock:
             self._overlay_requested = enabled
-            if not enabled:
-                self._disable_overlay_unlocked()
-            elif self._last_operation == "run" and self._runtime is not None:
-                self._enable_overlay_unlocked(
-                    self._runtime.frame_publisher,
-                    self._run_id,
-                )
+            runtime = self._runtime if self._last_operation == "run" else None
+            run_id = self._run_id
+        if not enabled:
+            self._disable_overlay()
+        elif runtime is not None:
+            self._enable_overlay(runtime.frame_publisher, run_id)
+        with self._lock:
             return self._overlay_snapshot_unlocked()
 
     def overlay_snapshot(self) -> ApplicationOverlaySnapshot:
@@ -535,19 +553,38 @@ class EngineApplication:
             self._last_operation = "run"
             self._started_at = datetime.now(timezone.utc)
             self._finished_at = None
+            connection = self._connection_snapshot
+            self._run_process_id = (
+                connection.process_id
+                if connection is not None and connection.exact_process_binding
+                else None
+            )
+            self._run_session_id = (
+                connection.session_id
+                if connection is not None and connection.exact_process_binding
+                else None
+            )
             worker = threading.Thread(
                 target=self._run_worker,
-                args=(run_id, runtime, bool(execute)),
+                args=(
+                    run_id,
+                    runtime,
+                    bool(execute),
+                    self._run_process_id,
+                    self._run_session_id,
+                ),
                 name=f"osrs-engine-{run_id}",
                 daemon=False,
             )
             self._run_thread = worker
-            if self._overlay_requested:
-                self._enable_overlay_unlocked(runtime.frame_publisher, run_id)
-            else:
-                self._disable_overlay_unlocked()
+            overlay_requested = self._overlay_requested
             worker.start()
-            return self._snapshot_unlocked()
+            snapshot = self._snapshot_unlocked()
+        if overlay_requested:
+            self._enable_overlay(runtime.frame_publisher, run_id)
+        else:
+            self._disable_overlay()
+        return snapshot
 
     def request_pause(self, run_id: str) -> ApplicationSnapshot:
         with self._lock:
@@ -642,6 +679,8 @@ class EngineApplication:
             self._demo_error = None
             self._execute_requested = False
             self._binding = None
+            self._run_process_id = None
+            self._run_session_id = None
             self._last_operation = "demo"
             self._started_at = datetime.now(timezone.utc)
             self._finished_at = None
@@ -661,9 +700,10 @@ class EngineApplication:
                 daemon=False,
             )
             self._demo_thread = worker
-            self._disable_overlay_unlocked()
             worker.start()
-            return self._snapshot_unlocked()
+            snapshot = self._snapshot_unlocked()
+        self._disable_overlay()
+        return snapshot
 
     def end_demonstration(
         self, capture_id: str, *, timeout: float | None = 10.0
@@ -699,13 +739,73 @@ class EngineApplication:
         with self._lock:
             return self._snapshot_unlocked()
 
+    def connection_snapshot(self) -> ConnectionSnapshot | None:
+        """Return the latest existing operator probe without querying again."""
+
+        with self._lock:
+            return self._connection_snapshot
+
+    def frontend_presentation(
+        self,
+        *,
+        application_snapshot: ApplicationSnapshot | None = None,
+        frame: EngineFrame | None = None,
+        frame_run_id: str | None = None,
+        use_application_frame: bool = True,
+    ) -> object:
+        """Derive a read-only frontend view from current authoritative owners."""
+
+        from .frontend_presentation import classify_frontend_presentation
+
+        with self._lock:
+            authoritative = self._snapshot_unlocked()
+            snapshot = application_snapshot or authoritative
+            connection = self._connection_snapshot
+            selected_frame = snapshot.engine_frame if use_application_frame else frame
+            selected_frame_run_id = (
+                snapshot.run_id if use_application_frame else frame_run_id
+            )
+            if snapshot.run_id != authoritative.run_id:
+                selected_frame_run_id = None
+            statistics = snapshot.runtime_statistics
+            expected_process_id = self._run_process_id
+            expected_session_id = self._run_session_id
+        return classify_frontend_presentation(
+            lifecycle=snapshot.lifecycle,
+            run_id=snapshot.run_id,
+            frame_run_id=(
+                selected_frame_run_id if selected_frame is not None else None
+            ),
+            execute_requested=snapshot.execute_requested,
+            frame=selected_frame,
+            connection=connection,
+            runtime_status=(statistics.status if statistics is not None else None),
+            runtime_reason=(statistics.reason if statistics is not None else None),
+            blockers=snapshot.blockers,
+            expected_process_id=expected_process_id,
+            expected_session_id=expected_session_id,
+            now=datetime.now(timezone.utc),
+        )
+
     def _run_worker(
-        self, run_id: str, runtime: TaskRuntime, execute: bool
+        self,
+        run_id: str,
+        runtime: TaskRuntime,
+        execute: bool,
+        expected_process_id: int | None,
+        expected_session_id: str | None,
     ) -> None:
         result: RuntimeResult | None = None
         error: str | None = None
         try:
-            result = runtime.run(execute=execute)
+            if expected_process_id is not None and expected_session_id is not None:
+                result = runtime.run(
+                    execute=execute,
+                    expected_process_id=expected_process_id,
+                    expected_session_id=expected_session_id,
+                )
+            else:
+                result = runtime.run(execute=execute)
         except BaseException as raised:
             error = f"{type(raised).__name__}: {raised}"
             runtime.record_worker_failure(error)
@@ -764,6 +864,14 @@ class EngineApplication:
         finally:
             self._finish_operator_operation(operation)
 
+    def _retain_connection_snapshot(self, snapshot: ConnectionSnapshot) -> None:
+        """Keep the newest existing probe result; slow callbacks cannot rewind it."""
+
+        with self._lock:
+            current = self._connection_snapshot
+            if current is None or snapshot.captured_at > current.captured_at:
+                self._connection_snapshot = snapshot
+
     def _begin_operator_operation_unlocked(self, operation: str) -> None:
         if not isinstance(operation, str) or not operation.strip():
             raise ValueError("operation must be non-empty text")
@@ -775,27 +883,33 @@ class EngineApplication:
             if self._operator_operation == operation:
                 self._operator_operation = None
 
-    def _enable_overlay_unlocked(
+    def _enable_overlay(
         self,
         publisher: EngineFramePublisher,
         run_id: str | None,
     ) -> None:
-        self._overlay_bound_run_id = run_id
-        try:
-            snapshot = self._operator_services.enable_overlay(publisher)
-        except Exception as error:  # diagnostics must never alter run control
-            self._overlay_error = f"{type(error).__name__}: {error}"
-        else:
-            self._overlay_error = snapshot.error
+        with self._overlay_lock:
+            self._overlay_bound_run_id = run_id
+            try:
+                snapshot = self._operator_services.enable_overlay(
+                    publisher,
+                    presentation_provider=self.frontend_presentation,
+                    bound_run_id=run_id,
+                )
+            except Exception as error:  # diagnostics must never alter run control
+                self._overlay_error = f"{type(error).__name__}: {error}"
+            else:
+                self._overlay_error = snapshot.error
 
-    def _disable_overlay_unlocked(self) -> None:
-        self._overlay_bound_run_id = None
-        try:
-            snapshot = self._operator_services.disable_overlay()
-        except Exception as error:  # diagnostics must never alter run control
-            self._overlay_error = f"{type(error).__name__}: {error}"
-        else:
-            self._overlay_error = snapshot.error
+    def _disable_overlay(self) -> None:
+        with self._overlay_lock:
+            self._overlay_bound_run_id = None
+            try:
+                snapshot = self._operator_services.disable_overlay()
+            except Exception as error:  # diagnostics must never alter run control
+                self._overlay_error = f"{type(error).__name__}: {error}"
+            else:
+                self._overlay_error = snapshot.error
 
     def _overlay_snapshot_unlocked(self) -> ApplicationOverlaySnapshot:
         try:

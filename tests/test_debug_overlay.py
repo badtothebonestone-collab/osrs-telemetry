@@ -3,8 +3,9 @@ from __future__ import annotations
 import ast
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from osrs_bot.debug_overlay import (
     ELIGIBLE_COLOR,
@@ -64,13 +65,19 @@ def _frame(*, observation_tick: int = 50):
         stage=EngineStage.DECIDED,
         task=TaskSnapshot("woodcut_bank", TaskStatus.RUNNING, "find_tree"),
         observation=ObservationReference(
-            observation_tick,
-            datetime.now(timezone.utc),
-            f"frame-{observation_tick}",
-            "geometry-50",
-            "session-1",
-            1234,
-            ScreenBounds(0, 0, 765, 503),
+            source_tick=observation_tick,
+            captured_at=datetime.now(timezone.utc),
+            frame_id=f"frame-{observation_tick}",
+            geometry_frame_id="geometry-50",
+            session_id="session-1",
+            process_id=1234,
+            canvas_bounds=ScreenBounds(0, 0, 765, 503),
+            game_state="LOGGED_IN",
+            loaded_scene=True,
+            client_focused=True,
+            fresh=True,
+            cache_wall_clock_fresh=True,
+            source_coherent=True,
         ),
         decision=decision,
     )
@@ -132,6 +139,66 @@ class DebugOverlayTests(unittest.TestCase):
         self.assertTrue(any("target:" in line for line in scene.text_lines))
         self.assertTrue(any("geometry suppressed" in line for line in scene.text_lines))
         self.assertFalse(any("100,100" in line for line in scene.text_lines))
+
+    def test_wall_clock_stale_frame_becomes_text_only_without_new_publication(self) -> None:
+        frame = _frame()
+
+        scene = build_overlay_scene(
+            frame,
+            now=frame.observation.captured_at + timedelta(seconds=2.001),
+            show_rejected=True,
+        )
+
+        self.assertEqual((), scene.rectangles)
+        self.assertIn("STALE", scene.text_lines[0])
+        self.assertTrue(any("last known target" in line for line in scene.text_lines))
+
+    def test_terminal_frame_is_text_only_and_banner_is_bounded(self) -> None:
+        source = _frame()
+        publisher = EngineFramePublisher()
+        terminal = publisher.publish(
+            stage=EngineStage.TERMINAL,
+            task=source.task,
+            observation=source.observation,
+            decision=source.decision,
+            blocker="runtime_limit_reached",
+        )
+
+        visible = build_overlay_scene(
+            terminal,
+            now=terminal.published_at + timedelta(seconds=1),
+        )
+        bounded = build_overlay_scene(
+            terminal,
+            now=terminal.published_at + timedelta(seconds=8.001),
+        )
+
+        self.assertEqual((), visible.rectangles)
+        self.assertIn("target geometry cleared", visible.text_lines[0])
+        self.assertEqual((), bounded.rectangles)
+        self.assertEqual(1, len(bounded.text_lines))
+        self.assertIn("terminal summary retained", bounded.text_lines[0])
+
+    def test_disconnected_presentation_is_text_only_with_last_frame_age(self) -> None:
+        frame = _frame()
+        presentation = SimpleNamespace(
+            state=SimpleNamespace(value="DISCONNECTED"),
+            run_id="run-000001",
+            geometry_allowed=False,
+        )
+
+        scene = build_overlay_scene(
+            frame,
+            presentation=presentation,
+            bound_run_id="run-000001",
+            now=frame.observation.captured_at + timedelta(seconds=3),
+        )
+
+        self.assertEqual((), scene.rectangles)
+        self.assertEqual(
+            "DISCONNECTED — last live frame was 3.0 seconds ago",
+            scene.text_lines[0],
+        )
 
     def test_native_host_proves_click_through_and_no_activate_flags(self) -> None:
         native = _Native()

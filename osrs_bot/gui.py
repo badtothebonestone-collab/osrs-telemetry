@@ -26,14 +26,20 @@ from .gui_controller import (
 WINDOW_TITLE = "OSRS Automation Engine"
 GUI_PRESENTATION_SCHEMA = "osrs_operator_gui.v1"
 POLL_MILLISECONDS = 250
-CONNECTION_REFRESH_MILLISECONDS = 3_000
+CONNECTION_REFRESH_MILLISECONDS = 1_000
 
 _STATUS_COLORS = {
+    "CONNECTING": ("#5f6368", "#ffffff"),
     "READY": ("#0f7d32", "#ffffff"),
+    "OBSERVING": ("#1769aa", "#ffffff"),
     "RUNNING": ("#1769aa", "#ffffff"),
     "PAUSED": ("#8a5a00", "#ffffff"),
     "BLOCKED": ("#b00020", "#ffffff"),
     "COMPLETE": ("#0f7d32", "#ffffff"),
+    "SAFE_STOPPED": ("#5f6368", "#ffffff"),
+    "DISCONNECTED": ("#6b4f3a", "#ffffff"),
+    "STALE": ("#8a5a00", "#ffffff"),
+    "ERROR": ("#b00020", "#ffffff"),
     "NOT READY": ("#b00020", "#ffffff"),
     "UNKNOWN": ("#5f6368", "#ffffff"),
     "REQUESTED": ("#8a5a00", "#ffffff"),
@@ -90,6 +96,11 @@ class OperatorWindow:
         self.profile_validation_var = tk.StringVar(value="Validation pending")
         self.arduino_var = tk.StringVar(value=settings.arduino_port)
         self.overlay_var = tk.BooleanVar(value=settings.overlay_enabled)
+        self.keep_terminal_var = tk.BooleanVar(
+            value=settings.keep_terminal_summary_visible
+        )
+        self.frame_section_var = tk.StringVar(value="Current live frame")
+        self.terminal_summary_var = tk.StringVar(value="No terminal run summary.")
 
         self.connection_vars = {
             key: tk.StringVar(value="UNKNOWN")
@@ -100,15 +111,26 @@ class OperatorWindow:
                 "loaded",
                 "game_state",
                 "foreground",
+                "freshness",
+                "session",
+                "source_tick",
+                "age",
+                "last_updated",
                 "layout",
                 "cursor",
                 "blocker",
+                "diagnostic",
             )
         }
         self.live_vars = {
             key: tk.StringVar(value="—")
             for key in (
                 "task",
+                "run_id",
+                "mode",
+                "frame_status",
+                "freshness",
+                "source_identity",
                 "binding",
                 "state",
                 "route_step",
@@ -126,6 +148,7 @@ class OperatorWindow:
                 "receipt",
                 "cleanup",
                 "blocker",
+                "diagnostic",
             )
         }
         self.demo_status_var = tk.StringVar(value="Not recording")
@@ -230,10 +253,13 @@ class OperatorWindow:
         connection.columnconfigure(1, weight=1)
         connection.columnconfigure(3, weight=1)
         rows = (
-            ("RuneLite", "process", "PID", "pid"),
-            ("Endpoint 8893", "endpoint", "Game state", "game_state"),
-            ("Loaded scene", "loaded", "Foreground", "foreground"),
+            ("RuneLite", "process", "Current PID", "pid"),
+            ("Endpoint 8893", "endpoint", "Current session", "session"),
+            ("Loaded scene", "loaded", "Game state", "game_state"),
+            ("Fresh coherent state", "freshness", "Source tick", "source_tick"),
+            ("Connection source age", "age", "Connection source time", "last_updated"),
             ("175% fixed layout", "layout", "Cursor", "cursor"),
+            ("Foreground", "foreground", "", ""),
         )
         for row, (left_name, left_key, right_name, right_key) in enumerate(rows):
             ttk.Label(connection, text=f"{left_name}:").grid(
@@ -242,22 +268,23 @@ class OperatorWindow:
             ttk.Label(connection, textvariable=self.connection_vars[left_key]).grid(
                 row=row, column=1, sticky="w", pady=2
             )
-            ttk.Label(connection, text=f"{right_name}:").grid(
-                row=row, column=2, sticky="w", padx=(14, 6), pady=2
-            )
-            ttk.Label(connection, textvariable=self.connection_vars[right_key]).grid(
-                row=row, column=3, sticky="w", pady=2
-            )
+            if right_key:
+                ttk.Label(connection, text=f"{right_name}:").grid(
+                    row=row, column=2, sticky="w", padx=(14, 6), pady=2
+                )
+                ttk.Label(connection, textvariable=self.connection_vars[right_key]).grid(
+                    row=row, column=3, sticky="w", pady=2
+                )
         ttk.Label(connection, text="Current blocker:").grid(
-            row=4, column=0, sticky="nw", pady=(5, 2)
+            row=7, column=0, sticky="nw", pady=(5, 2)
         )
         ttk.Label(
             connection,
             textvariable=self.connection_vars["blocker"],
             wraplength=560,
-        ).grid(row=4, column=1, columnspan=3, sticky="ew", pady=(5, 2))
+        ).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(5, 2))
         connection_buttons = ttk.Frame(connection)
-        connection_buttons.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(9, 0))
+        connection_buttons.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(9, 0))
         self.launch_button = ttk.Button(
             connection_buttons,
             text="Launch / Connect RuneLite",
@@ -350,8 +377,17 @@ class OperatorWindow:
             command=self._toggle_overlay,
         )
         self.overlay_check.grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
+        self.keep_terminal_check = ttk.Checkbutton(
+            runtime,
+            text="Keep terminal summary visible",
+            variable=self.keep_terminal_var,
+            command=self._terminal_preference_changed,
+        )
+        self.keep_terminal_check.grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=4
+        )
         controls = ttk.Frame(runtime)
-        controls.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.start_button = ttk.Button(
             controls, text="Start", style="Primary.TButton", command=self._start
         )
@@ -397,23 +433,30 @@ class OperatorWindow:
 
     def _build_live_tab(self) -> None:
         self.live_tab.columnconfigure(0, weight=1)
-        self.live_tab.rowconfigure(1, weight=1)
+        self.live_tab.rowconfigure(2, weight=1)
         summary = ttk.LabelFrame(
-            self.live_tab, text="Latest EngineFrame", style="Section.TLabelframe", padding=10
+            self.live_tab,
+            text=self.frame_section_var.get(),
+            style="Section.TLabelframe",
+            padding=10,
         )
+        self.frame_summary = summary
         summary.grid(row=0, column=0, sticky="ew")
         for column in (1, 3):
             summary.columnconfigure(column, weight=1)
         items = (
-            ("Task", "task", "Profile / definition", "binding"),
-            ("Task state", "state", "Route step", "route_step"),
-            ("Route progress", "route_progress", "Cycle progress", "cycle_progress"),
-            ("Player location", "location", "Inventory", "inventory"),
-            ("Selected target", "target", "Selected action", "action"),
-            ("Target distance", "distance", "Candidates", "candidates"),
-            ("Pending verification", "pending_verification", "Last outcome", "last_outcome"),
-            ("Execution", "execution", "Input receipt", "receipt"),
-            ("Cleanup", "cleanup", "Blocker", "blocker"),
+            ("Run ID", "run_id", "Mode", "mode"),
+            ("Source frame", "frame_status", "Freshness", "freshness"),
+            ("Source PID/session", "source_identity", "Task", "task"),
+            ("Profile / definition", "binding", "Task state", "state"),
+            ("Route step", "route_step", "Route progress", "route_progress"),
+            ("Cycle progress", "cycle_progress", "Player location", "location"),
+            ("Inventory", "inventory", "Selected target", "target"),
+            ("Selected action", "action", "Target distance", "distance"),
+            ("Candidates", "candidates", "Pending verification", "pending_verification"),
+            ("Last outcome", "last_outcome", "Execution", "execution"),
+            ("Input receipt", "receipt", "Cleanup", "cleanup"),
+            ("Blocker", "blocker", "Original diagnostic", "diagnostic"),
         )
         for row, (a_label, a_key, b_label, b_key) in enumerate(items):
             ttk.Label(summary, text=f"{a_label}:").grid(row=row, column=0, sticky="nw", padx=(0, 6), pady=2)
@@ -421,8 +464,22 @@ class OperatorWindow:
             ttk.Label(summary, text=f"{b_label}:").grid(row=row, column=2, sticky="nw", padx=(18, 6), pady=2)
             ttk.Label(summary, textvariable=self.live_vars[b_key], wraplength=420).grid(row=row, column=3, sticky="w", pady=2)
 
+        terminal = ttk.LabelFrame(
+            self.live_tab,
+            text="Terminal summary",
+            style="Section.TLabelframe",
+            padding=8,
+        )
+        terminal.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(
+            terminal,
+            textvariable=self.terminal_summary_var,
+            wraplength=1_050,
+        ).grid(row=0, column=0, sticky="ew")
+        terminal.columnconfigure(0, weight=1)
+
         panes = ttk.Panedwindow(self.live_tab, orient="horizontal")
-        panes.grid(row=1, column=0, sticky="nsew", pady=10)
+        panes.grid(row=2, column=0, sticky="nsew", pady=10)
         safety_frame = ttk.LabelFrame(panes, text="Ordered Safety Checks", padding=8)
         event_frame = ttk.LabelFrame(panes, text="Important Events (bounded)", padding=8)
         panes.add(safety_frame, weight=2)
@@ -456,10 +513,15 @@ class OperatorWindow:
         event_scroll.grid(row=0, column=1, sticky="ns")
         self.event_tree.configure(yscrollcommand=event_scroll.set)
         actions = ttk.Frame(self.live_tab)
-        actions.grid(row=2, column=0, sticky="ew")
+        actions.grid(row=3, column=0, sticky="ew")
         ttk.Button(actions, text="Copy Current Status", command=self._copy_status).pack(side="left")
         ttk.Button(actions, text="Save Current Status", command=self._save_status).pack(side="left", padx=6)
         ttk.Button(actions, text="Open Latest Proof Folder", command=self._open_latest_proof).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Clear Historical Display",
+            command=lambda: self._safe_request(self.controller.clear_historical_display),
+        ).pack(side="left", padx=6)
 
     def _build_demo_tab(self) -> None:
         self.demo_tab.columnconfigure(0, weight=1)
@@ -640,6 +702,14 @@ class OperatorWindow:
         enabled = bool(self.overlay_var.get())
         self._safe_request(lambda: self.controller.set_overlay_enabled(enabled))
 
+    def _terminal_preference_changed(self) -> None:
+        try:
+            self.controller.save_preferences(
+                keep_terminal_summary_visible=bool(self.keep_terminal_var.get())
+            )
+        except Exception:
+            pass
+
     def _record_demo(self) -> None:
         name = self.demo_name_var.get().strip()
         if not name:
@@ -685,6 +755,24 @@ class OperatorWindow:
             if now >= self._next_snapshot_refresh:
                 self._next_snapshot_refresh = now + 0.5
                 self._safe_request(self.controller.request_refresh, show_error=False)
+            if (
+                not self._closing
+                and "connection" not in state.busy_operations
+                and now - self._last_connection_refresh
+                >= CONNECTION_REFRESH_MILLISECONDS / 1_000.0
+            ):
+                self._last_connection_refresh = now
+                self._safe_request(self.controller.refresh_connection, show_error=False)
+                port = self.arduino_var.get().strip().upper()
+                if port:
+                    self._safe_request(
+                        lambda: self.controller.request_arduino_readiness(port),
+                        show_error=False,
+                    )
+            elif "connection" in state.busy_operations:
+                # Leave a full refresh interval after a slow endpoint probe so
+                # explicit Launch/Connect and recovery controls become usable.
+                self._last_connection_refresh = now
             if state.close_ready:
                 if state.close_terminal_failure:
                     messagebox.showwarning(
@@ -703,17 +791,29 @@ class OperatorWindow:
 
     def _render(self, state: Any) -> None:
         application = state.application
-        lifecycle = application.lifecycle
-        lifecycle_text = lifecycle.value.upper().replace("_", " ")
-        self.lifecycle_var.set(lifecycle_text)
-        lifecycle_status = _lifecycle_status(lifecycle)
-        colors = _STATUS_COLORS.get(lifecycle_status, _STATUS_COLORS["UNKNOWN"])
+        presentation = state.presentation
+        presentation_state = str(
+            getattr(getattr(presentation, "state", None), "value", "CONNECTING")
+        )
+        self.lifecycle_var.set(presentation_state.replace("_", " "))
+        colors = _STATUS_COLORS.get(
+            presentation_state, _STATUS_COLORS["UNKNOWN"]
+        )
         self.lifecycle_badge.configure(background=colors[0], foreground=colors[1])
-        blocker = state.blockers[0] if state.blockers else None
+        presentation_blockers = tuple(getattr(presentation, "blockers", ()))
+        blocker = (
+            presentation_blockers[0]
+            if presentation_blockers
+            else state.blockers[0]
+            if state.blockers
+            else None
+        )
+        guidance = getattr(presentation, "reconnect_guidance", None)
         self.header_detail_var.set(
-            _plain_blocker(blocker)
+            f"{_plain_blocker(blocker)} {guidance or ''}".strip()
             if blocker
-            else _lifecycle_detail(lifecycle, application.runtime_control)
+            else guidance
+            or _lifecycle_detail(application.lifecycle, application.runtime_control)
         )
         self.status_bar_var.set(
             f"Busy: {', '.join(state.busy_operations)}"
@@ -732,9 +832,17 @@ class OperatorWindow:
         inspection = _to_mapping(results.get("demonstrationInspection"))
         self_test = _to_mapping(results.get("quickSelfTest"))
         replay = _to_mapping(results.get("goldenReplay"))
-        self._render_connection(connection, state.engine_frame)
-        self._render_preflight(connection, arduino, overlay, diagnostics, state)
-        self._render_frame(state.engine_frame)
+        self._render_connection(connection, state.engine_frame, presentation)
+        self._render_preflight(
+            connection, arduino, overlay, diagnostics, state, presentation
+        )
+        self._render_frame(state.engine_frame, presentation, application)
+        self._render_terminal_summary(
+            presentation,
+            state.engine_frame,
+            arduino,
+            state.terminal_summary_evidence,
+        )
         self._render_events(state.events)
         self._render_demo(application, inspection)
         self._render_diagnostics(
@@ -745,7 +853,7 @@ class OperatorWindow:
             arduino=arduino,
             overlay=overlay,
         )
-        self._render_button_states(state)
+        self._render_button_states(state, presentation)
         if (
             self._closing
             and not state.close_ready
@@ -753,11 +861,34 @@ class OperatorWindow:
         ):
             self._closing = False
 
-    def _render_connection(self, connection: Mapping[str, object], frame: Any) -> None:
+    def _render_connection(
+        self,
+        connection: Mapping[str, object],
+        frame: Any,
+        presentation: object,
+    ) -> None:
         observation = frame.to_dict().get("observation") if frame is not None else None
         observation = observation if isinstance(observation, Mapping) else {}
         process_found = _runelite_found(connection)
-        pid = _first(connection, "runelitePid", "pid", "processId", default=observation.get("processId"))
+        pid = getattr(presentation, "process_id", None) or _first(
+            connection,
+            "runelitePid",
+            "pid",
+            "processId",
+            default=observation.get("processId"),
+        )
+        session = getattr(presentation, "session_id", None) or _first(
+            connection,
+            "sessionId",
+            "session_id",
+            default=observation.get("sessionId"),
+        )
+        connection_presentation_state = str(
+            getattr(getattr(presentation, "state", None), "value", "CONNECTING")
+        )
+        if connection_presentation_state == "DISCONNECTED":
+            pid = None
+            session = None
         endpoint = _first(connection, "endpointHealthy", "endpoint_healthy")
         loaded = _first(connection, "loadedScene", "loaded_scene", default=observation.get("loadedScene"))
         game_state = _first(connection, "gameState", "game_state", default=observation.get("gameState"))
@@ -773,10 +904,34 @@ class OperatorWindow:
         blocker = _first(connection, "blocker", "currentBlocker")
         self.connection_vars["process"].set(_yes_no(process_found))
         self.connection_vars["pid"].set(str(pid) if pid else "—")
+        self.connection_vars["session"].set(str(session) if session else "—")
         self.connection_vars["endpoint"].set(_ready_text(endpoint))
         self.connection_vars["loaded"].set(_ready_text(loaded))
         self.connection_vars["game_state"].set(str(game_state or "UNKNOWN"))
         self.connection_vars["foreground"].set(_ready_text(focused))
+        presentation_state = str(
+            getattr(getattr(presentation, "state", None), "value", "CONNECTING")
+        )
+        self.connection_vars["freshness"].set(
+            "READY"
+            if getattr(presentation, "start_live_allowed", False)
+            or getattr(presentation, "current", False)
+            else presentation_state
+        )
+        source_tick = getattr(presentation, "connection_source_tick", None)
+        self.connection_vars["source_tick"].set(
+            str(source_tick) if source_tick is not None else "—"
+        )
+        age = getattr(presentation, "connection_age_seconds", None)
+        self.connection_vars["age"].set(
+            f"{age:.1f} s" if isinstance(age, (int, float)) else "—"
+        )
+        updated = getattr(presentation, "connection_last_updated_at", None)
+        self.connection_vars["last_updated"].set(
+            updated.astimezone().strftime("%H:%M:%S")
+            if isinstance(updated, datetime)
+            else "—"
+        )
         self.connection_vars["layout"].set(_ready_text(layout, unknown="UNPROVEN"))
         self.connection_vars["cursor"].set(
             "INSIDE" if cursor is True else "OUTSIDE" if cursor is False else "UNKNOWN"
@@ -790,6 +945,7 @@ class OperatorWindow:
         overlay: Mapping[str, object],
         diagnostics: Mapping[str, object],
         state: Any,
+        presentation: object,
     ) -> None:
         frame = state.engine_frame
         observation = frame.to_dict().get("observation") if frame is not None else None
@@ -807,6 +963,12 @@ class OperatorWindow:
                 and observation.get("cacheWallClockFresh")
                 and observation.get("sourceCoherent")
             )
+        if getattr(presentation, "age_seconds", None) is not None:
+            coherent = bool(
+                getattr(presentation, "current", False)
+                or getattr(presentation, "start_live_allowed", False)
+            )
+        presentation_blockers = tuple(getattr(presentation, "blockers", ()))
         repository_ready = _first(
             diagnostics,
             "repositoryReady",
@@ -821,10 +983,11 @@ class OperatorWindow:
             ("Coherent fresh Observation", _status(coherent), "fresh + wall-clock fresh + source coherent" if coherent else ""),
             ("Supported 175% fixed layout", _status(_first(connection, "supportedLayout", "supported_layout", "layoutSupported")), _detail(connection, "layoutReason", "layout_reason")),
             ("Exact process / session binding", _status(_first(connection, "exactBinding", "exact_binding", "sessionBound", "exactProcessBinding")), _detail(connection, "bindingReason", "binding_reason", "diagnostic")),
+            ("Start Live gate", "READY" if getattr(presentation, "start_live_allowed", False) else "BLOCKED", getattr(presentation, "reconnect_guidance", None) or "fresh coherent loaded identity required"),
             ("Arduino port available", _status(_first(arduino, "portAvailable", "port_available", "available")), _detail(arduino, "portReason", "port_reason")),
             ("Arduino lease available", _status(_first(arduino, "leaseAvailable", "lease_available")), _detail(arduino, "leaseReason", "lease_reason")),
             ("Overlay", _overlay_status(overlay), _detail(overlay, "error", "detail")),
-            ("Current blocker", "BLOCKED" if state.blockers else "READY", _plain_blocker(state.blockers[0]) if state.blockers else "None"),
+            ("Current blocker", "BLOCKED" if presentation_blockers or state.blockers else "READY", _plain_blocker((presentation_blockers or state.blockers)[0]) if presentation_blockers or state.blockers else "None"),
             ("Latest cleanup", _cleanup_status(cleanup, application=state.application), _cleanup_detail(cleanup, state.application)),
         )
         existing = self.preflight_tree.get_children()
@@ -840,12 +1003,29 @@ class OperatorWindow:
                 tags=(normalized,),
             )
 
-    def _render_frame(self, frame: Any) -> None:
+    def _render_frame(
+        self,
+        frame: Any,
+        presentation: object,
+        application: object,
+    ) -> None:
         if frame is None:
+            self.frame_section_var.set("No current or historical frame")
+            self.frame_summary.configure(text=self.frame_section_var.get())
             for variable in self.live_vars.values():
                 variable.set("—")
             self._set_text(self.safety_text, "No EngineFrame has been published.")
             return
+        current = bool(getattr(presentation, "current", False))
+        terminal = bool(getattr(presentation, "terminal_summary", False))
+        self.frame_section_var.set(
+            "Current live frame"
+            if current
+            else "Terminal frame — target geometry cleared"
+            if terminal
+            else "Last known frame — historical, not live authority"
+        )
+        self.frame_summary.configure(text=self.frame_section_var.get())
         payload = frame.to_dict()
         task = payload.get("task") if isinstance(payload.get("task"), Mapping) else {}
         observation = payload.get("observation") if isinstance(payload.get("observation"), Mapping) else {}
@@ -860,6 +1040,35 @@ class OperatorWindow:
         receipt = last_execution.get("receipt") if isinstance(last_execution.get("receipt"), Mapping) else {}
         cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), Mapping) else {}
         action = decision.get("action") if isinstance(decision.get("action"), Mapping) else {}
+        self.live_vars["run_id"].set(
+            str(getattr(presentation, "frame_run_id", None) or "—")
+        )
+        self.live_vars["mode"].set(
+            "START LIVE — Arduino production input"
+            if getattr(application, "execute_requested", False)
+            else "OBSERVE ONLY — no gameplay input"
+        )
+        self.live_vars["frame_status"].set(
+            f"EngineFrame {payload.get('sequence')} / {payload.get('stage')} / "
+            f"{getattr(getattr(presentation, 'state', None), 'value', 'UNKNOWN')}"
+        )
+        age = getattr(presentation, "age_seconds", None)
+        source_tick = getattr(presentation, "source_tick", None)
+        self.live_vars["freshness"].set(
+            f"{'CURRENT' if current else 'HISTORICAL'}; age={age:.1f}s; "
+            f"sourceTick={source_tick}"
+            if isinstance(age, (int, float))
+            else "No authoritative freshness timestamp"
+        )
+        source_pid = getattr(presentation, "source_process_id", None)
+        source_session = getattr(presentation, "source_session_id", None)
+        self.live_vars["source_identity"].set(
+            f"Previous PID {source_pid} / session {source_session}"
+            if not current and (source_pid is not None or source_session is not None)
+            else f"PID {source_pid} / session {source_session}"
+            if source_pid is not None or source_session is not None
+            else "—"
+        )
         self.live_vars["task"].set(str(task.get("taskId") or "—"))
         self.live_vars["binding"].set(f"{task.get('profileId') or '—'} / {task.get('definitionId') or '—'}")
         self.live_vars["state"].set(f"{task.get('state') or '—'} ({task.get('status') or '—'})")
@@ -877,6 +1086,10 @@ class OperatorWindow:
             if selected
             else "—"
         )
+        if selected and not current:
+            self.live_vars["target"].set(
+                f"Last known: {self.live_vars['target'].get()}"
+            )
         self.live_vars["action"].set(
             f"{action.get('kind') or '—'} — {action.get('label') or decision.get('reason') or '—'}"
         )
@@ -895,13 +1108,112 @@ class OperatorWindow:
         self.live_vars["receipt"].set(_receipt_text(receipt))
         self.live_vars["cleanup"].set(_cleanup_detail(cleanup, None))
         self.live_vars["blocker"].set(_plain_blocker(str(payload.get("blocker"))) if payload.get("blocker") else "None")
+        self.live_vars["diagnostic"].set(
+            str(getattr(presentation, "diagnostic", None) or "None")
+        )
         checks = payload.get("safetyChecks") if isinstance(payload.get("safetyChecks"), list) else []
         lines = [
             f"{index + 1:02d}. {'PASS' if check.get('allowed') else 'BLOCK'}  {check.get('stage')} / {check.get('code')}"
             for index, check in enumerate(checks)
             if isinstance(check, Mapping)
         ]
+        if not current:
+            lines.insert(
+                0,
+                "HISTORICAL — safety results below are not current authorization.",
+            )
         self._set_text(self.safety_text, "\n".join(lines) if lines else "No safety evaluation published for this frame.")
+
+    def _render_terminal_summary(
+        self,
+        presentation: object,
+        frame: Any,
+        arduino: Mapping[str, object],
+        retained: Any,
+    ) -> None:
+        retained_only = retained if frame is None else None
+        runtime_status = str(
+            getattr(retained_only, "status", None)
+            or getattr(presentation, "runtime_status", "")
+            or ""
+        ).upper()
+        presentation_state = str(
+            getattr(getattr(presentation, "state", None), "value", "")
+        )
+        is_terminal = retained_only is not None or runtime_status in {
+            "COMPLETE",
+            "DRY_RUN",
+            "BLOCKED",
+            "LIMIT",
+            "SAFE_STOPPED",
+            "ERROR",
+        } or presentation_state in {"COMPLETE", "BLOCKED", "SAFE_STOPPED", "ERROR"}
+        if not is_terminal:
+            self.terminal_summary_var.set("No terminal run summary.")
+            return
+        if not self.keep_terminal_var.get():
+            self.terminal_summary_var.set(
+                "Terminal summary hidden by preference; the immutable frame and cleanup remain in saved status evidence."
+            )
+            return
+        cleanup = (
+            getattr(retained_only, "cleanup", None)
+            if retained_only is not None
+            else getattr(presentation, "cleanup", None)
+        )
+        frame_payload = frame.to_dict() if frame is not None else {}
+        last_execution = (
+            frame_payload.get("lastExecution")
+            if isinstance(frame_payload.get("lastExecution"), Mapping)
+            else {}
+        )
+        receipt = (
+            last_execution.get("receipt")
+            if isinstance(last_execution.get("receipt"), Mapping)
+            else {}
+        )
+        unresolved = (
+            getattr(retained_only, "unresolved_command_count", None)
+            if retained_only is not None
+            else receipt.get("unresolvedCommandCount")
+        )
+        current_lease = _first(
+            arduino,
+            "leaseStatus",
+            "lease_status",
+            default="UNKNOWN — not separately published",
+        )
+        terminal_reason = (
+            getattr(retained_only, "reason", None)
+            if retained_only is not None
+            else getattr(presentation, "terminal_reason", None)
+        )
+        terminal_outcome = (
+            getattr(retained_only, "outcome", None)
+            if retained_only is not None
+            else getattr(presentation, "terminal_outcome", None)
+        )
+
+        def cleanup_flag(name: str, yes: str, no: str) -> str:
+            value = getattr(cleanup, name, None)
+            return yes if value is True else no if value is False else "UNKNOWN"
+
+        lines = (
+            f"{runtime_status or presentation_state} — "
+            f"{terminal_reason or 'no terminal reason published'}",
+            f"Final typed outcome: {_compact_json(terminal_outcome)}",
+            "Final cleanup: "
+            f"STOP_ALL={cleanup_flag('stop_all_acknowledged', 'ACK', 'NO')}; "
+            f"DISARM={cleanup_flag('disarm_acknowledged', 'ACK', 'NO')}; "
+            f"zero held keys={cleanup_flag('zero_held_keys', 'YES', 'NO')}; "
+            f"zero held mouse buttons={cleanup_flag('zero_held_mouse_buttons', 'YES', 'NO')}; "
+            f"unresolved commands={unresolved if unresolved is not None else 'UNKNOWN'}; "
+            "final lease state=UNKNOWN — not separately published; "
+            f"ledger closed={cleanup_flag('ledger_closed', 'YES', 'NO')}; "
+            f"backend closed={cleanup_flag('backend_closed', 'YES', 'NO')}",
+            f"Current Arduino lease readiness (not final receipt): {current_lease}",
+        )
+        self.terminal_summary_var.set("\n".join(lines))
 
     def _render_events(self, events: tuple[Any, ...]) -> None:
         if events and events[-1].sequence == self._last_event_sequence:
@@ -995,20 +1307,40 @@ class OperatorWindow:
             if path:
                 self._latest_proof_path = Path(str(path)).parent if Path(str(path)).suffix else Path(str(path))
 
-    def _render_button_states(self, state: Any) -> None:
+    def _render_button_states(self, state: Any, presentation: object) -> None:
         lifecycle = state.application.lifecycle
         active_run = state.application.active_run_id is not None
         active_demo = state.application.active_capture_id is not None
         busy = set(state.busy_operations)
+        busy_details = dict(state.busy_operation_details)
+        connection_action_busy = (
+            busy_details.get("connection") not in {None, "refresh-connection"}
+        )
         idle_mode = not active_run and not active_demo and state.pending_mode is None
-        self.start_button.configure(state="normal" if idle_mode and "mode-start" not in busy else "disabled")
+        live_selected = self.mode_var.get() == "live"
+        start_ready = bool(
+            idle_mode
+            and "mode-start" not in busy
+            and (
+                not live_selected
+                or getattr(presentation, "start_live_allowed", False)
+            )
+        )
+        self.start_button.configure(
+            text="Start Live" if live_selected else "Start Observe Only",
+            state="normal" if start_ready else "disabled",
+        )
         self.pause_button.configure(state="normal" if lifecycle is LifecycleState.RUNNING else "disabled")
         self.resume_button.configure(state="normal" if lifecycle in {LifecycleState.PAUSED, LifecycleState.PAUSE_REQUESTED} else "disabled")
         self.stop_button.configure(state="normal" if active_run else "disabled")
         self.record_demo_button.configure(state="normal" if idle_mode else "disabled")
         self.stop_demo_button.configure(state="normal" if active_demo else "disabled")
-        self.launch_button.configure(state="disabled" if "connection" in busy or not idle_mode else "normal")
-        self.login_button.configure(state="disabled" if "connection" in busy or not idle_mode else "normal")
+        self.launch_button.configure(
+            state="disabled" if connection_action_busy or not idle_mode else "normal"
+        )
+        self.login_button.configure(
+            state="disabled" if connection_action_busy or not idle_mode else "normal"
+        )
         self.refresh_button.configure(state="disabled" if "connection" in busy else "normal")
 
     def _status_payload(self) -> dict[str, object]:
@@ -1017,6 +1349,8 @@ class OperatorWindow:
             "schema": GUI_PRESENTATION_SCHEMA,
             "capturedAt": datetime.now().astimezone().isoformat(),
             "application": state.application.to_dict(),
+            "presentation": _jsonable(state.presentation),
+            "terminalSummary": _jsonable(state.terminal_summary_evidence),
             "engineFrame": state.engine_frame.to_dict() if state.engine_frame else None,
             "blockers": list(state.blockers),
             "events": [
@@ -1084,6 +1418,7 @@ class OperatorWindow:
             self.controller.save_preferences(
                 arduino_port=self.arduino_var.get().strip().upper(),
                 overlay_enabled=bool(self.overlay_var.get()),
+                keep_terminal_summary_visible=bool(self.keep_terminal_var.get()),
                 geometry=self.root.geometry(),
                 update_geometry=True,
             )

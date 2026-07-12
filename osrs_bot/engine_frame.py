@@ -61,6 +61,7 @@ class ObservationReference:
     player_location: WorldPoint | None = None
     player_plane: int | None = None
     inventory: InventoryObservation | None = None
+    max_source_age_millis: int = 2_000
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_tick, int) or isinstance(self.source_tick, bool):
@@ -121,6 +122,12 @@ class ObservationReference:
                 raise TypeError(
                     "inventory items must be an immutable tuple of InventoryItem values"
                 )
+        if (
+            not isinstance(self.max_source_age_millis, int)
+            or isinstance(self.max_source_age_millis, bool)
+            or self.max_source_age_millis < 0
+        ):
+            raise ValueError("max_source_age_millis must be a non-negative integer")
 
     @classmethod
     def from_observation(cls, observation: Observation) -> "ObservationReference":
@@ -145,6 +152,7 @@ class ObservationReference:
             player_location=observation.location,
             player_plane=observation.plane,
             inventory=observation.inventory,
+            max_source_age_millis=observation.max_source_age_millis,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -167,6 +175,7 @@ class ObservationReference:
             "playerLocation": _world_point_dict(self.player_location),
             "playerPlane": self.player_plane,
             "inventory": _inventory_dict(self.inventory),
+            "maxSourceAgeMillis": self.max_source_age_millis,
         }
 
 

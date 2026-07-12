@@ -393,7 +393,28 @@ class TaskRuntime:
         )
         return self.statistics()
 
-    def run(self, *, execute: bool = False) -> RuntimeResult:
+    def run(
+        self,
+        *,
+        execute: bool = False,
+        expected_process_id: int | None = None,
+        expected_session_id: str | None = None,
+    ) -> RuntimeResult:
+        if (expected_process_id is None) != (expected_session_id is None):
+            raise ValueError(
+                "expected_process_id and expected_session_id must be supplied together"
+            )
+        if expected_process_id is not None and (
+            not isinstance(expected_process_id, int)
+            or isinstance(expected_process_id, bool)
+            or expected_process_id <= 0
+        ):
+            raise ValueError("expected_process_id must be positive or None")
+        if expected_session_id is not None and (
+            not isinstance(expected_session_id, str)
+            or not expected_session_id.strip()
+        ):
+            raise ValueError("expected_session_id must be non-empty or None")
         self._update_statistics(True, "RUNNING", None, 0, 0, None)
         self._reset_frame_state()
         self._publish_frame(EngineStage.STARTING)
@@ -407,6 +428,11 @@ class TaskRuntime:
         last_tick: int | None = None
         last_decision: Decision | None = None
         consecutive_unsent_replans = 0
+        run_identity: tuple[int, str] | None = (
+            (expected_process_id, expected_session_id)
+            if expected_process_id is not None and expected_session_id is not None
+            else None
+        )
         cursor_replan_after: tuple[
             int,
             str | None,
@@ -478,6 +504,29 @@ class TaskRuntime:
                 )
             observations += 1
             last_tick = observation.tick
+            observed_identity = (
+                (observation.client_process_id, observation.session_id)
+                if observation.client_process_id is not None
+                and observation.client_process_id > 0
+                and observation.session_id
+                else None
+            )
+            if run_identity is not None and observed_identity != run_identity:
+                return self._result(
+                    "BLOCKED",
+                    "RuneLite PID/session identity changed during the active run",
+                    observations,
+                    actions,
+                    last_tick,
+                    last_decision,
+                )
+            if run_identity is None and observed_identity is not None and (
+                observation.loaded_scene
+                and observation.fresh
+                and observation.cache_wall_clock_fresh
+                and observation.source_coherent
+            ):
+                run_identity = observed_identity
             self._update_statistics(
                 True, "RUNNING", None, observations, actions, last_tick
             )

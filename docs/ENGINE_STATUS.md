@@ -11,7 +11,28 @@ high-level `EngineApplication` facade and renders the latest `EngineFrame`; it
 does not select targets, evaluate safety, verify actions, open Arduino, or send
 raw input.
 
-The 2026-07-12 GUI acceptance at the retained fixed-client 175% layout is
+The current GUI lifecycle contract adds a presentation-only state over those
+owners: CONNECTING, READY, OBSERVING, RUNNING, PAUSED, COMPLETE, BLOCKED,
+SAFE_STOPPED, DISCONNECTED, STALE, or ERROR. Current live, Last known, and
+terminal evidence are separate. Source age uses the Observation's existing
+`maxSourceAgeMillis`; PID/session or run changes invalidate the old frame;
+Start Live requires a fresh coherent loaded current identity; and an active
+runtime blocks rather than continuing under a different PID/session.
+
+The 2026-07-12 lifecycle-truth acceptance is **PASS** for stale display,
+endpoint/process disconnect, historical labeling, disabled Start Live,
+text-only overlay clearing, new PID/session reconnect, and GUI restart without
+restored geometry. The production-action recheck is **NOT YET EVALUATED**:
+the world disconnected again after the second bounded saved-session recovery,
+before a new live run crossed its final coherent-state/handoff gate. No third
+recovery was attempted. Evidence is under
+`_run_proofs/gui_state_lifecycle/20260712T214105Z/`.
+The final deterministic gate passed 657 Python tests, golden replay 2/2, 71
+Java tests across 8 suites, the 7-test input boundary, compileall, and diff
+checks.
+
+The earlier 2026-07-12 base-GUI acceptance at the retained fixed-client 175%
+layout is
 **PASS**. Observe Only displayed a fresh loaded scene, player/inventory facts,
 and Tree `1276` without opening an input session. The bounded Start Live test
 used COM6 through the production `InputCoordinator`, counted two actions,
@@ -276,8 +297,11 @@ Regression command:
   retain the last receipt, typed outcome, derived cleanup state, and blocker.
 - The optional Windows overlay renders only EngineFrame: selected green,
   alternatives amber, optional rejected red, plus compact status text. It
-  suppresses stale geometry and verifies click-through/no-activate window
-  styles before display. Overlay failure cannot alter engine control.
+  renders rectangles only for a fresh current OBSERVING/RUNNING presentation.
+  Paused, stale, disconnected, identity-mismatched, old-run, and terminal
+  frames are text-only. Terminal banners are bounded and then reduce to a
+  non-target indicator. The host verifies click-through/no-activate window
+  styles before display; overlay failure cannot alter engine control.
 - The overlay host is the actual top-level click-through tool window, and Tcl
   creation/teardown stays on its owning thread. Live passive inspection has
   matched route progress, target/candidate status, camera outcomes,
@@ -322,8 +346,11 @@ Regression command:
   server, endpoint, or second control system.
 - The GUI uses non-daemon workers, a thread-safe result queue, generation
   tokens, current run/capture IDs, a 300-event bound, revalidated harmless
-  settings, and cooperative close. The frozen `VisionEvidence` type remains a
-  dependency-free non-authoritative seam with no model or runtime consumer.
+  settings, monotonic connection retention, and cooperative close. Its
+  presentation retains exact lifecycle/frame/identity/freshness/diagnostic
+  facts while separating current, historical, and terminal text. The frozen
+  `VisionEvidence` type remains a dependency-free non-authoritative seam with
+  no model or runtime consumer.
 
 ## Governing direction
 
@@ -719,9 +746,11 @@ the geometry condition and recovery behavior rather than source attribution.
   artifacts may omit either field.
 - There is intentionally no external profile loader, second definition, or
   generic navigation/transition framework.
-- The passive overlay renders the same latest EngineFrame as the GUI. After a
-  terminal run it can intentionally retain that last frame until disabled; it
-  is not independent proof that a later RuneLite scene is still loaded.
+- The passive overlay renders the same latest EngineFrame and presentation
+  facts as the GUI. Historical and terminal text may remain visible, but stale,
+  disconnected, identity-mismatched, and terminal target geometry is always
+  cleared; the overlay is never independent proof that a later RuneLite scene
+  is loaded.
 - The RuneLite endpoint does not expose global raw mouse-button or keyboard
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.

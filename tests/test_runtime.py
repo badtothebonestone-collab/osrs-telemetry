@@ -1567,6 +1567,34 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(0, result.actions)
         self.assertEqual([], task.applied)
 
+    def test_active_run_blocks_before_decision_when_pid_or_session_changes(self) -> None:
+        first = _observation(1)
+        changed = replace(
+            _observation(2),
+            client_process_id=4321,
+            session_id="replacement-session",
+        )
+        task = _Task([_wait(1), _wait(2)])
+        runtime = TaskRuntime(
+            _Client(first, changed),
+            task,
+            _Verifier(None),
+            configuration=replace(DEFAULT_RUNTIME_CONFIG, max_observations=2),
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(
+            execute=False,
+            expected_process_id=1234,
+            expected_session_id="runtime-session",
+        )
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("PID/session identity changed", result.reason)
+        self.assertEqual(2, result.observations)
+        self.assertEqual(1, task.decide_calls)
+        self.assertEqual(0, result.actions)
+
     def test_waiting_is_bounded_by_observation_limit(self) -> None:
         task = _Task([_wait(1), _wait(2)])
         runtime = TaskRuntime(

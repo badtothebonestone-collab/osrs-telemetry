@@ -35,6 +35,7 @@ class GuiSettings:
     overlay_enabled: bool = False
     geometry: str | None = None
     last_demo_directory: str | None = None
+    keep_terminal_summary_visible: bool = True
 
     def with_updates(self, **values: object) -> "GuiSettings":
         unknown = set(values).difference(asdict(self))
@@ -78,6 +79,7 @@ class GuiSettingsStore:
                 "profileId": settings.profile_id,
                 "arduinoPort": settings.arduino_port,
                 "overlayEnabled": settings.overlay_enabled,
+                "keepTerminalSummaryVisible": settings.keep_terminal_summary_visible,
                 "geometry": settings.geometry,
                 "lastDemonstrationDirectory": settings.last_demo_directory,
             },
@@ -89,6 +91,7 @@ class GuiSettingsStore:
             "profileId": validated.profile_id,
             "arduinoPort": validated.arduino_port,
             "overlayEnabled": validated.overlay_enabled,
+            "keepTerminalSummaryVisible": validated.keep_terminal_summary_visible,
             "geometry": validated.geometry,
             "lastDemonstrationDirectory": validated.last_demo_directory,
         }
@@ -158,6 +161,10 @@ class GuiSettingsStore:
         arduino_port = _validated_port(raw.get("arduinoPort"))
         overlay = raw.get("overlayEnabled", False)
         overlay_enabled = overlay if isinstance(overlay, bool) else False
+        keep_terminal = raw.get("keepTerminalSummaryVisible", True)
+        keep_terminal_summary_visible = (
+            keep_terminal if isinstance(keep_terminal, bool) else True
+        )
         geometry = _validated_geometry(raw.get("geometry"))
         last_demo_directory = _validated_directory(
             raw.get("lastDemonstrationDirectory")
@@ -166,6 +173,7 @@ class GuiSettingsStore:
             profile_id=profile_id,
             arduino_port=arduino_port,
             overlay_enabled=overlay_enabled,
+            keep_terminal_summary_visible=keep_terminal_summary_visible,
             geometry=geometry,
             last_demo_directory=last_demo_directory,
         )
@@ -244,6 +252,7 @@ def settings_payload(settings: GuiSettings) -> dict[str, Any]:
         "profileId": settings.profile_id,
         "arduinoPort": settings.arduino_port,
         "overlayEnabled": settings.overlay_enabled,
+        "keepTerminalSummaryVisible": settings.keep_terminal_summary_visible,
         "geometry": settings.geometry,
         "lastDemonstrationDirectory": settings.last_demo_directory,
     }

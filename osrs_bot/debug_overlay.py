@@ -5,9 +5,11 @@ import os
 import threading
 from ctypes import wintypes
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 
-from .engine_frame import EngineFrame, EngineFramePublisher
+from .engine_frame import EngineFrame, EngineFramePublisher, EngineStage
 from .model import ScreenBounds, ScreenPoint
 from .task_contract import TargetEvidence
 
@@ -17,6 +19,7 @@ ELIGIBLE_COLOR = "#e8ad32"
 REJECTED_COLOR = "#e44848"
 TEXT_COLOR = "#f1f4f8"
 BACKGROUND_COLOR = "#010203"
+TERMINAL_BANNER_SECONDS = 8.0
 
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
@@ -71,7 +74,12 @@ class PassiveWindowProof:
 
 
 def build_overlay_scene(
-    frame: EngineFrame, *, show_rejected: bool = False
+    frame: EngineFrame,
+    *,
+    show_rejected: bool = False,
+    presentation: object | None = None,
+    bound_run_id: str | None = None,
+    now: datetime | None = None,
 ) -> OverlayScene:
     """Format only the evidence already published by the runtime."""
 
@@ -80,10 +88,20 @@ def build_overlay_scene(
     if not isinstance(show_rejected, bool):
         raise TypeError("show_rejected must be bool")
 
+    current_time = now or datetime.now(timezone.utc)
+    geometry_allowed = _frame_geometry_is_live(frame, current_time)
+    if presentation is not None:
+        geometry_allowed = bool(getattr(presentation, "geometry_allowed", False))
+        presentation_run_id = getattr(presentation, "run_id", None)
+        if bound_run_id is not None and presentation_run_id != bound_run_id:
+            geometry_allowed = False
+
     rectangles: list[OverlayRectangle] = []
     selected = frame.selected_target
     selected_key = selected.key if selected is not None else None
-    selected_bounds = _current_target_bounds(frame, selected)
+    selected_bounds = (
+        _current_target_bounds(frame, selected) if geometry_allowed else None
+    )
     if selected is not None and selected_bounds is not None:
         rectangles.append(
             OverlayRectangle(selected_bounds, SELECTED_COLOR, _target_label(selected))
@@ -91,14 +109,18 @@ def build_overlay_scene(
     for target in frame.eligible_targets:
         if target.key == selected_key:
             continue
-        bounds = _current_target_bounds(frame, target)
+        bounds = _current_target_bounds(frame, target) if geometry_allowed else None
         if bounds is not None:
             rectangles.append(
                 OverlayRectangle(bounds, ELIGIBLE_COLOR, _target_label(target))
             )
     if show_rejected:
         for rejected in frame.rejected_targets:
-            bounds = _current_target_bounds(frame, rejected.target)
+            bounds = (
+                _current_target_bounds(frame, rejected.target)
+                if geometry_allowed
+                else None
+            )
             if bounds is not None:
                 label = (
                     f"{_target_label(rejected.target)} "
@@ -109,7 +131,38 @@ def build_overlay_scene(
                 )
 
     task = frame.task
+    presentation_state = _presentation_state_text(presentation)
+    age_seconds = _frame_age_seconds(frame, current_time)
+    terminal = frame.stage is EngineStage.TERMINAL or presentation_state in {
+        "COMPLETE",
+        "BLOCKED",
+        "SAFE_STOPPED",
+        "ERROR",
+    }
+    if terminal and presentation_state is None:
+        task_state = frame.task.status.value.upper()
+        presentation_state = (
+            task_state
+            if task_state in {"COMPLETE", "BLOCKED", "SAFE_STOPPED", "ERROR"}
+            else "TERMINAL"
+        )
+    terminal_age_seconds = _timestamp_age_seconds(frame.published_at, current_time)
+    if terminal and terminal_age_seconds > TERMINAL_BANNER_SECONDS:
+        return OverlayScene(
+            source_sequence=frame.sequence,
+            canvas_bounds=(
+                frame.observation.canvas_bounds
+                if frame.observation is not None
+                else None
+            ),
+            rectangles=(),
+            text_lines=(
+                f"{presentation_state or 'TERMINAL'} — terminal summary retained in operator GUI",
+            ),
+        )
+
     text = [
+        _overlay_banner(presentation_state, age_seconds, geometry_allowed),
         f"{task.task_id} | {task.state} | {task.status.value}",
         _binding_line(frame),
         (
@@ -123,7 +176,7 @@ def build_overlay_scene(
             else (
                 f"target: {_target_label(selected)} @ {_point_text(selected)}"
                 if selected_bounds is not None
-                else f"target: {_target_label(selected)} @ geometry suppressed"
+                else f"last known target: {_target_label(selected)} @ geometry suppressed"
             )
         ),
         _safety_line(frame),
@@ -256,6 +309,8 @@ class DebugOverlay:
         *,
         show_rejected: bool = False,
         poll_milliseconds: int = 100,
+        presentation_provider: Callable[[], object] | None = None,
+        bound_run_id: str | None = None,
     ) -> None:
         if not isinstance(publisher, EngineFramePublisher):
             raise TypeError("publisher must be EngineFramePublisher")
@@ -270,6 +325,8 @@ class DebugOverlay:
         self._publisher = publisher
         self._show_rejected = show_rejected
         self._poll_milliseconds = poll_milliseconds
+        self._presentation_provider = presentation_provider
+        self._bound_run_id = bound_run_id
         self._stop = threading.Event()
         self._started = threading.Event()
         self._thread: threading.Thread | None = None
@@ -352,9 +409,17 @@ class DebugOverlay:
                         root.quit()
                         return
                     frame = self._publisher.latest()
-                    if frame is not None and frame.sequence != last_sequence:
+                    if frame is not None:
+                        presentation = (
+                            self._presentation_provider()
+                            if self._presentation_provider is not None
+                            else None
+                        )
                         scene = build_overlay_scene(
-                            frame, show_rejected=self._show_rejected
+                            frame,
+                            show_rejected=self._show_rejected,
+                            presentation=presentation,
+                            bound_run_id=self._bound_run_id,
                         )
                         if scene.canvas_bounds is not None:
                             bounds = scene.canvas_bounds
@@ -481,6 +546,59 @@ def _current_target_bounds(
         ),
     )
     return bounds if all(canvas.contains(point) for point in corners) else None
+
+
+def _frame_age_seconds(frame: EngineFrame, now: datetime) -> float:
+    observation = frame.observation
+    if observation is None:
+        return float("inf")
+    return _timestamp_age_seconds(observation.captured_at, now)
+
+
+def _timestamp_age_seconds(stamp: datetime, now: datetime) -> float:
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    return max(0.0, (current - stamp).total_seconds())
+
+
+def _frame_geometry_is_live(frame: EngineFrame, now: datetime) -> bool:
+    observation = frame.observation
+    if observation is None or frame.stage is EngineStage.TERMINAL:
+        return False
+    return bool(
+        observation.loaded_scene
+        and observation.fresh
+        and observation.cache_wall_clock_fresh
+        and observation.source_coherent
+        and _frame_age_seconds(frame, now)
+        <= observation.max_source_age_millis / 1_000.0
+    )
+
+
+def _presentation_state_text(presentation: object | None) -> str | None:
+    if presentation is None:
+        return None
+    state = getattr(presentation, "state", None)
+    value = getattr(state, "value", state)
+    return str(value).upper() if value is not None else None
+
+
+def _overlay_banner(
+    presentation_state: str | None,
+    age_seconds: float,
+    geometry_allowed: bool,
+) -> str:
+    state = presentation_state or ("LIVE" if geometry_allowed else "STALE")
+    if state == "DISCONNECTED":
+        return f"DISCONNECTED — last live frame was {age_seconds:.1f} seconds ago"
+    if state == "STALE":
+        return f"STALE — last live frame was {age_seconds:.1f} seconds ago"
+    if state in {"COMPLETE", "BLOCKED", "SAFE_STOPPED", "ERROR", "TERMINAL"}:
+        return f"{state} — target geometry cleared"
+    if not geometry_allowed:
+        return f"{state} — informational text only"
+    return f"{state} — live EngineFrame"
 
 
 def _target_label(target: TargetEvidence) -> str:

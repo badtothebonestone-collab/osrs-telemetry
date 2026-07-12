@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from osrs_bot.application import (
@@ -29,7 +29,12 @@ from osrs_bot.model import (
     TargetGeometry,
 )
 from osrs_bot.observation import parse_observation
-from osrs_bot.operator_services import OverlaySnapshot, OverlayState
+from osrs_bot.operator_services import (
+    ConnectionSnapshot,
+    ConnectionState,
+    OverlaySnapshot,
+    OverlayState,
+)
 from osrs_bot.profile import DEFAULT_PROFILE
 from osrs_bot.runtime import RuntimeControl, TaskRuntime
 from osrs_bot.task_contract import Decision, ObservationRequest, TaskSnapshot, TaskStatus
@@ -196,8 +201,21 @@ class _FakeOperatorServices:
         self.calls.append(("arduino_readiness", arduino_port))
         return ("arduino", arduino_port)
 
-    def enable_overlay(self, publisher):
-        self.calls.append(("enable_overlay", publisher))
+    def enable_overlay(
+        self,
+        publisher,
+        *,
+        presentation_provider=None,
+        bound_run_id=None,
+    ):
+        self.calls.append(
+            (
+                "enable_overlay",
+                publisher,
+                presentation_provider,
+                bound_run_id,
+            )
+        )
         self.overlay_publishers.append(publisher)
         if self.fail_overlay:
             raise RuntimeError("overlay render failed")
@@ -663,6 +681,45 @@ class EngineApplicationTests(unittest.TestCase):
         self.assertIn(("recover_session", "COM7"), services.calls)
         self.assertIn(("focus_runelite_for_live_handoff",), services.calls)
 
+    def test_slow_old_connection_probe_cannot_rewind_pid_or_session(self) -> None:
+        application = EngineApplication(
+            client=_LoopClient(),
+            runtime_factory=_Factory(),
+            operator_services=_FakeOperatorServices(),
+        )
+        captured = datetime.now(timezone.utc)
+
+        def connection(moment, process_id, session_id):
+            return ConnectionSnapshot(
+                ConnectionState.CONNECTED,
+                moment,
+                True,
+                True,
+                process_id,
+                session_id,
+                True,
+                True,
+                "LOGGED_IN",
+                True,
+                True,
+                True,
+                True,
+                ScreenBounds(0, 0, 765, 503),
+                ScreenBounds(0, 0, 765, 503),
+                source_tick=10,
+                source_captured_at=moment,
+                max_source_age_millis=2_000,
+            )
+
+        newer = connection(captured + timedelta(milliseconds=10), 4321, "session-b")
+        older = connection(captured, 1234, "session-a")
+        application._retain_connection_snapshot(newer)
+        application._retain_connection_snapshot(older)
+
+        retained = application.connection_snapshot()
+        self.assertEqual(4321, retained.process_id)
+        self.assertEqual("session-b", retained.session_id)
+
     def test_operator_mutations_and_tests_are_blocked_by_active_modes(self) -> None:
         services = _FakeOperatorServices()
         factory = _Factory()
@@ -796,6 +853,57 @@ class EngineApplicationTests(unittest.TestCase):
         self.assertNotEqual(LifecycleState.ERROR, third.lifecycle)
         application.request_safe_stop(third.active_run_id)
         application.wait(third.active_run_id, 2.0)
+
+    def test_overlay_disable_never_joins_while_holding_application_lock(self) -> None:
+        class JoiningOverlayServices(_FakeOperatorServices):
+            def __init__(self):
+                super().__init__()
+                self.presentation_provider = None
+                self.provider_completed = False
+
+            def enable_overlay(
+                self,
+                publisher,
+                *,
+                presentation_provider=None,
+                bound_run_id=None,
+            ):
+                self.presentation_provider = presentation_provider
+                return super().enable_overlay(
+                    publisher,
+                    presentation_provider=presentation_provider,
+                    bound_run_id=bound_run_id,
+                )
+
+            def disable_overlay(self):
+                if self.presentation_provider is not None:
+                    worker = threading.Thread(
+                        target=lambda: (
+                            self.presentation_provider(),
+                            setattr(self, "provider_completed", True),
+                        )
+                    )
+                    worker.start()
+                    worker.join(0.5)
+                    if worker.is_alive():
+                        raise RuntimeError("overlay provider was blocked by application lock")
+                return super().disable_overlay()
+
+        services = JoiningOverlayServices()
+        application = EngineApplication(
+            client=_LoopClient(),
+            runtime_factory=_Factory(),
+            operator_services=services,
+        )
+        application.set_overlay_enabled(True)
+        run_id = application.start().active_run_id
+
+        disabled = application.set_overlay_enabled(False)
+
+        self.assertIs(disabled.state, OverlayState.DISABLED)
+        self.assertTrue(services.provider_completed)
+        application.request_safe_stop(run_id)
+        application.wait(run_id, 2.0)
 
     def test_shutdown_frontend_cooperatively_stops_and_disables_overlay(self) -> None:
         services = _FakeOperatorServices()

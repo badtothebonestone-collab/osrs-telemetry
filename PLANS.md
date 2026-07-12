@@ -226,6 +226,10 @@ runtime logic.
   preferences, retains bounded events and generation tokens, and must use
   cooperative lifecycle commands. It cannot own task, safety, verification,
   telemetry, overlay drawing, login recognition, Arduino, or raw input logic.
+  Its bounded presentation vocabulary separates current live, Last known, and
+  terminal evidence. Existing run, frame, PID/session, source-age, endpoint,
+  runtime-result, and cleanup facts determine display state; this adds no
+  second connection or control owner.
 
 ## Phases and acceptance
 
@@ -240,7 +244,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| 9. Operator GUI | Complete (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; EngineFrame status; passive overlay; demonstration and diagnostics; Computer Use visual acceptance; Arduino-only live action and authoritative cleanup. |
+| 9. Operator GUI | Base GUI complete; lifecycle truth implemented, production recheck blocked (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; current/historical/terminal EngineFrame presentation; stale/disconnected Start Live gate; identity-bound reconnect; passive overlay geometry clearing; demonstration and diagnostics. |
 | Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
@@ -461,7 +465,22 @@ runtime logic.
   Observation and task-owned fields needed by the screen. The GUI keeps only
   the newest frame for the current run and clears it when run identity ends or
   changes.
-- Computer Use exercised disconnect/connect, Observe Only, overlay, a bounded
+- Added one presentation-only lifecycle classification over application,
+  connection, and EngineFrame facts. It shows source age/tick and PID/session,
+  labels old frames as Last known, retains terminal reason/outcome/cleanup, and
+  disables Start Live until a fresh coherent loaded identity returns.
+- Bound each active runtime to its exact PID/session, rejected delayed old-run
+  snapshots, and made stale, disconnected, identity-mismatched, and terminal
+  overlay frames text-only. The terminal banner is bounded; no target geometry
+  survives it.
+- Lifecycle-truth Computer Use acceptance is PASS for stale/disconnected
+  presentation, overlay clearing, new PID/session reconnect, and restart with
+  no restored geometry. The current production-action/Safe Stop recheck is NOT
+  YET EVALUATED because a second world disconnect occurred after the second
+  bounded recovery; no third attempt was made. Evidence is under
+  `_run_proofs/gui_state_lifecycle/20260712T214105Z/`.
+- The earlier base-GUI Computer Use acceptance exercised disconnect/connect,
+  Observe Only, overlay, a bounded
   Arduino Start Live run, Pause/Resume/Safe Stop, manual demonstration
   record/inspect, and safe close/reopen. Operator actions are separated from
   engine actions in the ignored acceptance summary.
@@ -796,8 +815,9 @@ runtime logic.
   or keyboard transitions; it records RuneLite semantic click evidence and
   declares those coverage gaps in every manifest.
 - The implemented GUI remains in-process and intentionally has no daemon or IPC
-  layer. Its overlay retains the terminal run's last EngineFrame until disabled
-  and therefore is not fresh-scene proof after a later client disconnect.
+  layer. It may retain historical or terminal text, but never restores that
+  frame as current authority after restart, reconnect, run change, or source
+  expiry. The overlay clears all target geometry for those states.
 - The four-device-pixel menu correlation is proven only for the retained
   fixed-client layout on the 175% display. A different layout requires fresh
   measurement; activation authority remains at +/-3 pixels everywhere.

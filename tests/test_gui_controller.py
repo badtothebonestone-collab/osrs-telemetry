@@ -8,6 +8,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from osrs_bot.application import ApplicationSnapshot, LifecycleState
 from osrs_bot.engine_frame import EngineFramePublisher, EngineStage
@@ -131,6 +132,12 @@ class _FakeApplication:
         self.connection_error: Exception | None = None
         self.leave_run_active_on_wait = False
         self.shutdown_calls = 0
+        self.presentation_ready = True
+        self.presentation_state = "READY"
+        self.expected_process_id = None
+        self.expected_session_id = None
+        self.current_process_id = None
+        self.current_session_id = None
 
     @staticmethod
     def catalog():
@@ -153,6 +160,36 @@ class _FakeApplication:
     def runtime_configuration(self):
         self.calls.append(("runtime_configuration",))
         return {"maxActions": 100, "maxRuntimeSeconds": 900}
+
+    def frontend_presentation(self, **_values):
+        terminal = self.current.lifecycle in {
+            LifecycleState.COMPLETE,
+            LifecycleState.BLOCKED,
+            LifecycleState.ERROR,
+            LifecycleState.STOPPED,
+        }
+        return SimpleNamespace(
+            state=SimpleNamespace(value=self.presentation_state),
+            start_live_allowed=self.presentation_ready,
+            reconnect_guidance=(
+                None
+                if self.presentation_ready
+                else "wait for a fresh coherent loaded Observation"
+            ),
+            expected_process_id=self.expected_process_id,
+            expected_session_id=self.expected_session_id,
+            process_id=self.current_process_id,
+            session_id=self.current_session_id,
+            terminal_summary=terminal,
+            runtime_status=("COMPLETE" if terminal else None),
+            terminal_reason=("terminal test result" if terminal else None),
+            terminal_outcome=None,
+            cleanup=(
+                self.current.engine_frame.cleanup
+                if terminal and self.current.engine_frame is not None
+                else None
+            ),
+        )
 
     def set_arduino_port(self, port):
         self.calls.append(("set_arduino_port", port))
@@ -323,6 +360,7 @@ class GuiSettingsTests(unittest.TestCase):
                     "profileId",
                     "arduinoPort",
                     "overlayEnabled",
+                    "keepTerminalSummaryVisible",
                     "geometry",
                     "lastDemonstrationDirectory",
                 },
@@ -450,6 +488,27 @@ class GuiControllerTests(unittest.TestCase):
         self.assertTrue(live.snapshot().application.execute_requested)
         self.assertEqual("COM7", live.snapshot().settings.arduino_port)
 
+    def test_disconnected_observe_is_labeled_but_start_live_is_rejected(self) -> None:
+        observe, observe_app = self._controller()
+        observe_app.presentation_ready = False
+        observe_app.presentation_state = "DISCONNECTED"
+
+        observe.start_observe()
+        observe.wait_for_idle()
+
+        self.assertTrue(any(call[0] == "start" for call in observe_app.calls))
+        self.assertFalse(observe.snapshot().application.execute_requested)
+
+        live, live_app = self._controller()
+        live_app.presentation_ready = False
+        live_app.presentation_state = "DISCONNECTED"
+        live.start_live("COM6")
+        state = live.wait_for_idle()
+
+        self.assertFalse(any(call[0] == "start" for call in live_app.calls))
+        self.assertFalse(any(call[0] == "set_arduino_port" for call in live_app.calls))
+        self.assertTrue(any("DISCONNECTED" in blocker for blocker in state.blockers))
+
     def test_invalid_profile_never_reaches_start(self) -> None:
         controller, app = self._controller()
         values = controller.profile_values("invalid")
@@ -485,6 +544,27 @@ class GuiControllerTests(unittest.TestCase):
         self.assertIn(("request_safe_stop", "run-000002"), app.calls)
         with self.assertRaisesRegex(Exception, "no active demonstration"):
             controller.stop_demonstration()
+
+    def test_resume_refuses_a_changed_runelite_pid_or_session(self) -> None:
+        app = _FakeApplication(
+            _snapshot(
+                lifecycle=LifecycleState.PAUSED,
+                run_id="run-000002",
+                active_run_id="run-000002",
+                execute_requested=True,
+            )
+        )
+        app.expected_process_id = 1234
+        app.expected_session_id = "session-a"
+        app.current_process_id = 4321
+        app.current_session_id = "session-b"
+        controller, app = self._controller(app)
+
+        controller.resume()
+        state = controller.wait_for_idle()
+
+        self.assertFalse(any(call[0] == "resume" for call in app.calls))
+        self.assertTrue(any("PID/session changed" in value for value in state.blockers))
 
     def test_starting_run_and_demonstration_are_mutually_exclusive(self) -> None:
         app = _FakeApplication()
@@ -544,6 +624,33 @@ class GuiControllerTests(unittest.TestCase):
             {"source": "refresh-2"}, controller.snapshot().result("connection")
         )
 
+    def test_explicit_launch_supersedes_background_connection_refresh(self) -> None:
+        app = _FakeApplication()
+        app.connection_gate = threading.Event()
+        controller, _app = self._controller(app)
+        try:
+            controller.refresh_connection()
+            self.assertTrue(app.connection_entered.wait(1.0))
+            self.assertEqual(
+                "refresh-connection",
+                dict(controller.snapshot().busy_operation_details)["connection"],
+            )
+
+            controller.launch_or_connect_runelite()
+            time.sleep(0.02)
+            controller.drain_results()
+            self.assertEqual(
+                {"source": "launch"},
+                controller.snapshot().result("connection"),
+            )
+        finally:
+            app.connection_gate.set()
+            controller.wait_for_idle()
+
+        self.assertEqual(
+            {"source": "launch"}, controller.snapshot().result("connection")
+        )
+
     def test_engine_frame_updates_are_latest_only(self) -> None:
         app = _FakeApplication(_snapshot(frame=_frame(2)))
         controller, _app = self._controller(app)
@@ -558,6 +665,96 @@ class GuiControllerTests(unittest.TestCase):
         controller.request_refresh()
         controller.wait_for_idle()
         self.assertEqual(3, controller.snapshot().engine_frame.sequence)
+
+    def test_delayed_old_run_snapshot_cannot_replace_new_run_frame(self) -> None:
+        app = _FakeApplication(
+            _snapshot(
+                lifecycle=LifecycleState.RUNNING,
+                run_id="run-000002",
+                active_run_id="run-000002",
+                frame=_frame(1, state="new-run"),
+            )
+        )
+        controller, _app = self._controller(app)
+        delayed = _snapshot(
+            lifecycle=LifecycleState.COMPLETE,
+            run_id="run-000001",
+            frame=_frame(9, state="old-run"),
+        )
+
+        with controller._lock:
+            controller._apply_application_snapshot_unlocked(delayed, announce=True)
+
+        state = controller.snapshot()
+        self.assertEqual("run-000002", state.application.run_id)
+        self.assertEqual("run-000002", state.engine_frame_run_id)
+        self.assertEqual(1, state.engine_frame.sequence)
+        self.assertEqual("new-run", state.engine_frame.task.state)
+
+    def test_delayed_same_run_active_snapshot_cannot_regress_terminal_state(self) -> None:
+        app = _FakeApplication(
+            _snapshot(
+                lifecycle=LifecycleState.COMPLETE,
+                run_id="run-000002",
+                frame=_frame(4, state="terminal"),
+            )
+        )
+        controller, _app = self._controller(app)
+        delayed = _snapshot(
+            lifecycle=LifecycleState.RUNNING,
+            run_id="run-000002",
+            active_run_id="run-000002",
+            frame=_frame(3, state="old-active"),
+        )
+
+        with controller._lock:
+            controller._apply_application_snapshot_unlocked(delayed, announce=True)
+
+        state = controller.snapshot()
+        self.assertIs(state.application.lifecycle, LifecycleState.COMPLETE)
+        self.assertIsNone(state.application.active_run_id)
+        self.assertEqual(4, state.engine_frame.sequence)
+
+    def test_equal_sequence_delayed_snapshot_cannot_regress_pause_state(self) -> None:
+        frame = _frame(2)
+        running = _snapshot(
+            lifecycle=LifecycleState.RUNNING,
+            run_id="run-000001",
+            active_run_id="run-000001",
+            frame=frame,
+        )
+        paused = replace(running, lifecycle=LifecycleState.PAUSED)
+        app = _FakeApplication(running)
+        controller, _app = self._controller(app)
+
+        app.current = paused
+        with controller._lock:
+            controller._apply_application_snapshot_unlocked(running, announce=True)
+
+        self.assertIs(
+            controller.snapshot().application.lifecycle,
+            LifecycleState.PAUSED,
+        )
+
+    def test_clear_historical_display_does_not_restore_same_frame(self) -> None:
+        terminal = _snapshot(
+            lifecycle=LifecycleState.COMPLETE,
+            run_id="run-000001",
+            frame=_frame(3, state="complete"),
+        )
+        app = _FakeApplication(terminal)
+        controller, _app = self._controller(app)
+
+        retained = controller.snapshot().terminal_summary_evidence
+        self.assertIsNotNone(retained)
+
+        controller.clear_historical_display()
+        controller.request_refresh()
+        controller.wait_for_idle()
+
+        state = controller.snapshot()
+        self.assertIsNone(state.engine_frame)
+        self.assertEqual(retained, state.terminal_summary_evidence)
 
     def test_important_event_history_is_bounded(self) -> None:
         controller, _app = self._controller()

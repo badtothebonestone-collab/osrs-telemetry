@@ -423,7 +423,12 @@ class OperatorServiceInputAndOverlayTests(unittest.TestCase):
     def test_overlay_owner_reuses_and_stops_the_existing_overlay(self) -> None:
         created: list[_FakeOverlay] = []
 
-        def factory(_publisher, _show_rejected: bool):
+        def factory(
+            _publisher,
+            _show_rejected: bool,
+            _presentation_provider,
+            _bound_run_id,
+        ):
             overlay = _FakeOverlay()
             created.append(overlay)
             return overlay
@@ -440,7 +445,7 @@ class OperatorServiceInputAndOverlayTests(unittest.TestCase):
 
     def test_overlay_failure_is_visible_and_nonthrowing(self) -> None:
         owner = PassiveOverlayOwner(
-            lambda _publisher, _show_rejected: _FakeOverlay(
+            lambda _publisher, _show_rejected, _presentation, _run_id: _FakeOverlay(
                 start_error=RuntimeError("overlay exploded")
             )
         )
@@ -455,7 +460,7 @@ class OperatorServiceInputAndOverlayTests(unittest.TestCase):
         second = _FakeOverlay()
         created = [first, second]
         owner = PassiveOverlayOwner(
-            lambda _publisher, _show_rejected: created.pop(0)
+            lambda _publisher, _show_rejected, _presentation, _run_id: created.pop(0)
         )
         first_publisher = EngineFramePublisher()
         second_publisher = EngineFramePublisher()

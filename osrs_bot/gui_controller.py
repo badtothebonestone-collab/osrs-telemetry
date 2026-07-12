@@ -52,14 +52,29 @@ class GuiEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TerminalSummaryEvidence:
+    """Bounded presentation copy of terminal facts, never target geometry."""
+
+    status: str
+    reason: str | None
+    outcome: object | None
+    cleanup: object | None
+    unresolved_command_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class GuiControllerSnapshot:
     application: ApplicationSnapshot
+    presentation: object
     engine_frame: EngineFrame | None
+    engine_frame_run_id: str | None
     catalog: Mapping[str, object]
     settings: GuiSettings
     events: tuple[GuiEvent, ...]
     blockers: tuple[str, ...]
     busy_operations: tuple[str, ...]
+    busy_operation_details: tuple[tuple[str, str], ...]
+    terminal_summary_evidence: TerminalSummaryEvidence | None
     pending_mode: str | None
     close_requested: bool
     close_ready: bool
@@ -109,6 +124,7 @@ class GuiController:
         self._workers: set[threading.Thread] = set()
         self._generations: dict[str, int] = {}
         self._busy: dict[str, int] = {}
+        self._busy_operation: dict[str, str] = {}
         self._operation_errors: dict[str, str] = {}
         self._results: dict[str, object] = {}
         self._events: deque[GuiEvent] = deque(maxlen=MAX_EVENT_HISTORY)
@@ -132,7 +148,10 @@ class GuiController:
             )
         self._application_snapshot = initial
         self._engine_frame: EngineFrame | None = None
+        self._engine_frame_run_id: str | None = None
+        self._cleared_frame_key: tuple[str | None, int] | None = None
         self._frame_signature: tuple[object, ...] | None = None
+        self._terminal_summary_evidence: TerminalSummaryEvidence | None = None
         self._apply_application_snapshot_unlocked(initial, announce=False)
         self._record_event_unlocked("controller", "READY", "GUI controller ready")
 
@@ -151,14 +170,45 @@ class GuiController:
             if self._engine_frame is not None and self._engine_frame.blocker:
                 blockers.append(self._engine_frame.blocker)
             blockers.extend(self._operation_errors.values())
+            presentation = self._application.frontend_presentation(
+                application_snapshot=self._application_snapshot,
+                frame=self._engine_frame,
+                frame_run_id=self._engine_frame_run_id,
+                use_application_frame=False,
+            )
+            if (
+                getattr(presentation, "terminal_summary", False)
+                and self._engine_frame is not None
+            ):
+                receipt = self._engine_frame.last_execution_receipt
+                state = getattr(getattr(presentation, "state", None), "value", None)
+                self._terminal_summary_evidence = TerminalSummaryEvidence(
+                    status=str(
+                        getattr(presentation, "runtime_status", None)
+                        or state
+                        or "TERMINAL"
+                    ),
+                    reason=getattr(presentation, "terminal_reason", None),
+                    outcome=getattr(presentation, "terminal_outcome", None),
+                    cleanup=getattr(presentation, "cleanup", None),
+                    unresolved_command_count=(
+                        receipt.unresolved_command_count
+                        if receipt is not None
+                        else None
+                    ),
+                )
             return GuiControllerSnapshot(
                 application=self._application_snapshot,
+                presentation=presentation,
                 engine_frame=self._engine_frame,
+                engine_frame_run_id=self._engine_frame_run_id,
                 catalog=self._catalog,
                 settings=self._settings,
                 events=tuple(self._events),
                 blockers=tuple(dict.fromkeys(blockers)),
                 busy_operations=tuple(sorted(self._busy)),
+                busy_operation_details=tuple(sorted(self._busy_operation.items())),
+                terminal_summary_evidence=self._terminal_summary_evidence,
                 pending_mode=self._pending_mode,
                 close_requested=self._close_requested,
                 close_ready=self._close_ready,
@@ -192,6 +242,7 @@ class GuiController:
         profile_id: str | None = None,
         arduino_port: str | None = None,
         overlay_enabled: bool | None = None,
+        keep_terminal_summary_visible: bool | None = None,
         geometry: str | None = None,
         last_demo_directory: str | None = None,
         update_geometry: bool = False,
@@ -204,6 +255,8 @@ class GuiController:
             updates["arduino_port"] = arduino_port
         if overlay_enabled is not None:
             updates["overlay_enabled"] = overlay_enabled
+        if keep_terminal_summary_visible is not None:
+            updates["keep_terminal_summary_visible"] = keep_terminal_summary_visible
         if update_geometry:
             updates["geometry"] = geometry
         if update_last_demo_directory:
@@ -243,6 +296,26 @@ class GuiController:
         with self._lock:
             self._record_event_unlocked(kind.strip(), status.strip(), message.strip())
 
+    def clear_historical_display(self) -> None:
+        """Clear only retained frontend evidence; never mutate engine truth."""
+
+        with self._lock:
+            if self._application_snapshot.active_run_id is not None:
+                raise GuiControllerBusyError(
+                    "historical display cannot be cleared during an active run"
+                )
+            if self._engine_frame is not None:
+                self._cleared_frame_key = (
+                    self._engine_frame_run_id,
+                    self._engine_frame.sequence,
+                )
+            self._engine_frame = None
+            self._engine_frame_run_id = None
+            self._frame_signature = None
+            self._record_event_unlocked(
+                "history", "COMPLETE", "Historical frame display cleared"
+            )
+
     def request_refresh(self) -> OperationTicket:
         with self._lock:
             existing = self._busy.get("refresh")
@@ -257,6 +330,11 @@ class GuiController:
         )
 
     def refresh_connection(self) -> OperationTicket:
+        with self._lock:
+            existing = self._busy.get("connection")
+            existing_operation = self._busy_operation.get("connection")
+            if existing is not None and existing_operation != "refresh-connection":
+                return OperationTicket("connection", existing, existing_operation or "connection")
         return self._facade_result(
             "connection",
             "refresh-connection",
@@ -296,6 +374,7 @@ class GuiController:
             "launch-or-connect-runelite",
             "connection",
             self._application.launch_or_connect_runelite,
+            replace_existing=True,
         )
 
     def login_or_recover(
@@ -325,7 +404,9 @@ class GuiController:
                 settings_patch=settings_patch,
             )
 
-        return self._submit("connection", "login-or-recover", worker)
+        return self._submit(
+            "connection", "login-or-recover", worker, replace_existing=True
+        )
 
     def request_arduino_readiness(self, arduino_port: str) -> OperationTicket:
         if not isinstance(arduino_port, str) or not arduino_port.strip():
@@ -372,6 +453,22 @@ class GuiController:
 
         def worker(_report: _Reporter) -> _OperationValue:
             self._application.prepare_live_handoff()
+            presentation = self._application.frontend_presentation()
+            expected_process_id = getattr(presentation, "expected_process_id", None)
+            expected_session_id = getattr(presentation, "expected_session_id", None)
+            if (
+                expected_process_id is not None
+                and expected_session_id is not None
+                and (
+                    getattr(presentation, "process_id", None) != expected_process_id
+                    or getattr(presentation, "session_id", None)
+                    != expected_session_id
+                )
+            ):
+                raise GuiControllerError(
+                    "Resume refused because RuneLite PID/session changed; "
+                    "start a new run after fresh reconciliation"
+                )
             return _OperationValue(application=self._application.resume(run_id))
 
         return self._submit(
@@ -632,6 +729,7 @@ class GuiController:
                         == result.ticket.generation
                     ):
                         self._busy.pop(result.ticket.channel, None)
+                        self._busy_operation.pop(result.ticket.channel, None)
                 if result.error is not None:
                     self._operation_errors[result.ticket.channel] = result.error
                     if result.ticket.operation in {
@@ -720,9 +818,27 @@ class GuiController:
                 settings_patch.append(("profile_id", profile_id))
             if execute:
                 assert arduino_port is not None
+                self._application.refresh_connection()
+                readiness = self._application.frontend_presentation()
+                if not bool(getattr(readiness, "start_live_allowed", False)):
+                    state = getattr(getattr(readiness, "state", None), "value", "NOT_READY")
+                    reason = getattr(readiness, "reconnect_guidance", None)
+                    raise GuiControllerError(
+                        f"Start Live requires fresh coherent RuneLite state; {state}: "
+                        f"{reason or 'refresh the connection and try again'}"
+                    )
                 self._application.set_arduino_port(arduino_port)
                 settings_patch.append(("arduino_port", arduino_port))
                 self._application.prepare_live_handoff()
+                handed_off = self._application.frontend_presentation()
+                if not bool(getattr(handed_off, "start_live_allowed", False)):
+                    state = getattr(
+                        getattr(handed_off, "state", None), "value", "NOT_READY"
+                    )
+                    raise GuiControllerError(
+                        "Start Live handoff lost fresh coherent RuneLite state; "
+                        f"{state}"
+                    )
             started = self._application.start(
                 profile_values=values,
                 execute=execute,
@@ -779,6 +895,7 @@ class GuiController:
             generation = self._generations.get(channel, 0) + 1
             self._generations[channel] = generation
             self._busy[channel] = generation
+            self._busy_operation[channel] = operation
             ticket = OperationTicket(channel, generation, operation)
             if not quiet:
                 self._record_event_unlocked(
@@ -831,20 +948,37 @@ class GuiController:
     ) -> None:
         if not isinstance(snapshot, ApplicationSnapshot):
             raise TypeError("facade operation did not return ApplicationSnapshot")
+        authoritative = self._application.snapshot()
+        if not isinstance(authoritative, ApplicationSnapshot):
+            raise TypeError("EngineApplication.snapshot() must return ApplicationSnapshot")
+        if not _snapshot_precedes(authoritative, snapshot):
+            # A worker result is only a captured view.  Reconcile it with the
+            # current facade snapshot so an equal-sequence delayed callback
+            # cannot undo Pause, Resume, Safe Stop, or a terminal transition.
+            snapshot = authoritative
         previous = getattr(self, "_application_snapshot", None)
+        if previous is not None and _snapshot_precedes(snapshot, previous):
+            return
         if previous is not None and snapshot.run_id != previous.run_id:
             self._engine_frame = None
+            self._engine_frame_run_id = None
             self._frame_signature = None
+            self._cleared_frame_key = None
         self._application_snapshot = snapshot
         frame = snapshot.engine_frame
         if frame is not None:
             if not isinstance(frame, EngineFrame):
                 raise TypeError("application snapshot engine_frame must be EngineFrame")
-            if (
+            frame_key = (snapshot.run_id, frame.sequence)
+            if frame_key == self._cleared_frame_key:
+                frame = None
+            if frame is not None and (
                 self._engine_frame is None
+                or self._engine_frame_run_id != snapshot.run_id
                 or frame.sequence > self._engine_frame.sequence
             ):
                 self._engine_frame = frame
+                self._engine_frame_run_id = snapshot.run_id
                 signature = (
                     frame.stage,
                     frame.task.status,
@@ -915,3 +1049,48 @@ class GuiController:
 def _error_text(error: Exception) -> str:
     detail = str(error).strip()
     return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+
+
+def _snapshot_precedes(
+    candidate: ApplicationSnapshot,
+    current: ApplicationSnapshot,
+) -> bool:
+    """Reject delayed snapshots from an older monotonic run or capture."""
+
+    candidate_run = _numeric_operation_id(candidate.run_id, "run-")
+    current_run = _numeric_operation_id(current.run_id, "run-")
+    if candidate_run is not None and current_run is not None:
+        if candidate_run < current_run:
+            return True
+        if candidate_run == current_run:
+            candidate_sequence = (
+                candidate.engine_frame.sequence
+                if candidate.engine_frame is not None
+                else 0
+            )
+            current_sequence = (
+                current.engine_frame.sequence if current.engine_frame is not None else 0
+            )
+            if candidate_sequence < current_sequence:
+                return True
+            if current.active_run_id is None and candidate.active_run_id is not None:
+                return True
+    candidate_capture = _numeric_operation_id(candidate.capture_id, "demo-")
+    current_capture = _numeric_operation_id(current.capture_id, "demo-")
+    if candidate_capture is not None and current_capture is not None:
+        return candidate_capture < current_capture
+    if (
+        candidate.started_at is not None
+        and current.started_at is not None
+        and candidate.started_at < current.started_at
+        and (candidate.run_id != current.run_id or candidate.capture_id != current.capture_id)
+    ):
+        return True
+    return False
+
+
+def _numeric_operation_id(value: str | None, prefix: str) -> int | None:
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    suffix = value[len(prefix) :]
+    return int(suffix) if suffix.isdigit() else None

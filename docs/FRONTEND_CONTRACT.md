@@ -114,6 +114,50 @@ step, simultaneous route/cycle progress, and selected target world
 location/distance. The GUI formats these values; it never queries or
 reconstructs them independently.
 
+## Presentation lifecycle
+
+The frontend derives one immutable presentation-only classification from the
+current `ApplicationSnapshot`, its run ID, the accepted latest `EngineFrame`,
+the latest accepted `ConnectionSnapshot`, and current time:
+
+```text
+CONNECTING READY OBSERVING RUNNING PAUSED COMPLETE BLOCKED SAFE_STOPPED
+DISCONNECTED STALE ERROR
+```
+
+This classifier owns no worker, endpoint, lifecycle transition, task state, or
+control decision. Every view retains the underlying lifecycle, run/frame
+association, EngineFrame stage/task status, PID/session, source tick/capture
+time and age, runtime reason, blocker/diagnostic, typed outcome, and cleanup.
+It may decide only whether evidence is current, historical, terminal, eligible
+for display geometry, or sufficient to enable Start Live.
+
+Frame age and connection age are evaluated separately against the exact
+`maxSourceAgeMillis` carried by their Observation facts. A frame becomes STALE
+as wall time advances even if no later HTTP response arrives. A freshly rendered
+widget or a fresh connection probe cannot refresh the older frame.
+
+Current live evidence requires matching run ID, exact PID/session, healthy
+endpoint, loaded coherent Observation, and in-contract frame/connection age.
+Anything else is retained only as a clearly labeled Last known frame. A newer
+fresh connection may become READY while an older terminal frame remains a
+separate historical summary; the old frame cannot overwrite the new connection
+or restore geometry.
+
+Start Live is allowed only from a fresh, loaded, coherent, exact current
+PID/session connection. An active run pins its first exact coherent
+PID/session. Runtime blocks if later Observations change that identity, and
+Resume refuses a replacement identity. Reconnection therefore requires an
+explicit new run after a fresh coherent Observation rather than attaching the
+old run to a new client.
+
+Terminal COMPLETE, BLOCKED, SAFE_STOPPED, and ERROR presentations retain the
+runtime reason, final typed outcome, exact receipt counters, and cleanup proof.
+They never retain active target geometry. `Keep terminal summary visible` may
+retain that GUI text; `Clear Historical Display` clears only frontend-retained
+frame/target detail while a bounded receipt-only terminal summary remains; it
+cannot alter the application, runtime, receipt, or cleanup owners.
+
 ## Operator services
 
 High-level operator operations remain beneath `EngineApplication`:
@@ -143,9 +187,12 @@ operator status is not input authorization.
 Immediately before Start Live and Resume, `prepare_live_handoff()` binds and
 focuses only the exact telemetry-owning RuneLite process/root window, then
 waits boundedly for foreground telemetry. It neither moves/resizes RuneLite nor
-sends gameplay input. A failed handoff blocks the GUI operation. Pause and Safe
-Stop set the current runtime control synchronously before their result-adapter
-workers wait, so clicking the GUI cannot race the worker's foreground check.
+sends gameplay input. Start Live additionally requires the presentation
+freshness gate before and after handoff. Resume requires the handoff identity to
+equal the active run binding. A failed or changed handoff blocks the GUI
+operation. Pause and Safe Stop set the current runtime control synchronously
+before their result-adapter workers wait, so clicking the GUI cannot race the
+worker's foreground check.
 
 ## Demonstration lifecycle
 
@@ -203,16 +250,20 @@ The screen consumes these exact contracts:
   count, and other unsupported goals until a validated profile field exists.
 - **Arduino port:** runtime configuration shown only for execute mode.
 - **Start:** revalidate profile and runtime configuration, focus the exact
-  RuneLite binding for live mode, then retain `run_id`.
+  RuneLite binding for live mode, require a fresh coherent loaded Observation,
+  then retain `run_id` and the bound PID/session.
 - **Pause/Resume:** send only the current `run_id`; distinguish requested from
   acknowledged pause, and repeat the exact focus handoff before live Resume.
 - **Safe Stop:** send only the current `run_id` and display requested state until
   `SAFE_STOPPED` or another terminal result.
 - **Live state and safety:** render exact EngineFrame sequence, task state,
   selected/eligible/rejected evidence, ordered safety checks, pending/last
-  verification, blocker, receipt, and cleanup.
+  verification, blocker, receipt, and cleanup; label non-current evidence as
+  Last known rather than live.
 - **Overlay toggle:** requests only the existing passive overlay owner, bound to
-  the current run's EngineFrame publisher; it never changes engine control.
+  the current run's EngineFrame publisher. Fresh live frames may show existing
+  geometry; stale, disconnected, terminal, identity-mismatched, or old-run
+  frames are text-only. It never changes engine control.
 - **Record/End Demonstration:** use `capture_id` and remain mutually exclusive
   with automation.
 - **Recent run summary:** render stored runtime statistics/result, not a frame
@@ -224,12 +275,16 @@ target, or input state. It must reobserve and revalidate.
 
 Long work runs on non-daemon worker threads behind a result queue. Only the Tk
 thread applies results to widgets. Per-channel generation tokens discard stale
-callbacks; EngineFrame freshness is keyed to the current run ID plus monotonic
-frame sequence. Important events are bounded to 300 entries.
+callbacks; monotonic run/capture IDs and publisher-local frame sequence reject
+older snapshots, including delayed callbacks after a new run. Connection
+snapshots are retained monotonically by their existing capture time. Important
+events are bounded to 300 entries.
 
 The ignored `.osrs-telemetry/gui-settings.json` stores only revalidated profile
-ID, Arduino port, overlay preference, window geometry, and last demonstration
-directory. A Windows process mutex prevents a second operator GUI instance.
+ID, Arduino port, overlay preference, terminal-summary visibility, window
+geometry, and last demonstration directory. It never stores a run/capture ID,
+frame, PID/session, target, or geometry. A Windows process mutex prevents a
+second operator GUI instance.
 Closing during a run requests cooperative Safe Stop and waits up to the bounded
 frontend shutdown interval; it never kills an unresolved engine worker.
 

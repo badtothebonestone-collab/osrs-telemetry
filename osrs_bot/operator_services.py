@@ -87,6 +87,9 @@ class ConnectionSnapshot:
     client_bounds: ScreenBounds | None
     blocker: str | None = None
     diagnostic: str | None = None
+    source_tick: int | None = None
+    source_captured_at: datetime | None = None
+    max_source_age_millis: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,6 +111,13 @@ class ConnectionSnapshot:
             "clientBounds": _bounds_dict(self.client_bounds),
             "blocker": self.blocker,
             "diagnostic": self.diagnostic,
+            "sourceTick": self.source_tick,
+            "sourceCapturedAtUtc": (
+                self.source_captured_at.isoformat()
+                if self.source_captured_at is not None
+                else None
+            ),
+            "maxSourceAgeMillis": self.max_source_age_millis,
         }
 
 
@@ -303,7 +313,10 @@ class PassiveOverlayOwner:
 
     def __init__(
         self,
-        factory: Callable[[EngineFramePublisher, bool], _Overlay],
+        factory: Callable[
+            [EngineFramePublisher, bool, Callable[[], object] | None, str | None],
+            _Overlay,
+        ],
     ) -> None:
         if not callable(factory):
             raise TypeError("overlay factory must be callable")
@@ -312,6 +325,8 @@ class PassiveOverlayOwner:
         self._state_lock = threading.Lock()
         self._overlay: _Overlay | None = None
         self._publisher: EngineFramePublisher | None = None
+        self._presentation_provider: Callable[[], object] | None = None
+        self._bound_run_id: str | None = None
         self._state = OverlayState.DISABLED
         self._error: str | None = None
 
@@ -325,6 +340,8 @@ class PassiveOverlayOwner:
         *,
         show_rejected: bool = False,
         timeout_seconds: float = 3.0,
+        presentation_provider: Callable[[], object] | None = None,
+        bound_run_id: str | None = None,
     ) -> OverlaySnapshot:
         if not isinstance(publisher, EngineFramePublisher):
             raise TypeError("publisher must be EngineFramePublisher")
@@ -332,6 +349,8 @@ class PassiveOverlayOwner:
             if (
                 self._overlay is not None
                 and self._publisher is publisher
+                and self._presentation_provider is presentation_provider
+                and self._bound_run_id == bound_run_id
                 and self.snapshot().state is OverlayState.ACTIVE
             ):
                 return self.snapshot()
@@ -342,7 +361,12 @@ class PassiveOverlayOwner:
             self._set_state(OverlayState.STARTING, None)
             overlay: _Overlay | None = None
             try:
-                overlay = self._factory(publisher, bool(show_rejected))
+                overlay = self._factory(
+                    publisher,
+                    bool(show_rejected),
+                    presentation_provider,
+                    bound_run_id,
+                )
                 overlay.start(timeout_seconds=float(timeout_seconds))
             except Exception as error:
                 cleanup_error: str | None = None
@@ -353,6 +377,10 @@ class PassiveOverlayOwner:
                         cleanup_error = _error_text(raised)
                 self._overlay = overlay if cleanup_error is not None else None
                 self._publisher = publisher if cleanup_error is not None else None
+                self._presentation_provider = (
+                    presentation_provider if cleanup_error is not None else None
+                )
+                self._bound_run_id = bound_run_id if cleanup_error is not None else None
                 detail = _error_text(error)
                 if cleanup_error is not None:
                     detail = f"{detail}; cleanup: {cleanup_error}"
@@ -360,6 +388,8 @@ class PassiveOverlayOwner:
             else:
                 self._overlay = overlay
                 self._publisher = publisher
+                self._presentation_provider = presentation_provider
+                self._bound_run_id = bound_run_id
                 self._set_state(OverlayState.ACTIVE, None)
             return self.snapshot()
 
@@ -371,6 +401,8 @@ class PassiveOverlayOwner:
         overlay = self._overlay
         if overlay is None:
             self._publisher = None
+            self._presentation_provider = None
+            self._bound_run_id = None
             self._set_state(OverlayState.DISABLED, None)
             return self.snapshot()
         self._set_state(OverlayState.STOPPING, None)
@@ -382,6 +414,8 @@ class PassiveOverlayOwner:
         else:
             self._overlay = None
             self._publisher = None
+            self._presentation_provider = None
+            self._bound_run_id = None
             self._set_state(OverlayState.DISABLED, None)
         return self.snapshot()
 
@@ -414,7 +448,11 @@ class OperatorServices:
         lease_reader: Callable[[str], Mapping[str, Any]] = read_arduino_lease_status,
         coordinator_factory: Callable[[str], Any] | None = None,
         login_helper_factory: Callable[[Any, Any], Any] = LoginPromptHelper,
-        overlay_factory: Callable[[EngineFramePublisher, bool], _Overlay] | None = None,
+        overlay_factory: Callable[
+            [EngineFramePublisher, bool, Callable[[], object] | None, str | None],
+            _Overlay,
+        ]
+        | None = None,
         process_runner: _ProcessRunner | None = None,
         plugin_launcher: Callable[[Path, Path], _LaunchHandle] | None = None,
         now: Callable[[], datetime] | None = None,
@@ -617,6 +655,9 @@ class OperatorServices:
             client_bounds,
             blocker,
             "; ".join(diagnostics) or None,
+            observation.tick,
+            observation.timestamp,
+            observation.max_source_age_millis,
         )
 
     def launch_or_connect_runelite(
@@ -820,11 +861,15 @@ class OperatorServices:
         *,
         show_rejected: bool = False,
         timeout_seconds: float = 3.0,
+        presentation_provider: Callable[[], object] | None = None,
+        bound_run_id: str | None = None,
     ) -> OverlaySnapshot:
         return self._overlay_owner.enable(
             publisher,
             show_rejected=show_rejected,
             timeout_seconds=timeout_seconds,
+            presentation_provider=presentation_provider,
+            bound_run_id=bound_run_id,
         )
 
     def disable_overlay(self, *, timeout_seconds: float = 3.0) -> OverlaySnapshot:
@@ -1105,10 +1150,17 @@ def _launch_plugin(repo_root: Path, log_path: Path) -> _LaunchHandle:
 def _default_overlay_factory(
     publisher: EngineFramePublisher,
     show_rejected: bool,
+    presentation_provider: Callable[[], object] | None,
+    bound_run_id: str | None,
 ) -> _Overlay:
     from .debug_overlay import DebugOverlay
 
-    return DebugOverlay(publisher, show_rejected=show_rejected)
+    return DebugOverlay(
+        publisher,
+        show_rejected=show_rejected,
+        presentation_provider=presentation_provider,
+        bound_run_id=bound_run_id,
+    )
 
 
 def _available_serial_ports() -> tuple[str, ...]:

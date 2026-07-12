@@ -196,6 +196,7 @@ class Observation:
     menu_process_id: int | None = None
     camera_yaw: int | None = None
     camera_pitch: int | None = None
+    max_source_age_millis: int = 2_000
 
     @property
     def loaded_scene(self) -> bool:

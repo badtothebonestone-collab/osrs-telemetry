@@ -16,6 +16,7 @@ from .model import PlayerObservation, ScreenBounds, ScreenPoint, TargetGeometry,
 
 RESPONSE_SCHEMA = "plugin_snapshot_response.v2"
 SENSOR_FRAME_SCHEMA = "sensor_frame.v1"
+MAX_SOURCE_AGE_MILLIS = 2_000
 MAX_TILE_PROJECTIONS = 16
 CORE_FACT_NEEDS = ("baseline", "inventory", "activity", "bank_ui", "dialogue_state")
 CANONICAL_NEEDS = ("baseline", "inventory", "activity", "interaction_hot",
@@ -170,7 +171,7 @@ def build_snapshot_request(tile_projections: Iterable[tuple[str, WorldPoint]] | 
     request: dict[str, Any] = {
         "schema": "plugin_snapshot_request.v1", "needs": list(CANONICAL_NEEDS),
         "snapshotTier": "hot", "responseMode": "compact", "maxAgeTicks": 0,
-        "maxSourceAgeMillis": 2000,
+        "maxSourceAgeMillis": MAX_SOURCE_AGE_MILLIS,
         "includeGeometry": True, "includeCollisionWindow": False, "includeWatchValues": False,
         "includeMenuEntries": True, "menuEntryLimit": 16, "maxClientTickSamples": 0,
         "maxMenuSamples": 0, "maxClickedSamples": 0,
@@ -837,7 +838,8 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
                        source_coherent=source_coherent, menu_fresh=menu_fresh,
                        menu_source_tick=menu_source_tick, menu_timestamp=menu_timestamp,
                        menu_session_id=menu_session_id, menu_process_id=menu_process_id,
-                       camera_yaw=camera_yaw, camera_pitch=camera_pitch)
+                       camera_yaw=camera_yaw, camera_pitch=camera_pitch,
+                       max_source_age_millis=max_source_age_millis)
 
 class ObservationClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8893", *, auth_token: str | None = None,

@@ -41,6 +41,14 @@ The Run tab shows text and color for each preflight item:
 `UNKNOWN` means the application does not yet have enough evidence. It does not
 mean ready.
 
+The badge at the top is a presentation classification over the application,
+connection, and latest EngineFrame facts: **CONNECTING**, **READY**,
+**OBSERVING**, **RUNNING**, **PAUSED**, **COMPLETE**, **BLOCKED**,
+**SAFE_STOPPED**, **DISCONNECTED**, **STALE**, or **ERROR**. The screen also
+shows the underlying run ID, EngineFrame stage/task status, source tick,
+PID/session, last live update, and frame age; the friendly badge never replaces
+the original blocker or diagnostic code.
+
 ## Connect RuneLite
 
 1. Select **Launch / Connect RuneLite**.
@@ -48,7 +56,8 @@ mean ready.
    to launch a duplicate.
 3. Otherwise, the GUI uses the existing `run.cmd plugin` launch path and waits
    boundedly for endpoint and process binding.
-4. Select **Refresh Status** after changing the game or window state.
+4. The GUI refreshes the existing connection status automatically. **Refresh
+   Status** remains available when an immediate operator check is useful.
 
 **Login / Recover Session** invokes the existing saved-session login helper.
 It can handle only the supported authenticated prompts and uses the configured
@@ -88,6 +97,13 @@ Cleanup therefore displays **Not required in Observe Only**, not failure.
    state, and current blocker in the single confirmation.
 4. Select **Yes** to start.
 
+**Start Live** remains disabled until the existing endpoint reports one loaded,
+coherent Observation that is still inside its authoritative source-age limit
+and is bound to one exact current RuneLite PID/session. A newly assembled GUI
+update does not make an old Observation fresh. After an endpoint, process, or
+session change, wait for the new identity and a fresh loaded Observation; the
+old frame remains historical and cannot satisfy the gate.
+
 For Start Live and Resume, the GUI first focuses only the exact
 telemetry-owning RuneLite window and waits briefly for foreground proof. A
 failed handoff blocks instead of sending gameplay input.
@@ -100,7 +116,9 @@ and authoritative cleanup.
 
 - **Pause** first shows *requested*. It becomes *paused* only after the runtime
   acknowledges a no-input boundary.
-- **Resume** uses the exact current run ID.
+- **Resume** uses the exact current run ID and refuses a RuneLite PID/session
+  different from the one bound to that run. Restart only after fresh explicit
+  reconciliation; an old run is not attached to a replacement client.
 - **Safe Stop** is cooperative. If an action is in flight, the GUI waits for
   its input transaction, verification, typed transition, and cleanup.
 - **Safe Stop completed** means the engine reached a terminal safe-stop state.
@@ -111,6 +129,26 @@ and authoritative cleanup.
 Closing the window during a run requests the same Safe Stop and leaves the GUI
 visible while it waits. A bounded timeout is shown as an unresolved failure;
 the GUI never silently kills the worker.
+
+## Current, historical, and terminal status
+
+- **Current live frame** means run ID, PID/session, endpoint health, loaded
+  scene, coherence, and source age all still match. Only this category may
+  show live target geometry.
+- **Last known frame** is retained text from an older, stale, disconnected, or
+  identity-mismatched frame. Its target, safety, verification, and location are
+  labeled historical and do not authorize a current action.
+- **Terminal summary** retains COMPLETE, BLOCKED, SAFE_STOPPED, or ERROR reason,
+  final typed outcome, and final cleanup after target geometry is cleared.
+
+**DISCONNECTED** means the endpoint, process, exact identity, or loaded scene
+is unavailable. **STALE** means the displayed Observation aged beyond the same
+source-freshness contract used by the engine, even if no new HTTP response
+arrived. Both states disable Start Live and clear actionable overlay geometry.
+Use **Clear Historical Display** to remove retained Last known frame/target
+detail; a compact receipt-only terminal summary remains. It does not mutate
+engine truth. **Keep terminal summary visible** controls GUI text retention and
+never keeps target geometry active.
 
 ## Passive overlay
 
@@ -123,9 +161,13 @@ draws only the current EngineFrame:
 - text: current state, safety, verification, outcome, and blocker.
 
 Disabling or failing the overlay does not stop or change engine control.
-The overlay shows the last published EngineFrame. After a run has ended, that
-frame can remain visible until the overlay is disabled; it is not proof that a
-later RuneLite scene is still loaded.
+For a fresh current OBSERVING/RUNNING frame, the overlay may draw the existing
+target/candidate rectangles. PAUSED is text-only. STALE or DISCONNECTED clears
+all rectangles and shows an age-bearing text banner. COMPLETE, BLOCKED,
+SAFE_STOPPED, or ERROR clears all rectangles immediately, shows a compact
+terminal banner for a bounded period, and then leaves only a non-target
+terminal indicator. Closing the GUI or disabling the overlay stops its sole
+window/worker; terminal cleanup remains in the GUI status even after that.
 
 ## Demonstrations
 
@@ -159,6 +201,10 @@ Folder** on Live Status when support evidence is needed.
 
 ## Common blockers
 
+- **Disconnected:** launch or reconnect RuneLite, then wait for an exact new
+  PID/session and one fresh coherent loaded Observation.
+- **Stale frame:** do not use the last-known target or safety result; wait for a
+  new in-contract Observation.
 - **RuneLite is not running:** use Launch / Connect RuneLite.
 - **Log in and enter a loaded scene:** finish saved-session setup, then Refresh
   Status.
