@@ -1115,6 +1115,36 @@ class DpiAwarenessTests(unittest.TestCase):
         self.assertFalse(login_module._DPI_AWARENESS_SET)
 
 
+class FindRuneLiteWindowTests(unittest.TestCase):
+    @unittest.skipUnless(
+        hasattr(login_module.ctypes, "WINFUNCTYPE"),
+        "Win32 callback types are available only on Windows",
+    )
+    def test_enum_windows_uses_the_shared_win32_callback_signature(self) -> None:
+        callback_type = login_module.ctypes.WINFUNCTYPE(
+            login_module.wintypes.BOOL,
+            login_module.wintypes.HWND,
+            login_module.wintypes.LPARAM,
+        )
+        enum_windows_type = login_module.ctypes.WINFUNCTYPE(
+            login_module.wintypes.BOOL,
+            callback_type,
+            login_module.wintypes.LPARAM,
+        )
+
+        @enum_windows_type
+        def enum_windows(_callback, _value):
+            return True
+
+        with patch.object(
+            login_module,
+            "_user32",
+            return_value=SimpleNamespace(EnumWindows=enum_windows),
+        ):
+            with self.assertRaisesRegex(LoginSafetyError, "found 0"):
+                login_module.find_runelite_window(12345)
+
+
 class FocusExactWindowTests(unittest.TestCase):
     @staticmethod
     def _patch_focus(

@@ -1,13 +1,14 @@
 # Frontend and Application Facade Contract
 
-`EngineApplication` is the one thin composition boundary for a future desktop
+`EngineApplication` is the one thin composition boundary for the desktop
 frontend. It constructs the existing task/runtime path and exposes immutable
 catalog, lifecycle, diagnostic, statistics, blocker, and demonstration values.
 It does not select targets, interpret routes, run safety checks, verify actions,
 or own input.
 
-There is no GUI, service, IPC protocol, plugin loader, or long-lived command
-daemon in this milestone.
+The implemented Tkinter/ttk GUI runs in-process through `run.cmd gui`. It adds
+no service, IPC protocol, plugin loader, web server, or long-lived command
+daemon.
 
 ## Catalog and profile contract
 
@@ -106,6 +107,46 @@ a cross-owner atomic sensor frame. The application lifecycle and EngineFrame
 stage are intentionally separate: lifecycle says whether a frontend command is
 pending or acknowledged; EngineFrame remains engine diagnostic truth.
 
+The additive EngineFrame presentation values now retain exact same-Observation
+game state, loaded-scene/focus/freshness/coherence, player location/plane, and
+immutable inventory. Task-owned evidence additionally retains current route
+step, simultaneous route/cycle progress, and selected target world
+location/distance. The GUI formats these values; it never queries or
+reconstructs them independently.
+
+## Operator services
+
+High-level operator operations remain beneath `EngineApplication`:
+
+```python
+app.refresh_connection()
+app.launch_or_connect_runelite()
+app.set_arduino_port("COM6")
+app.login_or_recover()
+app.arduino_readiness("COM6")
+app.prepare_live_handoff()
+app.set_overlay_enabled(True)
+app.overlay_snapshot()
+app.inspect_demonstration(path)
+app.diagnostics()
+app.run_quick_self_test()
+app.run_golden_replay()
+```
+
+They reuse the one ObservationClient, the existing `run.cmd plugin` launch,
+saved-session `LoginPromptHelper`/`InputCoordinator`, passive overlay, trusted
+demonstration inspector, and public test/replay commands. The GUI controller
+does not import login, task, safety, verification, overlay, Arduino, transport,
+or raw-input modules. Readiness checks never open the Arduino port, and
+operator status is not input authorization.
+
+Immediately before Start Live and Resume, `prepare_live_handoff()` binds and
+focuses only the exact telemetry-owning RuneLite process/root window, then
+waits boundedly for foreground telemetry. It neither moves/resizes RuneLite nor
+sends gameplay input. A failed handoff blocks the GUI operation. Pause and Safe
+Stop set the current runtime control synchronously before their result-adapter
+workers wait, so clicking the GUI cannot race the worker's foreground check.
+
 ## Demonstration lifecycle
 
 Manual demonstration capture and automation are mutually exclusive:
@@ -150,9 +191,9 @@ The existing read-only demonstration commands remain:
 .\run.cmd inspect-demo .\demo_runs\20260710T170000000000Z_castle-stairs
 ```
 
-## Future GUI screen
+## Implemented GUI screen
 
-The future screen consumes these exact contracts:
+The screen consumes these exact contracts:
 
 - **Task dropdown:** values from `list_tasks()`.
 - **Task/site definition dropdown:** definitions filtered by selected task.
@@ -161,16 +202,17 @@ The future screen consumes these exact contracts:
 - **Goals:** show cycle goal `1`; hide or disable duration, target level, item
   count, and other unsupported goals until a validated profile field exists.
 - **Arduino port:** runtime configuration shown only for execute mode.
-- **Start:** revalidate profile and runtime configuration, then retain `run_id`.
+- **Start:** revalidate profile and runtime configuration, focus the exact
+  RuneLite binding for live mode, then retain `run_id`.
 - **Pause/Resume:** send only the current `run_id`; distinguish requested from
-  acknowledged pause.
+  acknowledged pause, and repeat the exact focus handoff before live Resume.
 - **Safe Stop:** send only the current `run_id` and display requested state until
   `SAFE_STOPPED` or another terminal result.
 - **Live state and safety:** render exact EngineFrame sequence, task state,
   selected/eligible/rejected evidence, ordered safety checks, pending/last
   verification, blocker, receipt, and cleanup.
-- **Overlay toggle (future, not facade v1):** construct or close only the
-  existing passive overlay reader; it must not change engine control.
+- **Overlay toggle:** requests only the existing passive overlay owner, bound to
+  the current run's EngineFrame publisher; it never changes engine control.
 - **Record/End Demonstration:** use `capture_id` and remain mutually exclusive
   with automation.
 - **Recent run summary:** render stored runtime statistics/result, not a frame
@@ -179,6 +221,17 @@ The future screen consumes these exact contracts:
 After restart, the GUI must never restore an active run ID, capture ID, pending
 verification, old coordinates/clickboxes, menu sample, source tick, session
 target, or input state. It must reobserve and revalidate.
+
+Long work runs on non-daemon worker threads behind a result queue. Only the Tk
+thread applies results to widgets. Per-channel generation tokens discard stale
+callbacks; EngineFrame freshness is keyed to the current run ID plus monotonic
+frame sequence. Important events are bounded to 300 entries.
+
+The ignored `.osrs-telemetry/gui-settings.json` stores only revalidated profile
+ID, Arduino port, overlay preference, window geometry, and last demonstration
+directory. A Windows process mutex prevents a second operator GUI instance.
+Closing during a run requests cooperative Safe Stop and waits up to the bounded
+frontend shutdown interval; it never kills an unresolved engine worker.
 
 ## Vision and LLM boundary
 

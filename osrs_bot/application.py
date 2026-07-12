@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -11,8 +11,19 @@ from typing import Any, Protocol
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .definition import LUMBRIDGE_WEST_TREES_V1
 from .demonstration import InspectionResult, inspect_demonstration, record_live
-from .engine_frame import EngineFrame
+from .engine_frame import EngineFrame, EngineFramePublisher
 from .observation import ObservationClient
+from .operator_services import (
+    ArduinoReadiness,
+    ConnectionSnapshot,
+    OperatorDiagnostics,
+    OperatorServices,
+    OverlaySnapshot,
+    OverlayState,
+    ProcessResult,
+    RuneLiteLaunchResult,
+    SessionRecoveryResult,
+)
 from .profile import (
     DEFAULT_PROFILE,
     BoundProfile,
@@ -116,6 +127,22 @@ class DemonstrationReference:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationOverlaySnapshot:
+    requested: bool
+    state: OverlayState
+    error: str | None
+    bound_run_id: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requested": self.requested,
+            "state": self.state.value,
+            "error": self.error,
+            "boundRunId": self.bound_run_id,
+        }
+
+
 TASK_DESCRIPTOR = TaskDescriptor(
     SUPPORTED_TASK_ID,
     WOODCUT_BANK_TASK_DISPLAY_NAME,
@@ -205,6 +232,34 @@ class _DemonstrationRunner(Protocol):
     def __call__(self, name: str, client: ObservationClient, **values: Any) -> Path: ...
 
 
+class _OperatorServicesProtocol(Protocol):
+    def connection_status(self) -> ConnectionSnapshot: ...
+
+    def launch_or_connect_runelite(self) -> RuneLiteLaunchResult: ...
+
+    def recover_session(self, arduino_port: str) -> SessionRecoveryResult: ...
+
+    def focus_runelite_for_live_handoff(self) -> ConnectionSnapshot: ...
+
+    def arduino_readiness(
+        self, arduino_port: str | None
+    ) -> ArduinoReadiness: ...
+
+    def enable_overlay(
+        self, publisher: EngineFramePublisher
+    ) -> OverlaySnapshot: ...
+
+    def disable_overlay(self) -> OverlaySnapshot: ...
+
+    def overlay_status(self) -> OverlaySnapshot: ...
+
+    def collect_diagnostics(self) -> OperatorDiagnostics: ...
+
+    def run_quick_self_test(self) -> ProcessResult: ...
+
+    def run_golden_replay(self) -> ProcessResult: ...
+
+
 def _default_runtime_factory(
     client: ObservationClient,
     binding: BoundProfile,
@@ -233,6 +288,7 @@ class EngineApplication:
         runtime_factory: _RuntimeFactory = _default_runtime_factory,
         demonstration_runner: _DemonstrationRunner = record_live,
         demonstration_inspector: Callable[[Path | str], InspectionResult] = inspect_demonstration,
+        operator_services: _OperatorServicesProtocol | None = None,
     ) -> None:
         if not isinstance(configuration, RuntimeConfig):
             raise TypeError("configuration must be RuntimeConfig")
@@ -251,6 +307,11 @@ class EngineApplication:
         self._runtime_factory = runtime_factory
         self._demonstration_runner = demonstration_runner
         self._demonstration_inspector = demonstration_inspector
+        self._operator_services = (
+            OperatorServices(self._client)
+            if operator_services is None
+            else operator_services
+        )
         self._lock = threading.RLock()
         self._next_run_id = 1
         self._next_capture_id = 1
@@ -271,6 +332,10 @@ class EngineApplication:
         self._demo_inspection: InspectionResult | None = None
         self._demo_error: str | None = None
         self._last_operation: str | None = None
+        self._operator_operation: str | None = None
+        self._overlay_requested = False
+        self._overlay_bound_run_id: str | None = None
+        self._overlay_error: str | None = None
 
     @staticmethod
     def list_tasks() -> tuple[TaskDescriptor, ...]:
@@ -308,6 +373,121 @@ class EngineApplication:
             ],
             "profile": EngineApplication.profile_contract(),
         }
+
+    def runtime_configuration(self) -> RuntimeConfig:
+        with self._lock:
+            return self._configuration
+
+    def set_arduino_port(self, arduino_port: str | None) -> RuntimeConfig:
+        with self._lock:
+            self._require_idle_unlocked()
+            self._configuration = replace(
+                self._configuration,
+                arduino_port=arduino_port,
+            )
+            return self._configuration
+
+    def refresh_connection(self) -> ConnectionSnapshot:
+        return self._operator_services.connection_status()
+
+    def launch_or_connect_runelite(self) -> RuneLiteLaunchResult:
+        return self._call_operator_while_idle(
+            "launch_or_connect_runelite",
+            self._operator_services.launch_or_connect_runelite,
+        )
+
+    def login_or_recover(self) -> SessionRecoveryResult:
+        with self._lock:
+            self._begin_operator_operation_unlocked("login_or_recover")
+            arduino_port = self._configuration.arduino_port
+            if arduino_port is None:
+                self._operator_operation = None
+                raise ApplicationError(
+                    "login recovery requires a configured arduino_port"
+                )
+        try:
+            return self._operator_services.recover_session(arduino_port)
+        finally:
+            self._finish_operator_operation("login_or_recover")
+
+    def prepare_live_handoff(self) -> ConnectionSnapshot:
+        """Delegate bounded exact-window focus without acquiring input authority."""
+
+        return self._operator_services.focus_runelite_for_live_handoff()
+
+    def arduino_readiness(
+        self, arduino_port: str | None = None
+    ) -> ArduinoReadiness:
+        if arduino_port is None:
+            with self._lock:
+                arduino_port = self._configuration.arduino_port
+        return self._operator_services.arduino_readiness(arduino_port)
+
+    def set_overlay_enabled(
+        self, enabled: bool
+    ) -> ApplicationOverlaySnapshot:
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be bool")
+        with self._lock:
+            self._overlay_requested = enabled
+            if not enabled:
+                self._disable_overlay_unlocked()
+            elif self._last_operation == "run" and self._runtime is not None:
+                self._enable_overlay_unlocked(
+                    self._runtime.frame_publisher,
+                    self._run_id,
+                )
+            return self._overlay_snapshot_unlocked()
+
+    def overlay_snapshot(self) -> ApplicationOverlaySnapshot:
+        with self._lock:
+            return self._overlay_snapshot_unlocked()
+
+    def inspect_demonstration(self, path: Path | str) -> InspectionResult:
+        return self._demonstration_inspector(path)
+
+    def diagnostics(self) -> OperatorDiagnostics:
+        return self._operator_services.collect_diagnostics()
+
+    def run_quick_self_test(self) -> ProcessResult:
+        return self._call_operator_while_idle(
+            "run_quick_self_test",
+            self._operator_services.run_quick_self_test,
+        )
+
+    def run_golden_replay(self) -> ProcessResult:
+        return self._call_operator_while_idle(
+            "run_golden_replay",
+            self._operator_services.run_golden_replay,
+        )
+
+    def shutdown_frontend(
+        self, *, timeout: float | None = 10.0
+    ) -> ApplicationSnapshot:
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be non-negative or None")
+        with self._lock:
+            if self._operator_operation is not None:
+                raise ApplicationError(
+                    "frontend shutdown is waiting for operator operation: "
+                    f"{self._operator_operation}"
+                )
+        current = self.snapshot()
+        if current.active_run_id is not None:
+            run_id = current.active_run_id
+            self.request_safe_stop(run_id)
+            current = self.wait(run_id, timeout)
+        elif current.active_capture_id is not None:
+            current = self.end_demonstration(
+                current.active_capture_id,
+                timeout=timeout,
+            )
+        self.set_overlay_enabled(False)
+        return current
 
     def start(
         self,
@@ -362,6 +542,10 @@ class EngineApplication:
                 daemon=False,
             )
             self._run_thread = worker
+            if self._overlay_requested:
+                self._enable_overlay_unlocked(runtime.frame_publisher, run_id)
+            else:
+                self._disable_overlay_unlocked()
             worker.start()
             return self._snapshot_unlocked()
 
@@ -443,6 +627,14 @@ class EngineApplication:
             capture_id = f"demo-{self._next_capture_id:06d}"
             self._next_capture_id += 1
             stop = threading.Event()
+            # A demonstration is a distinct read-only mode.  Do not carry the
+            # prior run's frame, token, statistics, or control state into its
+            # presentation snapshot.
+            self._run_id = None
+            self._runtime = None
+            self._control = None
+            self._run_result = None
+            self._run_error = None
             self._capture_id = capture_id
             self._demo_stop = stop
             self._demo_path = None
@@ -469,6 +661,7 @@ class EngineApplication:
                 daemon=False,
             )
             self._demo_thread = worker
+            self._disable_overlay_unlocked()
             worker.start()
             return self._snapshot_unlocked()
 
@@ -559,11 +752,87 @@ class EngineApplication:
                 self._demo_error = error
                 self._finished_at = datetime.now(timezone.utc)
 
+    def _call_operator_while_idle(
+        self,
+        operation: str,
+        call: Callable[[], Any],
+    ) -> Any:
+        with self._lock:
+            self._begin_operator_operation_unlocked(operation)
+        try:
+            return call()
+        finally:
+            self._finish_operator_operation(operation)
+
+    def _begin_operator_operation_unlocked(self, operation: str) -> None:
+        if not isinstance(operation, str) or not operation.strip():
+            raise ValueError("operation must be non-empty text")
+        self._require_idle_unlocked()
+        self._operator_operation = operation
+
+    def _finish_operator_operation(self, operation: str) -> None:
+        with self._lock:
+            if self._operator_operation == operation:
+                self._operator_operation = None
+
+    def _enable_overlay_unlocked(
+        self,
+        publisher: EngineFramePublisher,
+        run_id: str | None,
+    ) -> None:
+        self._overlay_bound_run_id = run_id
+        try:
+            snapshot = self._operator_services.enable_overlay(publisher)
+        except Exception as error:  # diagnostics must never alter run control
+            self._overlay_error = f"{type(error).__name__}: {error}"
+        else:
+            self._overlay_error = snapshot.error
+
+    def _disable_overlay_unlocked(self) -> None:
+        self._overlay_bound_run_id = None
+        try:
+            snapshot = self._operator_services.disable_overlay()
+        except Exception as error:  # diagnostics must never alter run control
+            self._overlay_error = f"{type(error).__name__}: {error}"
+        else:
+            self._overlay_error = snapshot.error
+
+    def _overlay_snapshot_unlocked(self) -> ApplicationOverlaySnapshot:
+        try:
+            service_snapshot: OverlaySnapshot = (
+                self._operator_services.overlay_status()
+            )
+        except Exception as error:  # diagnostics must never alter run control
+            diagnostic = f"{type(error).__name__}: {error}"
+            self._overlay_error = diagnostic
+            return ApplicationOverlaySnapshot(
+                self._overlay_requested,
+                OverlayState.FAILED,
+                diagnostic,
+                self._overlay_bound_run_id,
+            )
+        error = self._overlay_error or service_snapshot.error
+        state = (
+            OverlayState.FAILED
+            if self._overlay_error is not None
+            else service_snapshot.state
+        )
+        return ApplicationOverlaySnapshot(
+            self._overlay_requested,
+            state,
+            error,
+            self._overlay_bound_run_id,
+        )
+
     def _require_idle_unlocked(self) -> None:
         if self._run_thread is not None and self._run_thread.is_alive():
             raise ApplicationError("an engine run is already active")
         if self._demo_thread is not None and self._demo_thread.is_alive():
             raise ApplicationError("a demonstration capture is already active")
+        if self._operator_operation is not None:
+            raise ApplicationError(
+                f"operator operation is already active: {self._operator_operation}"
+            )
 
     def _require_active_run_unlocked(self, run_id: str) -> RuntimeControl:
         if run_id != self._run_id:

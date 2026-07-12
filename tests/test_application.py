@@ -16,6 +16,7 @@ from osrs_bot.application import (
     LifecycleState,
     SUPPORTED_TASK_ID,
 )
+from osrs_bot.configuration import RuntimeConfig
 from osrs_bot.definition import LUMBRIDGE_WEST_TREES_V1
 from osrs_bot.demonstration import InspectionResult
 from osrs_bot.model import (
@@ -28,6 +29,7 @@ from osrs_bot.model import (
     TargetGeometry,
 )
 from osrs_bot.observation import parse_observation
+from osrs_bot.operator_services import OverlaySnapshot, OverlayState
 from osrs_bot.profile import DEFAULT_PROFILE
 from osrs_bot.runtime import RuntimeControl, TaskRuntime
 from osrs_bot.task_contract import Decision, ObservationRequest, TaskSnapshot, TaskStatus
@@ -163,6 +165,69 @@ class _Factory:
         self.controls.append(control)
         self.bindings.append(binding)
         return runtime
+
+
+class _FakeOperatorServices:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+        self.overlay = OverlaySnapshot(OverlayState.DISABLED)
+        self.overlay_publishers = []
+        self.fail_overlay = False
+        self.quick_entered = threading.Event()
+        self.quick_release: threading.Event | None = None
+
+    def connection_status(self):
+        self.calls.append(("connection_status",))
+        return "connection"
+
+    def launch_or_connect_runelite(self):
+        self.calls.append(("launch_or_connect_runelite",))
+        return "launch"
+
+    def recover_session(self, arduino_port):
+        self.calls.append(("recover_session", arduino_port))
+        return "login"
+
+    def focus_runelite_for_live_handoff(self):
+        self.calls.append(("focus_runelite_for_live_handoff",))
+        return "focused"
+
+    def arduino_readiness(self, arduino_port):
+        self.calls.append(("arduino_readiness", arduino_port))
+        return ("arduino", arduino_port)
+
+    def enable_overlay(self, publisher):
+        self.calls.append(("enable_overlay", publisher))
+        self.overlay_publishers.append(publisher)
+        if self.fail_overlay:
+            raise RuntimeError("overlay render failed")
+        self.overlay = OverlaySnapshot(OverlayState.ACTIVE)
+        return self.overlay
+
+    def disable_overlay(self):
+        self.calls.append(("disable_overlay",))
+        self.overlay = OverlaySnapshot(OverlayState.DISABLED)
+        return self.overlay
+
+    def overlay_status(self):
+        self.calls.append(("overlay_status",))
+        return self.overlay
+
+    def collect_diagnostics(self):
+        self.calls.append(("collect_diagnostics",))
+        return "diagnostics"
+
+    def run_quick_self_test(self):
+        self.calls.append(("run_quick_self_test",))
+        self.quick_entered.set()
+        if self.quick_release is not None:
+            if not self.quick_release.wait(2.0):
+                raise AssertionError("quick self-test gate was not released")
+        return "quick"
+
+    def run_golden_replay(self):
+        self.calls.append(("run_golden_replay",))
+        return "replay"
 
 
 def _profile_values() -> dict[str, object]:
@@ -417,7 +482,13 @@ class EngineApplicationTests(unittest.TestCase):
             run_id = application.start().active_run_id
             application.request_safe_stop(run_id)
             application.wait(run_id, 2.0)
-            capture_id = application.begin_demonstration("cross-mode").active_capture_id
+            demonstration = application.begin_demonstration("cross-mode")
+            capture_id = demonstration.active_capture_id
+
+            self.assertIsNone(demonstration.run_id)
+            self.assertIsNone(demonstration.runtime_control)
+            self.assertIsNone(demonstration.engine_frame)
+            self.assertIsNone(demonstration.runtime_statistics)
 
             with self.assertRaises(ApplicationError):
                 application.request_safe_stop(run_id)
@@ -557,6 +628,194 @@ class EngineApplicationTests(unittest.TestCase):
             application.start(profile_values={})
         self.assertEqual([], factory.runtimes)
 
+    def test_operator_service_facade_delegates_with_configured_port(self) -> None:
+        services = _FakeOperatorServices()
+        inspected: list[Path | str] = []
+        inspection = InspectionResult(True, "VERIFIED", semantic_summary=("ok",))
+        application = EngineApplication(
+            configuration=RuntimeConfig(arduino_port="COM6"),
+            client=_LoopClient(),
+            runtime_factory=_Factory(),
+            demonstration_inspector=lambda path: (
+                inspected.append(path) or inspection
+            ),
+            operator_services=services,
+        )
+
+        self.assertEqual("COM6", application.runtime_configuration().arduino_port)
+        self.assertEqual(
+            "COM7", application.set_arduino_port("COM7").arduino_port
+        )
+        self.assertEqual("connection", application.refresh_connection())
+        self.assertEqual("launch", application.launch_or_connect_runelite())
+        self.assertEqual("login", application.login_or_recover())
+        self.assertEqual("focused", application.prepare_live_handoff())
+        self.assertEqual(("arduino", "COM9"), application.arduino_readiness("COM9"))
+        self.assertEqual(("arduino", "COM7"), application.arduino_readiness())
+        self.assertIs(
+            inspection,
+            application.inspect_demonstration(Path("demo_runs") / "artifact"),
+        )
+        self.assertEqual("diagnostics", application.diagnostics())
+        self.assertEqual("quick", application.run_quick_self_test())
+        self.assertEqual("replay", application.run_golden_replay())
+        self.assertEqual([Path("demo_runs") / "artifact"], inspected)
+        self.assertIn(("recover_session", "COM7"), services.calls)
+        self.assertIn(("focus_runelite_for_live_handoff",), services.calls)
+
+    def test_operator_mutations_and_tests_are_blocked_by_active_modes(self) -> None:
+        services = _FakeOperatorServices()
+        factory = _Factory()
+        application = EngineApplication(
+            configuration=RuntimeConfig(arduino_port="COM6"),
+            client=_LoopClient(),
+            runtime_factory=factory,
+            operator_services=services,
+        )
+        run_id = application.start().active_run_id
+
+        for call in (
+            lambda: application.set_arduino_port("COM7"),
+            application.launch_or_connect_runelite,
+            application.login_or_recover,
+            application.run_quick_self_test,
+            application.run_golden_replay,
+        ):
+            with self.subTest(call=call), self.assertRaises(ApplicationError):
+                call()
+
+        self.assertEqual("connection", application.refresh_connection())
+        self.assertEqual(("arduino", "COM6"), application.arduino_readiness())
+        self.assertEqual("diagnostics", application.diagnostics())
+        application.request_safe_stop(run_id)
+        application.wait(run_id, 2.0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            demo_started = threading.Event()
+
+            def runner(_name, _client, **values):
+                demo_started.set()
+                while not values["stop_requested"]():
+                    time.sleep(0.002)
+                return Path(temporary) / "artifact"
+
+            demonstration = EngineApplication(
+                configuration=RuntimeConfig(arduino_port="COM6"),
+                client=_LoopClient(),
+                runtime_factory=_Factory(),
+                demonstration_runner=runner,
+                demonstration_inspector=lambda _path: InspectionResult(
+                    True, "VERIFIED"
+                ),
+                operator_services=services,
+            )
+            capture_id = demonstration.begin_demonstration("guarded").active_capture_id
+            self.assertTrue(demo_started.wait(1.0))
+            with self.assertRaises(ApplicationError):
+                demonstration.login_or_recover()
+            with self.assertRaises(ApplicationError):
+                demonstration.run_quick_self_test()
+            demonstration.end_demonstration(capture_id, timeout=2.0)
+
+    def test_operator_operation_token_blocks_racing_start_and_config_change(self) -> None:
+        services = _FakeOperatorServices()
+        services.quick_release = threading.Event()
+        application = EngineApplication(
+            client=_LoopClient(),
+            runtime_factory=_Factory(),
+            operator_services=services,
+        )
+        results: list[object] = []
+        worker = threading.Thread(
+            target=lambda: results.append(application.run_quick_self_test())
+        )
+        worker.start()
+        self.assertTrue(services.quick_entered.wait(1.0))
+        try:
+            with self.assertRaises(ApplicationError):
+                application.start()
+            with self.assertRaises(ApplicationError):
+                application.set_arduino_port("COM7")
+            with self.assertRaises(ApplicationError):
+                application.begin_demonstration("blocked")
+            with self.assertRaises(ApplicationError):
+                application.shutdown_frontend()
+        finally:
+            services.quick_release.set()
+            worker.join(2.0)
+        self.assertEqual(["quick"], results)
+
+    def test_overlay_request_rebinds_each_run_and_failure_is_diagnostic(self) -> None:
+        services = _FakeOperatorServices()
+        factory = _Factory()
+        application = EngineApplication(
+            client=_LoopClient(),
+            runtime_factory=factory,
+            operator_services=services,
+        )
+
+        waiting = application.set_overlay_enabled(True)
+        self.assertTrue(waiting.requested)
+        self.assertIs(waiting.state, OverlayState.DISABLED)
+        self.assertIsNone(waiting.bound_run_id)
+
+        first_id = application.start().active_run_id
+        first_overlay = application.overlay_snapshot()
+        self.assertIs(first_overlay.state, OverlayState.ACTIVE)
+        self.assertEqual(first_id, first_overlay.bound_run_id)
+        self.assertIs(
+            factory.runtimes[0].frame_publisher,
+            services.overlay_publishers[-1],
+        )
+        application.request_safe_stop(first_id)
+        application.wait(first_id, 2.0)
+
+        second_id = application.start().active_run_id
+        self.assertIs(
+            factory.runtimes[1].frame_publisher,
+            services.overlay_publishers[-1],
+        )
+        self.assertIsNot(
+            services.overlay_publishers[-2],
+            services.overlay_publishers[-1],
+        )
+        disabled = application.set_overlay_enabled(False)
+        self.assertFalse(disabled.requested)
+        self.assertIs(disabled.state, OverlayState.DISABLED)
+        self.assertIsNone(disabled.bound_run_id)
+        application.request_safe_stop(second_id)
+        application.wait(second_id, 2.0)
+
+        services.fail_overlay = True
+        application.set_overlay_enabled(True)
+        third = application.start()
+        failed = application.overlay_snapshot()
+        self.assertIs(failed.state, OverlayState.FAILED)
+        self.assertIn("overlay render failed", failed.error)
+        self.assertNotIn("overlay render failed", " ".join(third.blockers))
+        self.assertNotEqual(LifecycleState.ERROR, third.lifecycle)
+        application.request_safe_stop(third.active_run_id)
+        application.wait(third.active_run_id, 2.0)
+
+    def test_shutdown_frontend_cooperatively_stops_and_disables_overlay(self) -> None:
+        services = _FakeOperatorServices()
+        application = EngineApplication(
+            client=_LoopClient(),
+            runtime_factory=_Factory(),
+            operator_services=services,
+        )
+        application.set_overlay_enabled(True)
+        started = application.start()
+
+        stopped = application.shutdown_frontend(timeout=2.0)
+
+        self.assertIs(stopped.lifecycle, LifecycleState.STOPPED)
+        self.assertIsNone(stopped.active_run_id)
+        overlay = application.overlay_snapshot()
+        self.assertFalse(overlay.requested)
+        self.assertIs(overlay.state, OverlayState.DISABLED)
+        self.assertIn(("disable_overlay",), services.calls)
+
     def test_worker_exception_becomes_status_and_blocker(self) -> None:
         class ExplodingRuntime(TaskRuntime):
             def run(self, *, execute: bool = False):
@@ -593,6 +852,11 @@ class EngineApplicationTests(unittest.TestCase):
             if isinstance(node, (ast.Import, ast.ImportFrom))
             for alias in node.names
         }
+        imported_modules = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
         for forbidden in (
             "SafetyGate",
             "InputCoordinator",
@@ -605,6 +869,11 @@ class EngineApplicationTests(unittest.TestCase):
         self.assertNotIn(".apply_verification(", source)
         self.assertNotIn("pyautogui", source.lower())
         self.assertNotIn("pydirectinput", source.lower())
+        self.assertTrue(
+            {"login", "input_coordinator", "arduino"}.isdisjoint(
+                imported_modules
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -2,29 +2,28 @@
 
 ## Current milestone
 
-**Stationary-RuneLite external-cursor reacquisition is implemented and
-live-proven.**
+**The first full operator GUI is implemented and live-proven over the existing
+engine contracts.**
 
-Normal production cursor recovery now keeps the exact telemetry-owning
-RuneLite window stationary and moves only the freshly observed PMv2 cursor
-through the existing Arduino-only `InputCoordinator`. The replacement policy,
-focused/full deterministic gates, and exactly one bounded no-click live cursor
-test are **PASS** at the retained fixed-client 175% layout. Historical D031
-window-translation evidence remains below only as retired context.
+`run.cmd gui` launches one Tkinter/ttk desktop application with Run, Live
+Status, Demonstrations, and Diagnostics tabs. Its controller calls only the
+high-level `EngineApplication` facade and renders the latest `EngineFrame`; it
+does not select targets, evaluate safety, verify actions, open Arduino, or send
+raw input.
 
-Current input milestone: reacquire an external cursor without moving or
-resizing RuneLite, discard the pre-movement intent, and require fresh normal
-recognition and SafetyGate validation before any later activation.
+The 2026-07-12 GUI acceptance at the retained fixed-client 175% layout is
+**PASS**. Observe Only displayed a fresh loaded scene, player/inventory facts,
+and Tree `1276` without opening an input session. The bounded Start Live test
+used COM6 through the production `InputCoordinator`, counted two actions,
+retained a PASS receipt and typed `item_quantity_increased` outcome, acknowledged
+Pause/Resume, and ended `SAFE_STOPPED`. Final cleanup proved `STOP_ALL`,
+`DISARM`, safe zero-held `STATUS`, zero unresolved commands, and closed
+ledger/backend.
 
-Current demonstration checkpoints: `c8888bb demonstrations: tolerate bounded
-world model handoff` and `000a886 demonstrations: settle manual movement
-evidence`.
-
-Current input contract: one exact PID/root HWND, invariant outer/client/canvas
-geometry, PMv2 virtual-desktop cursor truth, the existing shared Arduino lease,
-the source-blind 500 ms owned-button bound plus absolute 200 ms MOVE-effect /
-240 ms stability contract, conservative post-activation classification, and
-persisted receipt/EngineFrame truth.
+Computer Use supplied only operator setup and GUI interaction. Those manual
+login, positioning, GUI-button, and demonstration actions are explicitly not
+production-engine evidence. The ignored acceptance bundle is
+`_run_proofs/gui_acceptance/20260712T195506Z/`.
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -318,12 +317,13 @@ Regression command:
 - The facade returns the exact latest `EngineFrame`, runtime-owned immutable
   statistics, and owner-produced blockers. It does not select targets, run
   safety, verify, own Arduino, or infer diagnostic truth.
-- `run.cmd app` provides catalog/profile inspection, validation, foreground
-  dry-run, and explicit Arduino execute mode. `Ctrl+C` becomes cooperative safe
-  stop; there is no daemon, IPC surface, or full GUI.
-- The future GUI screen/restart contract is documented. The frozen
-  `VisionEvidence` type is only a dependency-free non-authoritative seam; no
-  vision model or runtime consumer was added.
+- `run.cmd app` remains the diagnostic CLI. `run.cmd gui` provides the
+  in-process operator frontend without adding a daemon, IPC surface, web
+  server, endpoint, or second control system.
+- The GUI uses non-daemon workers, a thread-safe result queue, generation
+  tokens, current run/capture IDs, a 300-event bound, revalidated harmless
+  settings, and cooperative close. The frozen `VisionEvidence` type remains a
+  dependency-free non-authoritative seam with no model or runtime consumer.
 
 ## Governing direction
 
@@ -719,8 +719,9 @@ the geometry condition and recovery behavior rather than source attribution.
   artifacts may omit either field.
 - There is intentionally no external profile loader, second definition, or
   generic navigation/transition framework.
-- The passive overlay has been compared against fresh live EngineFrames; a final
-  terminal-state view is desirable but is not an architecture blocker.
+- The passive overlay renders the same latest EngineFrame as the GUI. After a
+  terminal run it can intentionally retain that last frame until disabled; it
+  is not independent proof that a later RuneLite scene is still loaded.
 - The RuneLite endpoint does not expose global raw mouse-button or keyboard
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.
@@ -730,6 +731,7 @@ the geometry condition and recovery behavior rather than source attribution.
   retaining independent hot-tail continuity; identity, session, tick, payload,
   warning, or capability contradictions remain terminal.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
-  demonstration, and frontend composition contracts are implemented. The final
-  manual demo/inspection is accepted, and no client, endpoint, worker, Java
-  process, or Arduino lease remained after shutdown.
+  demonstration, frontend composition, and operator GUI contracts are
+  implemented. The GUI-recorded manual demo inspected as valid with declared
+  gaps, and final shutdown checks cover the GUI worker, client/endpoint, Java
+  process, and Arduino lease.

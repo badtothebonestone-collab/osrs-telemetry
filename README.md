@@ -31,7 +31,21 @@ Requirements:
 - RuneLite account/session already configured
 - An Arduino HID bridge only when live execution is explicitly requested
 
-Launch the development client:
+Launch the operator desktop application:
+
+```powershell
+.\run.cmd gui
+```
+
+The GUI presents the real one-option profile, RuneLite connection and preflight,
+Observe Only and explicit Start Live modes, tokenized Pause/Resume/Safe Stop,
+the passive EngineFrame overlay, demonstration recording/inspection, and
+bounded diagnostics. Start Live still uses the existing Arduino-only
+`InputCoordinator`; the GUI has no direct input authority. See
+[`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the non-programmer walkthrough.
+
+The following commands remain useful diagnostic surfaces. Launch the
+development client directly with:
 
 ```powershell
 .\run.cmd plugin
@@ -129,7 +143,8 @@ through the thin foreground facade:
 
 `Ctrl+C` during `app run` requests safe stop and waits for any in-flight action
 cleanup plus typed verification. In-process pause/resume and manual-demo
-begin/end are exposed for a future GUI; no GUI or background service is built.
+begin/end are also consumed by the GUI. There is still no daemon, web server,
+or IPC service.
 
 ## Repository map
 
@@ -151,6 +166,10 @@ begin/end are exposed for a future GUI; no GUI or background service is built.
 - `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
 - `osrs_bot/application.py`: tokenized thin composition/lifecycle facade.
 - `osrs_bot/application_cli.py`: catalog/profile and foreground facade CLI.
+- `osrs_bot/gui_controller.py`: thread-safe, facade-only GUI operation boundary.
+- `osrs_bot/gui.py`: Tkinter/ttk operator presentation with no domain authority.
+- `osrs_bot/operator_services.py`: bounded launch/preflight/login/overlay and
+  diagnostic delegation beneath the application facade.
 - `osrs_bot/engine_frame.py`: the immutable latest runtime diagnostic truth.
 - `osrs_bot/debug_overlay.py`: optional passive EngineFrame-only Windows overlay.
 - `osrs_bot/demonstration.py`: bounded read-only recorder and tamper-verifying
@@ -171,6 +190,7 @@ begin/end are exposed for a future GUI; no GUI or background service is built.
 - `docs/ENGINE_FRAME.md`: diagnostic publication and passive overlay contract.
 - `docs/DEMONSTRATIONS.md`: artifact, inspection, and no-replay contract.
 - `docs/FRONTEND_CONTRACT.md`: implemented facade and future GUI screen contract.
+- `docs/QUICKSTART.md`: non-programmer operator GUI guide.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
@@ -199,8 +219,9 @@ begin/end are exposed for a future GUI; no GUI or background service is built.
   correct route and never an executable replay.
 - The facade supports exactly one task/definition/profile. Resource/bank choices
   and alternate goals remain disabled because the schema does not expose them.
-- There is no full GUI, daemon/IPC surface, vision model, or LLM runtime. The
-  `VisionEvidence` type is a non-authoritative future seam only.
+- The first Tkinter operator GUI is implemented over `EngineApplication` and
+  `EngineFrame`. There is no daemon/IPC surface, vision model, or LLM runtime.
+  The `VisionEvidence` type is a non-authoritative future seam only.
 
 Read `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` before
 extending the engine. `docs/RESCUE_CONTRACT.md` remains the frozen baseline

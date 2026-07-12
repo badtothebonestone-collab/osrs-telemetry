@@ -27,16 +27,15 @@ Fresh Observation
 
 Runtime state and evidence
   -> immutable EngineFrame
-  -> recorder / passive overlay / future thin GUI
+  -> recorder / passive overlay / thin operator GUI
 ```
 
 There is one observation truth, one runtime orchestrator, one active explicit
 task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
-The bounded architecture migration is complete through Phase 8. The current
-column is implemented; the target column now names only preservation rules and
-the later GUI consumer.
+The bounded architecture migration and first operator GUI are implemented. The
+current column is implemented; the target column now names preservation rules.
 
 | Layer | Current baseline | Governing target |
 |---|---|---|
@@ -51,7 +50,7 @@ the later GUI consumer.
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
 | Diagnostics | one immutable latest `EngineFrame` plus optional passive click-through overlay | preserve one no-authority status contract for recorder/frontend readers |
 | Demonstration evidence | bounded read-only recorder plus tamper-verifying semantic inspector | preserve append-only, no-replay, review-only evidence |
-| Frontend | tokenized `EngineApplication` facade plus minimal foreground CLI | future GUI consuming the same facade without engine logic |
+| Frontend | tokenized `EngineApplication`, facade-only async GUI controller, Tkinter operator GUI, and diagnostic CLI | preserve one in-process facade with no GUI-owned domain or input authority |
 
 ## Ownership boundaries
 
@@ -396,7 +395,7 @@ styles; Tcl creation and teardown remain on that host thread. It has no input
 handlers, target selection, SafetyGate calls, or Arduino imports, and an overlay
 failure cannot alter runtime control.
 
-The recorder, implemented CLI facade, and future GUI consume immutable read
+The recorder, diagnostic CLI, and implemented GUI consume immutable read
 contracts. Readers may
 format or filter it but may not reselect a target, recalculate safety, mutate
 the FSM, import Arduino control, or authorize input.
@@ -439,11 +438,19 @@ typed transition finish before pause/safe-stop acknowledgement. Pause never
 extends the hard runtime bound. No thread is killed and safe stop opens no extra
 hardware session.
 
+The Tkinter GUI consumes only facade and EngineFrame-facing contracts through a
+thread-safe controller. Bounded operator services beneath the facade reuse the
+existing RuneLite launch, login helper, overlay, demonstration inspector, and
+test/replay paths. They add no endpoint, daemon, IPC, web server, or alternate
+input path. Harmless settings are revalidated on startup; active run/capture,
+verification, target, cursor, PID/session, and input state are never restored.
+
 The facade imports the concrete task only to compose the sole supported engine.
 It has no target selection, SafetyGate, Verifier, InputCoordinator, Arduino, or
-raw-input calls. `run.cmd app` exposes catalog/profile and foreground run
-commands; Ctrl+C becomes cooperative safe stop. There is no daemon, IPC layer,
-or GUI. See `docs/FRONTEND_CONTRACT.md`.
+raw-input calls. `run.cmd gui` launches the operator frontend. `run.cmd app`
+retains catalog/profile and foreground run commands as diagnostics; Ctrl+C
+becomes cooperative safe stop. There is no daemon or IPC layer. See
+`docs/FRONTEND_CONTRACT.md`.
 
 ## Vision and LLM boundaries
 

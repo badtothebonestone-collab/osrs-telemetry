@@ -100,7 +100,7 @@ one `InputCoordinator`. The Arduino transport is private and there is no
 software-input gameplay fallback. Exact post-move hover/menu revalidation,
 later outcome verification, and authoritative cleanup remain mandatory.
 
-## Diagnostics, application facade, and future GUI
+## Diagnostics, application facade, and operator GUI
 
 The runtime publishes one immutable `EngineFrame`. It includes
 task/state, definition/profile, progress, selected and rejected targets,
@@ -110,7 +110,7 @@ cleanup status, and blockers.
 The implemented `EngineApplication` facade exposes the exact one-task catalog,
 profile schema/validation, tokenized start/pause/resume/safe-stop lifecycle,
 runtime-owned statistics/blockers, exact EngineFrame, and mutually exclusive
-demonstration begin/end. Recorders, overlays, CLIs, and future GUI surfaces
+demonstration begin/end. Recorders, overlays, CLIs, and GUI surfaces
 consume those contracts.
 They are read-only observers except for explicit high-level lifecycle commands.
 They never select targets, recalculate safety, own task state, or authorize
@@ -155,5 +155,6 @@ sensor truth, a minimal task seam, a validated definition/profile, one Arduino
 owner, one diagnostic frame, passive inspection tools, and thin lifecycle
 contracts—without broadening into a generic control system.
 
-The full GUI remains future work. The current CLI/facade proves its contracts
-without adding GUI-owned task, safety, input, or verification logic.
+The first full operator GUI now consumes those same contracts without adding
+GUI-owned task, safety, input, or verification logic. The CLI remains a bounded
+diagnostic surface rather than a second control system.

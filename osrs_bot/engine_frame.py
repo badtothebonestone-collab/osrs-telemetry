@@ -9,6 +9,8 @@ from typing import Any
 from .input_coordinator import InputReceipt
 from .model import (
     Action,
+    InventoryItem,
+    InventoryObservation,
     Observation,
     ScreenBounds,
     ScreenPoint,
@@ -20,9 +22,13 @@ from .task_contract import (
     Decision,
     RejectedCandidateEvidence,
     TargetEvidence,
+    TaskProgressSnapshot,
     TaskSnapshot,
 )
 from .verification import VerificationResult
+
+
+ENGINE_FRAME_SCHEMA = "engine_frame.v1"
 
 
 class EngineStage(str, Enum):
@@ -46,6 +52,15 @@ class ObservationReference:
     canvas_bounds: ScreenBounds | None
     camera_yaw: int | None = None
     camera_pitch: int | None = None
+    game_state: str | None = None
+    loaded_scene: bool = False
+    client_focused: bool = False
+    fresh: bool = False
+    cache_wall_clock_fresh: bool = False
+    source_coherent: bool = False
+    player_location: WorldPoint | None = None
+    player_plane: int | None = None
+    inventory: InventoryObservation | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_tick, int) or isinstance(self.source_tick, bool):
@@ -74,6 +89,38 @@ class ObservationReference:
                 or value < 0
             ):
                 raise ValueError(f"{name} must be non-negative or None")
+        if self.game_state is not None and (
+            not isinstance(self.game_state, str) or not self.game_state.strip()
+        ):
+            raise ValueError("game_state must be non-empty or None")
+        for name in (
+            "loaded_scene",
+            "client_focused",
+            "fresh",
+            "cache_wall_clock_fresh",
+            "source_coherent",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be bool")
+        if self.player_location is not None and not isinstance(
+            self.player_location, WorldPoint
+        ):
+            raise TypeError("player_location must be WorldPoint or None")
+        if self.player_plane is not None and (
+            not isinstance(self.player_plane, int)
+            or isinstance(self.player_plane, bool)
+            or self.player_plane < 0
+        ):
+            raise ValueError("player_plane must be non-negative or None")
+        if self.inventory is not None:
+            if not isinstance(self.inventory, InventoryObservation):
+                raise TypeError("inventory must be InventoryObservation or None")
+            if not isinstance(self.inventory.items, tuple) or not all(
+                isinstance(item, InventoryItem) for item in self.inventory.items
+            ):
+                raise TypeError(
+                    "inventory items must be an immutable tuple of InventoryItem values"
+                )
 
     @classmethod
     def from_observation(cls, observation: Observation) -> "ObservationReference":
@@ -89,6 +136,15 @@ class ObservationReference:
             canvas_bounds=observation.canvas_bounds,
             camera_yaw=observation.camera_yaw,
             camera_pitch=observation.camera_pitch,
+            game_state=observation.game_state,
+            loaded_scene=observation.loaded_scene,
+            client_focused=observation.client_focused,
+            fresh=observation.fresh,
+            cache_wall_clock_fresh=observation.cache_wall_clock_fresh,
+            source_coherent=observation.source_coherent,
+            player_location=observation.location,
+            player_plane=observation.plane,
+            inventory=observation.inventory,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,6 +158,15 @@ class ObservationReference:
             "canvasBounds": _bounds_dict(self.canvas_bounds),
             "cameraYaw": self.camera_yaw,
             "cameraPitch": self.camera_pitch,
+            "gameState": self.game_state,
+            "loadedScene": self.loaded_scene,
+            "clientFocused": self.client_focused,
+            "fresh": self.fresh,
+            "cacheWallClockFresh": self.cache_wall_clock_fresh,
+            "sourceCoherent": self.source_coherent,
+            "playerLocation": _world_point_dict(self.player_location),
+            "playerPlane": self.player_plane,
+            "inventory": _inventory_dict(self.inventory),
         }
 
 
@@ -258,7 +323,7 @@ class EngineFrame:
             else None
         )
         return {
-            "schema": "engine_frame.v1",
+            "schema": ENGINE_FRAME_SCHEMA,
             "sequence": self.sequence,
             "publishedAtUtc": self.published_at.isoformat(),
             "stage": self.stage.value,
@@ -419,27 +484,57 @@ def _target_dict(target: TargetEvidence | None) -> dict[str, Any] | None:
         "geometryFrameId": target.geometry_frame_id,
         "point": _point_dict(target.point),
         "bounds": _bounds_dict(target.bounds),
+        "worldLocation": _world_point_dict(target.world_location),
+        "distance": target.distance,
     }
 
 
 def _task_dict(task: TaskSnapshot) -> dict[str, Any]:
-    progress = task.progress
     return {
         "taskId": task.task_id,
         "status": task.status.value,
         "state": task.state,
         "definitionId": task.definition_id,
         "profileId": task.profile_id,
-        "progress": (
-            None
-            if progress is None
-            else {
-                "label": progress.label,
-                "current": progress.current,
-                "total": progress.total,
-            }
-        ),
+        "progress": _progress_dict(task.progress),
+        "routeStep": task.route_step,
+        "routeProgress": _progress_dict(task.route_progress),
+        "cycleProgress": _progress_dict(task.cycle_progress),
         "blocker": task.blocker,
+    }
+
+
+def _progress_dict(
+    progress: TaskProgressSnapshot | None,
+) -> dict[str, Any] | None:
+    if progress is None:
+        return None
+    return {
+        "label": progress.label,
+        "current": progress.current,
+        "total": progress.total,
+    }
+
+
+def _inventory_dict(
+    inventory: InventoryObservation | None,
+) -> dict[str, Any] | None:
+    if inventory is None:
+        return None
+    return {
+        "known": inventory.known,
+        "slotCount": inventory.slot_count,
+        "occupiedSlots": inventory.occupied_slots,
+        "freeSlots": inventory.free_slots,
+        "items": [
+            {
+                "slot": item.slot,
+                "itemId": item.item_id,
+                "quantity": item.quantity,
+                "name": item.name,
+            }
+            for item in inventory.items
+        ],
     }
 
 

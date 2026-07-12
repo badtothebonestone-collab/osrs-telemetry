@@ -73,6 +73,8 @@ class TargetEvidence:
     geometry_frame_id: str | None
     point: ScreenPoint | None
     bounds: ScreenBounds | None
+    world_location: WorldPoint | None = None
+    distance: int | None = None
 
     def __post_init__(self) -> None:
         _validate_nonempty_text(self.key, "key")
@@ -88,6 +90,12 @@ class TargetEvidence:
             _validate_screen_point(self.point)
         if self.bounds is not None:
             _validate_screen_bounds(self.bounds)
+        if self.world_location is not None and not isinstance(
+            self.world_location, WorldPoint
+        ):
+            raise ValueError("world_location must be WorldPoint or None")
+        if self.distance is not None:
+            _validate_nonnegative_int(self.distance, "distance")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +173,9 @@ class TaskSnapshot:
     definition_id: str | None = None
     profile_id: str | None = None
     progress: TaskProgressSnapshot | None = None
+    route_step: str | None = None
+    route_progress: TaskProgressSnapshot | None = None
+    cycle_progress: TaskProgressSnapshot | None = None
 
     def __post_init__(self) -> None:
         _validate_nonempty_text(self.task_id, "task_id")
@@ -181,6 +192,16 @@ class TaskSnapshot:
             self.progress, TaskProgressSnapshot
         ):
             raise ValueError("progress must be TaskProgressSnapshot or None")
+        if self.route_step is not None:
+            _validate_nonempty_text(self.route_step, "route_step")
+        for field_name in ("route_progress", "cycle_progress"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, TaskProgressSnapshot):
+                raise ValueError(
+                    f"{field_name} must be TaskProgressSnapshot or None"
+                )
+        if self.route_step is not None and self.route_progress is None:
+            raise ValueError("route_step requires route_progress")
 
 
 @runtime_checkable

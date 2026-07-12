@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 import re
 import threading
 import time
@@ -56,6 +57,107 @@ def _validate_identifier(value: object, field_name: str) -> str:
     if len(normalized) > 128:
         raise ValueError(f"{field_name} must not exceed 128 characters")
     return normalized
+
+
+def read_arduino_lease_status(
+    arduino_port: str,
+    *,
+    lock_dir: str | Path | None = None,
+    now_millis: int | None = None,
+) -> dict[str, Any]:
+    """Inspect the shared serial lease without acquiring it or opening hardware.
+
+    A stale or malformed lock record is reported as recoverable because the real
+    coordinator would remove it while acquiring the same lease.  This function
+    deliberately leaves the record untouched; its result is operator status,
+    never permission to bypass the coordinator's authoritative acquisition.
+    """
+
+    port = _validate_identifier(arduino_port, "arduino_port")
+    from .arduino import (
+        DEFAULT_SERIAL_LOCK_STALE_MS,
+        ArduinoSerialPortLock,
+        _load_lock_payload,
+        _pid_running,
+    )
+
+    probe = ArduinoSerialPortLock(
+        port,
+        owner="operator-read-only-lease-probe",
+        lock_dir=lock_dir,
+        timeout_ms=0,
+    )
+    path = probe.path
+    if not path.exists():
+        return {
+            "schema": "arduino_lease_status.v1",
+            "port": port,
+            "status": "AVAILABLE",
+            "available": True,
+            "owner": None,
+            "ownerPid": None,
+            "ownerRunning": None,
+            "ageMillis": None,
+            "lockPath": str(path),
+            "reason": "no serial lease record exists",
+        }
+
+    payload = _load_lock_payload(path)
+    try:
+        owner_pid = int(payload.get("pid"))
+    except (TypeError, ValueError):
+        owner_pid = None
+    try:
+        created_at = int(payload.get("createdAtMillis"))
+    except (TypeError, ValueError):
+        created_at = None
+    current_millis = (
+        int(round(time.time() * 1000))
+        if now_millis is None
+        else int(now_millis)
+    )
+    age_millis = (
+        None if created_at is None else max(0, current_millis - created_at)
+    )
+    owner_running = _pid_running(owner_pid)
+    record_valid = (
+        payload.get("schema") == "arduino_serial_lock.v1"
+        and str(payload.get("port") or "").casefold() == port.casefold()
+        and owner_pid is not None
+        and created_at is not None
+    )
+    recoverable = (
+        not record_valid
+        or (
+            not owner_running
+            and age_millis is not None
+            and age_millis > DEFAULT_SERIAL_LOCK_STALE_MS
+        )
+    )
+    if recoverable:
+        status = "AVAILABLE_RECOVERABLE_RECORD"
+        available = True
+        reason = "the real coordinator can remove this stale or invalid lease record"
+    elif owner_running:
+        status = "OWNED"
+        available = False
+        reason = "another live owner holds the shared serial lease"
+    else:
+        status = "RESERVED"
+        available = False
+        reason = "a recent lease record is retained until its stale interval expires"
+    return {
+        "schema": "arduino_lease_status.v1",
+        "port": port,
+        "status": status,
+        "available": available,
+        "owner": _clean_text(payload.get("owner")) or None,
+        "ownerPid": owner_pid,
+        "ownerRunning": owner_running,
+        "ageMillis": age_millis,
+        "lockPath": str(path),
+        "reason": reason,
+    }
 
 
 def _validate_bounds(bounds: object, field_name: str) -> ScreenBounds:

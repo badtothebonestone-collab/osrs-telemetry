@@ -673,7 +673,15 @@ def find_runelite_window(expected_pid: int) -> RuneLiteWindow:
     user32 = _user32()
     matches: list[RuneLiteWindow] = []
 
-    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    # Keep this signature identical to every other EnumWindows caller in the
+    # process.  ``ctypes`` stores ``argtypes`` on the shared user32 function;
+    # using c_void_p here makes a prior read-only window scan poison this
+    # exact-PID lookup with an otherwise compatible-but-distinct callback type.
+    callback_type = ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HWND,
+        wintypes.LPARAM,
+    )
 
     @callback_type
     def collect(hwnd: int, _lparam: int) -> bool:

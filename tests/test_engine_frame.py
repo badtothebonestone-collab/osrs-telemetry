@@ -21,10 +21,15 @@ from osrs_bot.model import (
     Action,
     ActionKind,
     BANK_INTERFACE_NAME,
+    InventoryItem,
+    InventoryObservation,
+    Observation,
+    PlayerObservation,
     ScreenBounds,
     ScreenPoint,
     VerificationKind,
     VerificationSpec,
+    WidgetObservation,
     WorldPoint,
 )
 from osrs_bot.safety import SafetyCheck
@@ -122,6 +127,8 @@ def _target(key: str, x: int) -> TargetEvidence:
         geometry_frame_id="geometry-100",
         point=ScreenPoint(x, 80),
         bounds=ScreenBounds(x - 5, 75, 11, 11),
+        world_location=WorldPoint(3200 + x, 3200, 0),
+        distance=2,
     )
 
 
@@ -162,13 +169,18 @@ class EngineFrameTests(unittest.TestCase):
             ),
             evidence=evidence,
         )
+        route_progress = TaskProgressSnapshot("route", 3, 19)
+        cycle_progress = TaskProgressSnapshot("cycles", 0, 1)
         snapshot = TaskSnapshot(
             "woodcut_bank",
             TaskStatus.RUNNING,
             "verify_logs",
             definition_id="lumbridge_west_trees_v1",
             profile_id="default_woodcut_one_cycle_v1",
-            progress=TaskProgressSnapshot("route", 3, 19),
+            progress=route_progress,
+            route_step="castle_path_3",
+            route_progress=route_progress,
+            cycle_progress=cycle_progress,
         )
         observation = ObservationReference(
             100,
@@ -209,7 +221,15 @@ class EngineFrameTests(unittest.TestCase):
         payload = frame.to_dict()
         self.assertEqual("engine_frame.v1", payload["schema"])
         self.assertEqual("lumbridge_west_trees_v1", payload["task"]["definitionId"])
+        self.assertEqual("castle_path_3", payload["task"]["routeStep"])
+        self.assertEqual(3, payload["task"]["routeProgress"]["current"])
+        self.assertEqual(0, payload["task"]["cycleProgress"]["current"])
         self.assertEqual("tree:selected", payload["selectedTarget"]["key"])
+        self.assertEqual(
+            {"x": 3300, "y": 3200, "plane": 0},
+            payload["selectedTarget"]["worldLocation"],
+        )
+        self.assertEqual(2, payload["selectedTarget"]["distance"])
         self.assertEqual("item_quantity_increased", payload["lastVerification"]["outcome"]["kind"])
         self.assertIsNone(payload["lastVerification"]["failureKind"])
         self.assertIn("cameraYaw", payload["observation"])
@@ -225,6 +245,72 @@ class EngineFrameTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             frame.stage = EngineStage.TERMINAL  # type: ignore[misc]
         self.assertFalse(hasattr(frame, "__dict__"))
+
+    def test_observation_reference_retains_same_observation_presentation_facts(self) -> None:
+        captured = datetime.now(timezone.utc)
+        location = WorldPoint(3195, 3248, 0)
+        inventory = InventoryObservation(
+            items=(InventoryItem(0, 1511, 3, "Logs"),),
+            slot_count=28,
+            occupied_slots=1,
+            free_slots=27,
+            known=True,
+        )
+        observation = Observation(
+            player=PlayerObservation(),
+            location=location,
+            plane=0,
+            inventory=inventory,
+            nearby_objects=(),
+            menus=(),
+            widgets=WidgetObservation(),
+            canvas_bounds=ScreenBounds(10, 20, 765, 503),
+            game_state="LOGGED_IN",
+            timestamp=captured,
+            tick=101,
+            status="PASS",
+            fresh=True,
+            cache_wall_clock_fresh=True,
+            scene_playable=True,
+            session_id="session-101",
+            client_focused=True,
+            client_process_id=4321,
+            assembled_at=captured,
+            frame_id="frame-101",
+            geometry_frame_id="geometry-101",
+            source_coherent=True,
+        )
+
+        reference = ObservationReference.from_observation(observation)
+        payload = reference.to_dict()
+
+        self.assertEqual("LOGGED_IN", reference.game_state)
+        self.assertTrue(reference.loaded_scene)
+        self.assertTrue(reference.client_focused)
+        self.assertTrue(reference.fresh)
+        self.assertTrue(reference.cache_wall_clock_fresh)
+        self.assertTrue(reference.source_coherent)
+        self.assertIs(location, reference.player_location)
+        self.assertEqual(0, reference.player_plane)
+        self.assertIs(inventory, reference.inventory)
+        self.assertEqual(
+            {"x": 3195, "y": 3248, "plane": 0},
+            payload["playerLocation"],
+        )
+        self.assertEqual(0, payload["playerPlane"])
+        self.assertEqual(
+            {
+                "slot": 0,
+                "itemId": 1511,
+                "quantity": 3,
+                "name": "Logs",
+            },
+            payload["inventory"]["items"][0],
+        )
+        with self.assertRaises(FrozenInstanceError):
+            reference.inventory.known = False  # type: ignore[misc,union-attr]
+        with self.assertRaises(FrozenInstanceError):
+            reference.inventory.items[0].quantity = 4  # type: ignore[misc,union-attr]
 
     def test_activation_attempted_requires_a_boolean(self) -> None:
         with self.assertRaises(TypeError):

@@ -259,6 +259,9 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual("cycles", snapshot.progress.label)
         self.assertEqual(0, snapshot.progress.current)
         self.assertEqual(DEFAULT_BINDING.profile.cycle_goal, snapshot.progress.total)
+        self.assertIs(snapshot.progress, snapshot.cycle_progress)
+        self.assertIsNone(snapshot.route_step)
+        self.assertIsNone(snapshot.route_progress)
 
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
         task.progress.route_index = 2
@@ -266,6 +269,14 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(DEFINITION.route_to_bank.route_id, route_snapshot.progress.label)
         self.assertEqual(2, route_snapshot.progress.current)
         self.assertEqual(len(ROUTE_TO_BANK), route_snapshot.progress.total)
+        self.assertIs(route_snapshot.progress, route_snapshot.route_progress)
+        self.assertEqual(ROUTE_TO_BANK[2].step_id, route_snapshot.route_step)
+        self.assertEqual("cycles", route_snapshot.cycle_progress.label)
+        self.assertEqual(0, route_snapshot.cycle_progress.current)
+        self.assertEqual(
+            DEFAULT_BINDING.profile.cycle_goal,
+            route_snapshot.cycle_progress.total,
+        )
 
     def test_find_tree_requires_exact_name_action_and_screen_geometry(self) -> None:
         invalid_geometry = TargetGeometry(
@@ -316,6 +327,8 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual("test-frame-42", rejected.target.geometry_frame_id)
         self.assertIsNone(rejected.target.point)
         self.assertIsNone(rejected.target.bounds)
+        self.assertEqual(bad.location, rejected.target.world_location)
+        self.assertEqual(bad.distance, rejected.target.distance)
         self.assertEqual(
             (
                 "object_id_not_supported",
@@ -1313,6 +1326,8 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(decision.action.option, decision.evidence.selected.action)
         self.assertEqual(51, decision.evidence.selected.source_tick)
         self.assertEqual(SCREEN, decision.evidence.selected.point)
+        self.assertEqual(selected.location, decision.evidence.selected.world_location)
+        self.assertEqual(selected.distance, decision.evidence.selected.distance)
 
     def test_stairs_require_exact_id_action_plane_and_external_plane_proof(self) -> None:
         stair_index = next(index for index, item in enumerate(ROUTE_TO_BANK) if not item.is_walk)

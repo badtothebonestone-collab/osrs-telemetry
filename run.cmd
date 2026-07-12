@@ -13,10 +13,34 @@ if /I "%MODE%"=="execute" goto execute
 if /I "%MODE%"=="record-demo" goto record_demo
 if /I "%MODE%"=="inspect-demo" goto inspect_demo
 if /I "%MODE%"=="app" goto app
+if /I "%MODE%"=="gui" goto gui
 if /I "%MODE%"=="replay" goto replay
 if /I "%MODE%"=="test" goto test
+if /I "%MODE%"=="help" goto help
+if /I "%MODE%"=="--help" goto help
 
-echo Usage: run.cmd [plugin^|observe^|task [--overlay]^|login COMx^|execute COMx [--overlay]^|record-demo NAME [options]^|inspect-demo PATH^|app COMMAND [options]^|replay^|test] 1>&2
+echo Unknown command: %MODE% 1>&2
+goto help_error
+
+:help
+echo OSRS Automation Engine
+echo.
+echo   run.cmd gui                    Launch the operator desktop application
+echo   run.cmd plugin                 Launch the RuneLite development client
+echo   run.cmd observe                Read one loaded-scene observation
+echo   run.cmd task [--overlay]       Propose one action without gameplay input
+echo   run.cmd execute COMx [--overlay]
+echo                                  Run the validated profile through Arduino
+echo   run.cmd login COMx             Recover a saved authenticated session
+echo   run.cmd record-demo NAME [options]
+echo   run.cmd inspect-demo PATH
+echo   run.cmd app COMMAND [options]  Use the diagnostic application CLI
+echo   run.cmd replay                 Run the golden cycle replay
+echo   run.cmd test                   Run the Python and Java suites
+exit /b 0
+
+:help_error
+call "%~f0" help 1>&2
 exit /b 2
 
 :plugin
@@ -69,6 +93,10 @@ if "%~2"=="" (
     exit /b 2
 )
 python -m osrs_bot.application_cli %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %ERRORLEVEL%
+
+:gui
+python -m osrs_bot.gui
 exit /b %ERRORLEVEL%
 
 :replay

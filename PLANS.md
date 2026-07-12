@@ -220,6 +220,12 @@ runtime logic.
   settled, unresolved, or rejected outcome. Same-direction/in-gain buttonless
   human motion remains source-indistinguishable and subject to the fresh
   semantic/owner veto.
+- **D036 - The operator GUI is a presentation boundary:** the in-process
+  Tkinter controller may call only `EngineApplication` operations and render
+  owner-produced `EngineFrame` truth. It may persist only revalidated harmless
+  preferences, retains bounded events and generation tokens, and must use
+  cooperative lifecycle commands. It cannot own task, safety, verification,
+  telemetry, overlay drawing, login recognition, Arduino, or raw input logic.
 
 ## Phases and acceptance
 
@@ -234,6 +240,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
+| 9. Operator GUI | Complete (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; EngineFrame status; passive overlay; demonstration and diagnostics; Computer Use visual acceptance; Arduino-only live action and authoritative cleanup. |
 | Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
@@ -441,6 +448,31 @@ runtime logic.
 - Final gate: golden replay 2 passed, all 301 Python tests passed, the forced
   fresh 51-test Java suite passed across 6 suites, facade catalog/schema/profile
   commands succeeded, and `git diff --check` passed.
+
+## Phase 9 completed work
+
+- Added the first operator desktop GUI over the existing in-process facade:
+  Run, Live Status, Demonstrations, and Diagnostics, launched by `run.cmd gui`.
+- Added facade-owned connection/login/readiness/overlay/diagnostic services,
+  exact live focus handoff, harmless ignored settings, single-instance
+  ownership, asynchronous non-daemon workers, stale-generation rejection, and
+  cooperative close without moving domain or input authority into widgets.
+- Extended the additive `engine_frame.v1` presentation facts with the exact
+  Observation and task-owned fields needed by the screen. The GUI keeps only
+  the newest frame for the current run and clears it when run identity ends or
+  changes.
+- Computer Use exercised disconnect/connect, Observe Only, overlay, a bounded
+  Arduino Start Live run, Pause/Resume/Safe Stop, manual demonstration
+  record/inspect, and safe close/reopen. Operator actions are separated from
+  engine actions in the ignored acceptance summary.
+- The live test counted two production actions and retained a PASS Arduino
+  receipt plus typed item-gain verification. Terminal cleanup is safe with all
+  commands acknowledged, firmware disarmed, zero held inputs/unresolved
+  commands, and closed ledger/backend.
+- Final gate: 627 Python tests pass; golden replay 2/2 passes; the forced fresh
+  Java suite executes 76 tests across 8 suites with zero failures, errors, or
+  skips; the 7-test static production-input boundary, compileall, and staged
+  diff check pass.
 
 ## Final regression hardening complete
 
@@ -734,8 +766,9 @@ runtime logic.
   framework, planner, behavior tree, task DSL, knowledge fabric, automatic
   learning, or raw demonstration replay.
 - YOLO/model dependencies, runtime LLM control, MCP, a second telemetry
-  endpoint, a full GUI, dynamic plugin/profile frameworks, compatibility layers
-  for deleted architecture, or broad unrelated plugin rewrites.
+  endpoint, GUI-owned runtime/domain logic, dynamic plugin/profile frameworks,
+  compatibility layers for deleted architecture, or broad unrelated plugin
+  rewrites.
 - Anti-detection, stealth, evasion, or randomization intended to avoid
   detection; any weakening of freshness, identity, geometry, binding, menu,
   PIN, verification, Arduino-only input, or cleanup invariants.
@@ -762,11 +795,9 @@ runtime logic.
 - The demonstration path intentionally cannot observe global raw mouse-button
   or keyboard transitions; it records RuneLite semantic click evidence and
   declares those coverage gaps in every manifest.
-- The implemented facade intentionally has no full GUI, daemon, or IPC layer.
-  The overlay has been visually compared against live route, camera, target,
-  verification, and cleanup evidence. The user-performed demonstration, public
-  inspection, and post-demo client cleanup are now accepted final-regression
-  evidence.
+- The implemented GUI remains in-process and intentionally has no daemon or IPC
+  layer. Its overlay retains the terminal run's last EngineFrame until disabled
+  and therefore is not fresh-scene proof after a later client disconnect.
 - The four-device-pixel menu correlation is proven only for the retained
   fixed-client layout on the 175% display. A different layout requires fresh
   measurement; activation authority remains at +/-3 pixels everywhere.

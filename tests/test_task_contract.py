@@ -70,6 +70,8 @@ class TaskContractTests(unittest.TestCase):
             "geometry-7",
             ScreenPoint(1200, 800),
             ScreenBounds(1190, 790, 40, 40),
+            world_location=WorldPoint(3195, 3248, 0),
+            distance=2,
         )
         rejected = RejectedCandidateEvidence(target, ("aim_point_occluded",))
         evidence = DecisionEvidence(selected=target, eligible=(target,))
@@ -82,6 +84,9 @@ class TaskContractTests(unittest.TestCase):
             definition_id="definition-1",
             profile_id="profile-1",
             progress=progress,
+            route_step="west_path_1",
+            route_progress=TaskProgressSnapshot("route", 1, 3),
+            cycle_progress=progress,
         )
 
         with self.assertRaises(FrozenInstanceError):
@@ -106,6 +111,10 @@ class TaskContractTests(unittest.TestCase):
         self.assertFalse(hasattr(rejected, "__dict__"))
         self.assertFalse(hasattr(progress, "__dict__"))
         self.assertFalse(hasattr(decision.action, "__dict__"))
+        self.assertEqual(WorldPoint(3195, 3248, 0), target.world_location)
+        self.assertEqual(2, target.distance)
+        self.assertEqual("west_path_1", snapshot.route_step)
+        self.assertEqual(progress, snapshot.cycle_progress)
 
     def test_decision_and_snapshot_defaults_preserve_generic_tasks(self) -> None:
         decision = Decision("waiting", "no_action_needed", _wait_action())
@@ -115,6 +124,9 @@ class TaskContractTests(unittest.TestCase):
         self.assertIsNone(snapshot.definition_id)
         self.assertIsNone(snapshot.profile_id)
         self.assertIsNone(snapshot.progress)
+        self.assertIsNone(snapshot.route_step)
+        self.assertIsNone(snapshot.route_progress)
+        self.assertIsNone(snapshot.cycle_progress)
 
     def test_diagnostic_evidence_validates_shape_and_membership(self) -> None:
         target = TargetEvidence(
@@ -150,6 +162,14 @@ class TaskContractTests(unittest.TestCase):
             lambda: TargetEvidence("", "Tree", 1276, "Chop", 7, None, None, None),
             lambda: TargetEvidence("target", "Tree", -1, "Chop", 7, None, None, None),
             lambda: TargetEvidence("target", "Tree", 1, "Chop", -1, None, None, None),
+            lambda: TargetEvidence(
+                "target", "Tree", 1, "Chop", 7, None, None, None,
+                world_location=(3195, 3248, 0),  # type: ignore[arg-type]
+            ),
+            lambda: TargetEvidence(
+                "target", "Tree", 1, "Chop", 7, None, None, None,
+                distance=-1,
+            ),
             lambda: RejectedCandidateEvidence(target, ()),
             lambda: RejectedCandidateEvidence(target, ("Not Stable",)),
             lambda: DecisionEvidence(selected=target),
@@ -157,6 +177,12 @@ class TaskContractTests(unittest.TestCase):
             lambda: DecisionEvidence(
                 eligible=(target,),
                 rejected=(RejectedCandidateEvidence(target, ("not_visible",)),),
+            ),
+            lambda: TaskSnapshot(
+                "task", TaskStatus.RUNNING, "state", route_step="step-only"
+            ),
+            lambda: TaskSnapshot(
+                "task", TaskStatus.RUNNING, "state", route_progress="route"
             ),
         )
         for factory in invalid_factories:

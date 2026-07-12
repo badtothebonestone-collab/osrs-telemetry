@@ -169,6 +169,25 @@ PIN, minimized-window, or unsupported-prompt handling, request manual attention.
   reproduced OS, transport, or cleanup defect backed by focused tests and
   proportionate live evidence.
 
+## Computer Use and Operator Verification
+
+- Use Computer Use autonomously for desktop, RuneLite, and GUI verification
+  when it can perform the ordinary operator setup instead of asking the user.
+- Computer Use acts as the human test operator and may use normal software
+  mouse and keyboard input for saved-session login, positioning, manual setup,
+  demonstrations, and visual inspection.
+- Identify those actions as `COMPUTER_USE_OPERATOR_ACTION`; never present them
+  as production-engine input evidence.
+- Production automation remains `ENGINE_AUTOMATED_ACTION` and must still flow
+  through `EngineApplication`, `InputCoordinator`, and the Arduino-only input
+  path with normal verification and authoritative cleanup.
+- User involvement is required only for credentials, MFA, PINs, inaccessible
+  hardware, or an irreversible external action that Computer Use cannot safely
+  perform under the supplied authority.
+- Retain screenshots and explicit observed results for visual acceptance.
+  Computer Use evidence is operator evidence unless a separate engine receipt
+  proves the production action.
+
 ## Work and validation discipline
 
 - Keep `PLANS.md` and `docs/ENGINE_STATUS.md` current after every milestone.

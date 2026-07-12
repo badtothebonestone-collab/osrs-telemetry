@@ -123,6 +123,8 @@ class WoodcutBankTask:
             if status is TaskStatus.BLOCKED and self.progress.failures
             else None
         )
+        route_step, route_progress = self._route_context_snapshot()
+        cycle_progress = self._cycle_progress_snapshot()
         return TaskSnapshot(
             task_id=WOODCUT_BANK_TASK_ID,
             status=status,
@@ -130,7 +132,10 @@ class WoodcutBankTask:
             blocker=blocker,
             definition_id=self.definition.definition_id,
             profile_id=self.binding.profile.profile_id,
-            progress=self._progress_snapshot(),
+            progress=route_progress or cycle_progress,
+            route_step=route_step,
+            route_progress=route_progress,
+            cycle_progress=cycle_progress,
         )
 
     def decide(self, observation: Observation) -> Decision:
@@ -1349,8 +1354,8 @@ class WoodcutBankTask:
                 else TaskPhase.FIND_TREE
             )
 
-    def _progress_snapshot(self) -> TaskProgressSnapshot:
-        phase = (
+    def _contextual_progress_phase(self) -> TaskPhase | None:
+        return (
             self.progress.resume_phase
             if self.progress.phase is TaskPhase.STAIR_DIALOGUE
             else (
@@ -1360,20 +1365,30 @@ class WoodcutBankTask:
                 else self.progress.phase
             )
         )
+
+    def _route_context_snapshot(
+        self,
+    ) -> tuple[str | None, TaskProgressSnapshot | None]:
+        phase = self._contextual_progress_phase()
         if phase is TaskPhase.NAVIGATE_TO_BANK:
             route = self.definition.route_to_bank
-            return TaskProgressSnapshot(
-                route.route_id,
-                self.progress.route_index,
-                len(route.steps),
-            )
-        if phase is TaskPhase.NAVIGATE_TO_TREES:
+        elif phase is TaskPhase.NAVIGATE_TO_TREES:
             route = self.definition.route_to_resource
-            return TaskProgressSnapshot(
-                route.route_id,
-                self.progress.route_index,
-                len(route.steps),
-            )
+        else:
+            return None, None
+        route_index = self.progress.route_index
+        route_step = (
+            route.steps[route_index].step_id
+            if 0 <= route_index < len(route.steps)
+            else None
+        )
+        return route_step, TaskProgressSnapshot(
+            route.route_id,
+            route_index,
+            len(route.steps),
+        )
+
+    def _cycle_progress_snapshot(self) -> TaskProgressSnapshot:
         return TaskProgressSnapshot(
             "cycles",
             self.progress.cycles_completed,
@@ -1395,6 +1410,8 @@ class WoodcutBankTask:
             geometry_frame_id=observation.geometry_frame_id,
             point=target.geometry.screen_point,
             bounds=target.geometry.screen_bounds,
+            world_location=target.location,
+            distance=target.distance,
         )
 
     def _object_decision_evidence(
