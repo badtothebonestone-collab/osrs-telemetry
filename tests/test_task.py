@@ -788,10 +788,10 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 replace(bank_open, bank_known=False),
             ),
             (
-                "bank closed",
-                BANK_ANCHOR,
+                "bank unknown at route overlap",
+                ROUTE_TO_TREES[0].location,
                 inventory(),
-                replace(bank_open, bank_open=False),
+                replace(bank_open, bank_known=False, bank_open=False),
             ),
             (
                 "wrong plane",
@@ -824,36 +824,115 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 )
 
                 self.assertIsNot(TaskPhase.CLOSE_BANK, task.progress.phase)
+                self.assertIsNot(
+                    TaskPhase.NAVIGATE_TO_TREES,
+                    task.progress.phase,
+                )
                 self.assertFalse(task._restart_reconciled_without_cycle_credit)
                 self.assertIsNot(ActionKind.PRESS_KEY, decision.action.kind)
                 self.assertIsNot(ActionKind.CLICK_WIDGET, decision.action.kind)
 
-    def test_open_bank_anchor_restart_rejects_pin_before_input(self) -> None:
+    def test_fresh_task_reconciles_empty_inventory_at_closed_bank_start(self) -> None:
         task = WoodcutBankTask()
-        bank_pin = WidgetObservation(
+        bank_closed = WidgetObservation(
+            bank_known=True,
+            bank_open=False,
+        )
+
+        resumed = task.decide(
+            observation(
+                location=WorldPoint(
+                    BANK_ANCHOR.x,
+                    BANK_ANCHOR.y - 1,
+                    BANK_ANCHOR.plane,
+                ),
+                inv=inventory(),
+                widgets=bank_closed,
+            )
+        )
+
+        self.assertEqual(ActionKind.WAIT, resumed.action.kind)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, task.progress.phase)
+        self.assertEqual(0, task.progress.route_index)
+        self.assertTrue(task._restart_reconciled_without_cycle_credit)
+        self.assertEqual(
+            "reobserved empty inventory at the validated bank return-route start",
+            resumed.reason,
+        )
+
+        task.progress.route_index = len(ROUTE_TO_TREES)
+        completed_resume = task.decide(
+            observation(location=TREE_AREA, inv=inventory(), tick=11)
+        )
+
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertEqual(0, task.progress.cycles_completed)
+        self.assertFalse(task._restart_reconciled_without_cycle_credit)
+
+    def test_open_bank_route_overlap_closes_before_route_resume(self) -> None:
+        task = WoodcutBankTask()
+        bank_open = WidgetObservation(
             bank_known=True,
             bank_open=True,
-            bank_pin_open=True,
             bank_readable=True,
             keyboard_close_possible=True,
         )
 
         resumed = task.decide(
-            observation(location=BANK_ANCHOR, inv=inventory(), widgets=bank_pin)
-        )
-        blocked = task.decide(
             observation(
-                location=BANK_ANCHOR,
+                location=ROUTE_TO_TREES[0].location,
                 inv=inventory(),
-                widgets=bank_pin,
+                widgets=bank_open,
+            )
+        )
+        close = task.decide(
+            observation(
+                location=ROUTE_TO_TREES[0].location,
+                inv=inventory(),
+                widgets=bank_open,
                 tick=11,
             )
         )
 
         self.assertEqual(ActionKind.WAIT, resumed.action.kind)
-        self.assertEqual(ActionKind.WAIT, blocked.action.kind)
-        self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
-        self.assertEqual("bank PIN handling is out of scope", blocked.reason)
+        self.assertEqual(TaskPhase.CLOSE_BANK, task.progress.phase)
+        self.assertEqual(0, task.progress.route_index)
+        self.assertTrue(task._restart_reconciled_without_cycle_credit)
+        self.assertEqual(ActionKind.PRESS_KEY, close.action.kind)
+        self.assertEqual("escape", close.action.key)
+
+    def test_open_bank_anchor_restart_rejects_pin_before_input(self) -> None:
+        for label, location, bank_open in (
+            ("open bank anchor", BANK_ANCHOR, True),
+            ("closed route overlap", ROUTE_TO_TREES[0].location, False),
+        ):
+            with self.subTest(label=label):
+                task = WoodcutBankTask()
+                bank_pin = WidgetObservation(
+                    bank_known=True,
+                    bank_open=bank_open,
+                    bank_pin_open=True,
+                    bank_readable=bank_open,
+                    keyboard_close_possible=bank_open,
+                )
+
+                blocked = task.decide(
+                    observation(
+                        location=location,
+                        inv=inventory(),
+                        widgets=bank_pin,
+                    )
+                )
+
+                self.assertEqual(ActionKind.WAIT, blocked.action.kind)
+                self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
+                self.assertFalse(
+                    task._restart_reconciled_without_cycle_credit
+                )
+                self.assertEqual(
+                    "bank PIN handling is out of scope",
+                    blocked.reason,
+                )
 
     def test_unreadable_open_bank_at_anchor_may_only_close(self) -> None:
         task = WoodcutBankTask()

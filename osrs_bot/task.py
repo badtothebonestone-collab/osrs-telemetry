@@ -401,34 +401,65 @@ class WoodcutBankTask:
             or observation.location.distance_to(work_area.anchor) > work_area.radius
         ):
             bank = self.definition.bank
+            resume_index = self._return_route_resume_index(observation)
             inventory_empty = bool(
                 observation.inventory.known
                 and observation.inventory.occupied_slots == 0
                 and not observation.inventory.items
             )
+            inside_bank_area = bool(
+                observation.plane == bank.anchor.plane
+                and observation.location.distance_to(bank.anchor)
+                <= bank.interaction_radius
+            )
+            if (
+                inventory_empty
+                and inside_bank_area
+                and not observation.widgets.bank_known
+            ):
+                # Inside the bank UI's interaction area, bank_open=false is not
+                # closure proof unless bank_known is also true. Do not let an
+                # overlapping route step bypass that uncertainty.
+                resume_index = None
+            if (
+                inventory_empty
+                and inside_bank_area
+                and observation.widgets.bank_pin_open
+            ):
+                return self._block(
+                    observation,
+                    "bank PIN handling is out of scope",
+                )
             if (
                 inventory_empty
                 and observation.widgets.bank_known
-                and observation.widgets.bank_open
-                and observation.plane == bank.anchor.plane
-                and observation.location.distance_to(bank.anchor)
-                <= bank.interaction_radius
+                and inside_bank_area
+                and (
+                    observation.widgets.bank_open
+                    or resume_index is None
+                )
             ):
                 self.progress.target_key = None
                 self.progress.pending = None
-                self.progress.phase = TaskPhase.CLOSE_BANK
+                self.progress.phase = (
+                    TaskPhase.CLOSE_BANK
+                    if observation.widgets.bank_open
+                    else TaskPhase.NAVIGATE_TO_TREES
+                )
                 self.progress.route_index = 0
                 self._restart_reconciled_without_cycle_credit = True
                 self._movement_verified = False
                 self._route_settle_location = None
                 self._route_settle_since_tick = None
                 self._reset_camera_recovery()
-                return self._wait(
-                    observation,
+                reason = (
                     "reobserved empty inventory with an open bank at the "
-                    "validated bank interaction area",
+                    "validated bank interaction area"
+                    if observation.widgets.bank_open
+                    else "reobserved empty inventory at the validated bank "
+                    "return-route start"
                 )
-            resume_index = self._return_route_resume_index(observation)
+                return self._wait(observation, reason)
             if resume_index is not None:
                 self.progress.target_key = None
                 self.progress.pending = None

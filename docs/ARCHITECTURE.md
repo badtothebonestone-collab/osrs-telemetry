@@ -441,12 +441,19 @@ restoring it. A full inventory may resume only the furthest matching
 anchor/radius on the exact outbound route. A structurally empty inventory
 outside the work area may resume only the furthest matching anchor/radius on the
 exact return route, or the configured bank anchor on the matching plane within
-its interaction radius while the current bank state is known open; that last
-lane closes the interface before starting the return route. Partial, off-route,
-wrong-plane, or closed-bank states receive no restart-reconciliation shortcut;
-ordinary FSM and safety checks then apply without historical cycle credit.
-Because that bank lane can only close, bank contents need not be readable; an
-open PIN blocks before input, and exact widget or keyboard-close support is
-still required.
+its interaction radius while the current bank state is known; that last lane
+closes an open interface first or begins return step 0 when it is already
+closed. An open interface is closed even where a return step overlaps the bank
+area. With a known-closed interface, the furthest exact return-step match takes
+precedence and the bank-area fallback applies only when no step matches.
+Unknown bank state inside the interaction area cannot use an overlapping route
+match because `bankOpen=false` is not closure proof unless `bankKnown=true`.
+Any reported bank PIN state outranks both open/closed route precedence and
+blocks before reconciliation or input.
+Partial, off-route, wrong-plane, or unknown-bank states receive no
+restart-reconciliation shortcut; ordinary FSM and safety checks then apply
+without historical cycle credit. Because the open-bank branch can only close,
+bank contents need not be readable; an open PIN blocks before input, and exact
+widget or keyboard-close support is still required.
 Completing any historical return grants no cycle credit; the active process
 must perform a new full cycle.
