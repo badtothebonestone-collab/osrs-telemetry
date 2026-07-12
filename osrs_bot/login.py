@@ -28,6 +28,7 @@ from .observation import ObservationClient
 MAX_LOGIN_CLICKS = 4
 MAX_LOGIN_SECONDS = 180.0
 TRANSITION_SECONDS = 15.0
+POST_MOVE_VISUAL_SETTLE_SECONDS = 0.05
 MAX_LOADED_SCENE_PROOF_AGE_SECONDS = 2.0
 CLIENT_MARGIN_PX = 8
 MAX_TEMPLATE_SEARCH_ZONE_PIXELS = 4_000_000
@@ -1079,6 +1080,31 @@ class LoginPromptHelper:
                 return InputValidation.deny(
                     f"login prompt revalidation failed: {type(error).__name__}"
                 )
+            refreshed = (
+                self._to_screen_candidate(post_move[0], window.client_bounds)
+                if len(post_move) == 1
+                else None
+            )
+            if (
+                refreshed is None
+                or not self._same_candidate(candidate, refreshed)
+                or not self._safe_candidate(window, refreshed)
+                or not refreshed.match_bounds.contains(actual_point)
+            ):
+                # RuneLite can render its custom cursor one frame behind the
+                # already-settled Win32 cursor. One short no-input rescan keeps
+                # that visual lag inside the firmware lease without weakening
+                # any identity, bounds, ownership, or ambiguity check.
+                self._sleep(POST_MOVE_VISUAL_SETTLE_SECONDS)
+                try:
+                    post_move = self._detector(
+                        self._screenshot(window.client_bounds)
+                    )
+                except Exception as error:  # noqa: BLE001 - fail closed
+                    return InputValidation.deny(
+                        "login prompt settled revalidation failed: "
+                        f"{type(error).__name__}"
+                    )
             if len(post_move) != 1:
                 return InputValidation.deny(
                     "recognized prompt disappeared or became ambiguous after pointer movement"

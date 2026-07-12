@@ -1610,7 +1610,7 @@ class LoginHelperTests(unittest.TestCase):
 
     def test_prompt_disappearing_after_move_blocks_click_and_cleans_up(self) -> None:
         backends: list[FakeBackend] = []
-        detections = iter(((PLAY,), ()))
+        detections = iter(((PLAY,), (), ()))
         helper = build_helper(
             FakeObservations([observation("LOGIN_SCREEN", 1)]),
             lambda image: next(detections),
@@ -1625,7 +1625,7 @@ class LoginHelperTests(unittest.TestCase):
 
     def test_prompt_ambiguity_after_move_blocks_click_and_cleans_up(self) -> None:
         backends: list[FakeBackend] = []
-        detections = iter(((PLAY,), (PLAY, WELCOME)))
+        detections = iter(((PLAY,), (PLAY, WELCOME), (PLAY, WELCOME)))
         helper = build_helper(
             FakeObservations([observation("LOGIN_SCREEN", 1)]),
             lambda image: next(detections),
@@ -1661,7 +1661,7 @@ class LoginHelperTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 backends: list[FakeBackend] = []
-                detections = iter(((PLAY,), (refreshed,)))
+                detections = iter(((PLAY,), (refreshed,), (refreshed,)))
                 helper = build_helper(
                     FakeObservations([observation("LOGIN_SCREEN", 1)]),
                     lambda image: next(detections),
@@ -1677,6 +1677,29 @@ class LoginHelperTests(unittest.TestCase):
                     result.clicks[-1].receipt.firmware_status
                     and result.clicks[-1].receipt.firmware_status.safe
                 )
+
+    def test_one_transient_post_move_visual_miss_is_rescanned(self) -> None:
+        backends: list[FakeBackend] = []
+        detections = iter(((), (PLAY,)))
+        helper = build_helper(
+            FakeObservations([observation("LOGIN_SCREEN", 1)]),
+            lambda image: next(detections),
+            backends=backends,
+        )
+        candidate = helper._to_screen_candidate(PLAY, WINDOW.client_bounds)
+
+        click, receipt = helper._click(
+            WINDOW,
+            candidate,
+            observation("LOGIN_SCREEN", 1),
+        )
+
+        self.assertTrue(click.sent)
+        self.assertTrue(receipt.successful)
+        self.assertIn("mouse_down", backends[0].calls)
+        self.assertIn("mouse_up", backends[0].calls)
+        with self.assertRaises(StopIteration):
+            next(detections)
 
     def test_cleanup_failure_overrides_prior_connected_attempt_result(self) -> None:
         for failure in ("stop_all", "disarm"):
