@@ -18,11 +18,13 @@ task/site remains Lumbridge west ordinary Trees -> Lumbridge Castle bank ->
 return. New flexibility comes from validated profiles and immutable task/site
 definitions, while every task retains its own explicit FSM.
 
-Never introduce a generic game-agent framework, planner, task language, task
-DSL, behavior-tree framework, knowledge fabric, learned control policy,
-automatic learning, MCP surface, compatibility layer for deleted architecture,
-or second telemetry endpoint. Do not add another task or site during the active
-mission.
+Never introduce a generic or high-level game-agent framework or planner that
+bypasses the explicit task FSM, nor a task language, task DSL, behavior-tree
+framework, knowledge fabric, learned control policy, automatic learning, MCP
+surface, compatibility layer for deleted architecture, or second telemetry
+endpoint. Bounded deterministic planners inside an owning boundary, such as a
+pointer trajectory planner, are allowed. Do not add another task or site during
+the active mission.
 
 Anti-detection, stealth, evasion, and randomization intended to avoid detection
 are not project goals.
@@ -58,24 +60,23 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   freshness, PID/session/focus binding, exact identity, geometry, hover/menu
   proof, PIN refusal, required verification, runtime/action bounds, or cleanup.
 - Require a fresh loaded scene before gameplay. `LOGGED_IN` alone is not proof.
-- At every pointer transaction, sample the real current Win32 cursor in the
-  calling thread's proven per-monitor-v2 device-pixel context. Never infer its
-  location from a prior command. A quiet manually displaced cursor inside the
-  pinned RuneLite window may use the bounded movement-only outer-to-canvas
-  ingress. If it is beyond that window, before serial connect the coordinator
-  may translate the exact foreground non-maximized RuneLite window once under
-  the stationary cursor without activation or z-order change, then must discard
-  every stale screen coordinate and reobserve. Never move the pointer across a
-  foreign desktop surface. One fully safe preactivation-only invalidation may
-  be reobserved; repetition blocks.
+- `docs/INPUT_COORDINATOR.md` governs pointer transactions. Always sample the
+  real current Win32 cursor in a proven per-monitor-v2 device-pixel context;
+  never infer it from a prior command. A quiet cursor may use only the bounded
+  ingress or stationary pre-serial window-handoff paths defined there. Never
+  move the pointer across a foreign desktop surface. Any handoff invalidates
+  screen coordinates and requires reobservation; continued interference or a
+  repeated invalidation blocks.
 - Before pointer motion and again before activation, prove the physical mouse
   is quiet, the exact root HWND/PID still owns the point, and current Win32
   outer/client geometry agrees with the intent's outer/client/canvas facts.
   Gameplay may reconcile only a one-device-pixel AWT/native outer-origin
   quantization when outer size is exact and the native client still contains
   the exact canvas; login outer/client geometry remains exact.
-  Attribute and consume only the coordinator's own acknowledged click
-  transition; held or new manual button activity blocks.
+  Windows button state is aggregate and source-blind. Correlate and consume only
+  the bounded transition immediately following the coordinator's acknowledged
+  click; coincident same-button human input remains best effort, while other,
+  new, or persistent manual activity blocks.
 - A firmware MOVE acknowledgement proves command handling, not Windows cursor
   arrival. One late report may receive an additional no-input poll while all
   direction, gain, ownership, focus, and bounds checks remain in force;
@@ -118,18 +119,22 @@ use the disconnect heuristic or authorize input.
   state ownership out of future GUI/overlay code.
 - Overlay and status readers may only render immutable `EngineFrame` evidence.
   They must suppress stale geometry and never rerun selection or safety checks.
-- Runtime control may use task contracts but must not know concrete task phases,
-  item IDs, route facts, or mutable progress internals.
+- Generic runtime orchestration may use task contracts but must not know
+  concrete task phases, item IDs, route facts, or mutable progress internals;
+  the explicit task FSM necessarily owns those task-specific facts.
 - Demonstrations and historical runs are append-only evidence. They may suggest
   reviewed definition/fixture changes but never authorize input or raw replay.
 - Frontend lifecycle commands must carry the current run/capture ID. Pause and
   safe stop are cooperative at no-input boundaries; never kill a worker or
   interrupt an Arduino transaction/pending verification.
-- An LLM may read immutable definitions and evidence offline; it must never emit
-  runtime input or bypass the FSM, safety gate, input coordinator, or verifier.
+- An LLM may inspect immutable definitions/evidence and launch an explicitly
+  user-authorized public wrapper command. It must not synthesize individual
+  runtime actions or bypass the FSM, safety gate, input coordinator, or verifier.
 - Prefer deletion and direct OSRS-specific code over speculative abstraction.
-- Preserve the Arduino firmware/backend unless hardware evidence proves a
-  change is necessary.
+- Preserve Arduino firmware and the wire protocol unless hardware/protocol
+  evidence proves a change is necessary. The host backend may change for a
+  reproduced OS, transport, or cleanup defect backed by focused tests and
+  proportionate live evidence.
 
 ## Work and validation discipline
 
@@ -154,9 +159,11 @@ The final gate commands are:
 .\run.cmd test
 ```
 
-Qualifying live proof must use a newly launched client built from the current
-checkpoint. An existing client may still support bounded read-only diagnosis,
-but never proves later source edits.
+Client/plugin changes require a newly launched RuneLite client built from the
+current checkpoint. Host-only Python changes require a fresh host process,
+proof tied to the current checkout commit, a repinned exact PID/session, and
+fresh telemetry; they may reuse the unchanged RuneLite client. Documentation-
+only edits do not invalidate otherwise current proof.
 
 Non-input live commands are `run.cmd observe`, `run.cmd task`, and
 `run.cmd record-demo NAME`; `run.cmd inspect-demo PATH` verifies finalized
