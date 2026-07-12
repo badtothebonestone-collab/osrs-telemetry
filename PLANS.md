@@ -167,6 +167,18 @@ runtime logic.
   login re-finds and re-screens the client, while gameplay requires a newer
   same-identity sensor tick. Any unproved post-mutation state is terminal, and
   the pointer never traverses foreign desktop surfaces.
+- **D032 - Menu coordinates are correlation evidence, not activation
+  authority:** RuneLite reports menu mouse position as integer source-canvas
+  pixels. At the retained 175%-display fixed-client layout, fresh exact-menu
+  correlation may differ from the settled PMv2 Win32 cursor by at most four
+  device pixels. This does not enlarge the +/-3 activation region, API
+  shape/canvas containment, canonical aim checks, or exact menu identity; five
+  pixels still blocks. A different layout requires fresh measurement.
+- **D033 - Window handoff and Arduino input share one cross-process lease:**
+  the configured port lease is acquired before pointer preflight or any
+  `SetWindowPos`, without opening or arming hardware, and remains held through
+  backend close. Contention yields a safely-unsent empty-ledger receipt and
+  cannot mutate RuneLite while another process owns an input transaction.
 
 ## Phases and acceptance
 
@@ -181,7 +193,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | In progress | The neutral-sensor and external-cursor offline gates pass. Because both postdate the retained PID `11440` cycle, one fresh current-checkpoint observation/cycle is required again, followed by the user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup. |
+| Final regression | In progress | The stitched displaced-login component proof and current displaced-gameplay handoff/reobserve subcriterion are **PASS** at the retained layout. A complete current-checkpoint bank-and-return cycle is **NOT YET EVALUATED**. The user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup are **NOT YET EVALUATED**. |
 
 ## Phase 0 completed work
 
@@ -481,7 +493,7 @@ runtime logic.
   transition. Historical button activity receives a quiet dwell; new activity,
   identity/geometry drift, final point-owner mismatch, or an unproved async
   window mutation still blocks. Deterministic Python coverage is complete; the
-  fresh physical login/gameplay regression remains pending.
+  fresh physical login/gameplay regression remained pending at that checkpoint.
 - A fresh process completed login safely but the first qualifying cycle reached
   the old 80-action default at return step `10/15` after 624.9 seconds. It had
   already harvested, banked, deposited to empty, and passed the earlier cursor
@@ -511,21 +523,74 @@ runtime logic.
   parses as a coherent loaded Python Observation. Catalog, profile schema, and
   default-profile validation commands pass. This production sensor checkpoint
   postdates PID `11440`, so that retained cycle is no longer current-checkpoint
-  proof; a new cycle is pending.
+  proof; a new cycle was pending at that checkpoint.
 - External-cursor offline gate: all 508 Python tests and the 216-test focused
   input set pass, golden replay remains 2/2, compile/diff/catalog/profile gates
   pass, and the forced Java suite remains 76/76 across 8 suites. Read-only live
-  Win32 evidence matched the exact outer/client/canvas split on PID `1968`; a
-  newly launched current-checkpoint client must now prove the physical login
-  handoff and one complete gameplay cycle.
+  Win32 evidence matched the exact outer/client/canvas split on PID `1968`. At
+  that checkpoint, physical login handoff and gameplay execution were the next
+  gates.
 - The post-cycle observation still passed fresh/coherent with no warnings.
   About 47 seconds after terminal completion (10 seconds after that observation),
   RuneLite emitted repeated OpenGL out-of-memory/invalid-operation errors and
   the Gradle-wrapper JVM, PID `500`, failed a native allocation. The launch stack
   then ended; RuneLite PID `11440` and listener `8893` are absent. Logs are
   retained beside the proof. This occurred after terminal engine/input cleanup
-  and does not invalidate the cycle, but the manual demonstration needs a fresh
-  client.
+  and does not invalidate the cycle, but the manual demonstration then required
+  a fresh client.
+
+### Current external-cursor proof at `ae8b9f8`
+
+- Checkpoints `9e29487` through `ae8b9f8` make a quiet cursor takeover a
+  freshly observed state instead of remembered coordinates. They add the
+  stationary-window handoff, caller reobservation, owned-release settlement,
+  login prompt/variant/watchdog hardening, exact one-pixel AWT/native origin
+  reconciliation, a cursor-safe login activation footprint, bounded retained-
+  layout menu-coordinate correlation, and a cross-process input/handoff lease.
+- **PASS - displaced saved-session login component proof.** At `31e1391`,
+  `login_activation_footprint_current.json` returned
+  `loaded_scene_verified` in 34.172 seconds. The external handoff was safely
+  unsent before serial connect with zero commands; disconnect, Play Now, and
+  Click here to play then passed with acknowledged `STOP_ALL`, `DISARM`, safe
+  zero-held status, and closed ledgers/backends. At `ae8b9f8`, all three prompt
+  transactions again passed. `login_after_cross_process_lease.json` itself ends
+  BLOCKED only because a later read-only template scan hit its candidate cap;
+  `observe_after_cross_process_lease_login.json` then proved a fresh coherent
+  loaded scene, and the no-input confirmation returned `loaded_scene_verified`
+  with zero clicks. No single `ae8b9f8` artifact is an end-to-end displaced
+  login run; the current claim composes that direct `31e1391` handoff with the
+  current prompt/loaded results and focused cross-process-lease tests.
+- **PASS - displaced gameplay recovery subcriterion.** The current-checkpoint
+  setup held the cursor exactly at `(606,972)` over foreign PID `6120`, outside
+  foreground RuneLite at x=700. The dry-run first proved an exact Tree `1276`
+  action. The bounded live run then translated RuneLite to x=555 under the
+  stationary cursor, reobserved, and continued Arduino gameplay. Its ten action
+  attempts comprise the safely-unsent handoff plus nine sent Tree transactions
+  (inferred from the window relocation, action count, and inventory increase
+  from 10 to 19 logs). The final retained receipt is PASS with one acknowledged
+  click, `STOP_ALL`, `DISARM`, disarmed zero-held status, zero unresolved/failed
+  commands, and closed ledger/backend; its typed gameplay verification timed
+  out under the short run bound.
+- **FAIL - pre-`8f7c1b2` gameplay activation trial.** The exact Tree menu stayed
+  fresh while RuneLite's scaled menu point was stably four device pixels left
+  of the settled Win32 cursor. No click was sent and cleanup was safe. Eight
+  no-input samples reproduced the same difference. `8f7c1b2` changes only that
+  menu correlation to four pixels; activation and fresh aim remain +/-3 and a
+  five-pixel mismatch still blocks.
+- The 90-second combined proof ended top-level **BLOCKED** because its
+  deliberately short wall-clock bound expired while verifying the final/tenth
+  action attempt (the ninth Tree click). This does not change the handoff and
+  continued-gameplay subcriterion above, but a complete current-checkpoint
+  bank-and-return cycle remains **NOT YET EVALUATED**. An earlier post-fix
+  long-run attempt was also interrupted by a real server disconnect.
+- Current offline gate: 527 Python tests, golden replay 2/2, compile/diff,
+  facade catalog/schema/profile validation, and `run.cmd test` pass. A forced
+  Java rerun executed 76/76 tests across 8 suites with zero failures, errors,
+  or skips from the configured external build directory.
+- `31e1391` streamlined `AGENTS.md` so boundary-local deterministic algorithms,
+  evidence-backed host fixes, and explicitly authorized wrapper execution are
+  allowed without weakening Arduino-only input, loaded-scene, identity,
+  geometry, fail-closed, or cleanup invariants.
 
 ## Prohibited during this mission
 
@@ -544,8 +609,9 @@ runtime logic.
 - The original baseline corpus is stitched and lacks complete raw observations,
   command/ACK receipts, and immutable source provenance. The 2026-07-11 PID
   `11440` proof is a separate uninterrupted pre-audit cycle with its terminal
-  JSON and final receipt preserved in ignored local evidence. A fresh
-  `f2007eb` cycle must replace it as current-checkpoint proof.
+  JSON and final receipt preserved in ignored local evidence. Current
+  `ae8b9f8` evidence proves displaced login and gameplay recovery, but not a
+  complete bank-and-return cycle.
 - Each new source tick can still force a world-model refresh behind a 250 ms
   provider wait. The final pre/post observations were fresh, coherent, and
   warning-free, but this remains a latency cost rather than a second cache.
@@ -562,7 +628,10 @@ runtime logic.
   verification, and cleanup evidence. One short user-performed demonstration
   and its inspected artifact plus post-demo client cleanup remain final-
   regression evidence.
-- Structural tests cover neutral `Chatmenu` dialogue capture; the fresh cycle
-  must confirm the live staircase prompt/options use the pinned widget shape.
-  Any mismatch remains fail-closed and is not permission to restore text
-  classification in the sensor.
+- The four-device-pixel menu correlation is proven only for the retained
+  fixed-client layout on the 175% display. A different layout requires fresh
+  measurement; activation authority remains at +/-3 pixels everywhere.
+- Structural tests cover neutral `Chatmenu` dialogue capture; a complete
+  current-checkpoint cycle still needs to confirm the live staircase
+  prompt/options use the pinned widget shape. Any mismatch remains fail-closed
+  and is not permission to restore text classification in the sensor.

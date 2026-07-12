@@ -2,14 +2,16 @@
 
 ## Current milestone
 
-**Phase 8 is complete — acceptance-audit live revalidation is active.**
+**Phase 8 is complete - external-cursor final regression is active.**
 
-The `f2007eb` sensor/definition audit passes every offline gate. It postdates the
-retained PID `11440` cycle, so a fresh current-checkpoint observation and default
-cycle are required again. The user-performed demonstration, artifact inspection,
-and post-demo cleanup then remain before closeout.
+The host/input stack through `ae8b9f8` passes its current offline gates. The
+stitched displaced-login component proof and current displaced-gameplay
+handoff/reobserve subcriterion are **PASS** at the retained fixed-client 175%
+layout. A complete current-checkpoint bank-and-return cycle is **NOT YET
+EVALUATED**. The user-performed demonstration, artifact inspection, and
+post-demo cleanup are **NOT YET EVALUATED**.
 
-Current hardening checkpoint: `f2007eb sensor: enforce neutral source contract`
+Current hardening checkpoint: `ae8b9f8 input: lease window handoff across processes`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -78,6 +80,19 @@ Regression command:
   remains strong input/cycle evidence but no longer proves the later `f2007eb`
   production sensor checkpoint.
 - All live gameplay input remains Arduino-only; no software fallback exists.
+- The current displaced-login behavior has a stitched component proof. The
+  direct `31e1391` run safely handed off with zero commands, passed the
+  disconnect/Play Now/Click here transactions with complete cleanup, and
+  reached a loaded scene. At `ae8b9f8`, the three prompt transactions and
+  loaded outcome passed again, while focused tests cover lease contention. No
+  single `ae8b9f8` artifact is a direct end-to-end displaced-login run.
+- Current-checkpoint displaced gameplay recovery is proven as a subcriterion at
+  the retained layout. With the cursor stationary outside RuneLite over foreign
+  PID `6120`, the engine moved only the pinned window, reobserved, and sent nine
+  Tree interactions; inventory increased from 10 to 19 logs. The
+  bounded run ended top-level BLOCKED when its deliberately short runtime
+  expired while verifying the final/tenth action attempt (the ninth Tree
+  click), and its final PASS receipt/cleanup is fully safe.
 - Gameplay and saved-session login now submit immutable approved intents to one
   `InputCoordinator`; neither can open an Arduino session or call raw input.
 - Normal gameplay pointer transit remains inside the loaded-scene telemetry
@@ -120,8 +135,8 @@ Regression command:
   plan endpoint inside the explicit activation region is eligible. Fresh
   validators receive that actual point and cursor stability is checked before
   and after validation. Gameplay activation stays within +/-3 pixels of the
-  approved safe point; saved-session login may use only its freshly recognized
-  prompt bounds.
+  approved safe point; template-backed saved-session login uses only a tight
+  cursor-safe footprint inside its freshly recognized prompt bounds.
 - If an acknowledged MOVE initially shows no commanded-axis effect, the
   coordinator performs exactly one additional no-input sample before any new
   MOVE. Initial and incremental samples independently enforce direction, gain,
@@ -146,6 +161,14 @@ Regression command:
   may receive one fresh reobservation with no target suppression only when the
   receipt has the matching failure kind, preactivation-only ledger, and complete
   cleanup; repetition blocks.
+- Before pointer preflight or any window mutation, the host acquires the same
+  cross-process port lease used by the later Arduino session without opening or
+  arming hardware. Contention leaves an empty closed ledger and cannot reach
+  `SetWindowPos`, serial open, MOVE, or activation.
+- RuneLite's integer source-canvas menu point has a retained-layout-only
+  four-device-pixel correlation bound to the settled Win32 cursor. Actual
+  activation and both source/fresh canonical aim checks remain +/-3, exact menu
+  identity is still required, and five pixels blocks.
 - If normal login template work caps on a coherent loaded scene, one larger
   bounded scan checks only the two exact retained templates. It excludes the
   disconnect-dialog heuristic, cannot authorize input, and supports PASS only
@@ -252,6 +275,37 @@ terminal frame and transaction `input-00000082`, not receipts/history for
 actions 1-81, so it proves the uninterrupted cycle outcome and final cleanup but
 is not a complete raw audit of every intermediate transaction.
 
+The current cursor-handoff bundle is narrower host/input evidence, not a
+completed-cycle claim. Its login conclusion is compositional rather than one
+direct current-checkpoint execution. `login_activation_footprint_current.json`
+proves the displaced login handoff and all three prompt transactions at
+`31e1391`. At
+`ae8b9f8`, `login_after_cross_process_lease.json` records three more PASS prompt
+transactions but ends BLOCKED when a subsequent read-only template scan hits
+its bounded candidate cap; the following coherent loaded observation and
+zero-click loaded confirmation establish the successful outcome. Despite their
+filenames, `login_current_external_success.json` and
+`login_visual_retry_success.json` have top-level status BLOCKED and remain
+diagnostic failures, not success evidence. Content and status are authoritative
+throughout this folder: `login_success.json` is also BLOCKED;
+`login_complete.json` and `login_final.json` are ERROR; and
+`execute_gameplay_quantization_retry.json` is a zero-byte interrupted output.
+None is decisive success evidence.
+
+For gameplay, `gameplay_external_actionable_current_lease_setup.json` proves
+that RuneLite moved relative to an unchanged cursor without pointer input before
+execution. The bounded run then relocated only RuneLite, reobserved, and grew
+the inventory from 10 to 19 logs. Runtime output retains only its last execution
+receipt, so the first safely-unsent handoff and nine sent interactions are
+inferred from the setup, geometry relocation, action count, and inventory delta;
+the first eight interactions advanced runtime, while the ninth has the retained
+PASS input receipt and post-run inventory evidence but its typed verification
+timed out. This proves displaced gameplay recovery at the retained layout, not
+nine typed verification passes or a full bank-and-return cycle.
+Windows does not identify whether physical pointer displacement came from a
+particular human or device, so the no-input relative-displacement setup proves
+the geometry condition and recovery behavior rather than source attribution.
+
 ## Operational oddities observed
 
 - The user's apparent manual-cursor location loss reproduced as DPI
@@ -288,6 +342,29 @@ is not a complete raw audit of every intermediate transaction.
   `NpcAggroAreaPlugin` null-player exception also appeared during startup; the
   execute stderr otherwise contains only the normal focus instruction wrapped
   by PowerShell as `NativeCommandError`.
+- Subsequent live testing separated several bounded edge cases from manual
+  interference: delayed observation of the coordinator's owned button release,
+  cursor occlusion of login glyphs, one-frame prompt rendering, disconnect
+  dialog variants, matcher watchdog cost, one-pixel AWT/native origin
+  quantization, and integer source-canvas menu quantization. Each now has
+  focused fail-closed coverage.
+- The pre-`8f7c1b2` gameplay mismatch was stable: settled Win32
+  `(1854,991)` versus fresh RuneLite menu `(1850,991)`, with eight identical
+  no-input samples and exact `Chop down` / `Tree` identity. The four-pixel bound
+  applies only to menu correlation; it does not widen activation authority.
+- That four-pixel allowance is evidence-backed only for the retained
+  fixed-client layout on the 175% display. It is not a general cross-layout
+  calibration.
+- An earlier post-fix long-run attempt reached a real "You were disconnected
+  from the server" dialog. The cause is unproven; it prevented that run from
+  producing a terminal gameplay receipt and is not evidence of an input-engine
+  failure.
+- The current client log also contains unrelated/nonfatal startup and plugin
+  noise: a reflective-access exception, repeated NpcAggroArea null-player
+  subscriber exceptions during login-state transitions, World Hopper ping/DNS
+  failures, an LWJGL JNI-version warning, and a WDDM performance notification.
+  This proof bundle contains no new `GL_OUT_OF_MEMORY`, `GL_INVALID_OPERATION`,
+  or native-allocation failure.
 
 ## Validation
 
@@ -343,8 +420,25 @@ is not a complete raw audit of every intermediate transaction.
   8 suites with zero failures, errors, or skips. Read-only live PMv2 proof on
   PID `1968`/HWND `328854` matched outer
   `(1179,472,2243,1585)`, client `(1191,472,2219,1573)`, and contained canvas
-  `(1199,520,2151,1519)`. Physical login/gameplay execution from this source
-  checkpoint is the next gate.
+  `(1199,520,2151,1519)`. At that checkpoint, physical login/gameplay execution
+  was the next gate.
+- Current `ae8b9f8` gate: 527 Python tests passed; golden replay passed 2/2;
+  `python -m compileall`, `git diff --check`, `run.cmd test`, catalog,
+  profile-schema, and default-profile validation passed. A forced Java rerun
+  executed 76 tests across 8 suites with zero failures, errors, or skips; counts
+  came from the configured external Gradle build directory. Focused tests also
+  prove that cross-process lease contention cannot reach `SetWindowPos`, serial
+  open, or input.
+- Current live handoff evidence: displaced saved-session login and displaced
+  gameplay recovery subcriteria are PASS at the retained layout. Login is the
+  stitched `31e1391` direct handoff plus current prompt/loaded and lease-test
+  chain described above, not one direct `ae8b9f8` run. The bounded gameplay run
+  executed 10 action attempts, increased inventory from 10 to 19 logs, and
+  retained a final PASS transaction with acknowledged `STOP_ALL`, `DISARM`, safe
+  firmware status, zero unresolved/failed commands, and closed ledger/backend.
+  Its top-level BLOCKED status records only the deliberately short runtime
+  expiring during the tenth attempt's verification; a complete cycle was not
+  evaluated.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -360,19 +454,22 @@ is not a complete raw audit of every intermediate transaction.
 
 ## Remaining limitations and next work
 
-- A fresh current-checkpoint observation/default cycle is required because both
-  production sensor and cursor/input code changed after PID `11440`. The same
-  run should confirm the displaced-cursor login and gameplay handoffs plus real
-  `Chatmenu` staircase prompt/option structure; any mismatch remains
+- A complete `ae8b9f8` default bank-and-return cycle is **NOT YET EVALUATED**.
+  The current short run proves external-cursor recovery and continued Tree
+  interactions, but does not reach banking, return, terminal `COMPLETE`, or the
+  live `Chatmenu` staircase prompt/option structure. Any mismatch remains
   fail-closed.
 - An async window-position request that misses its 750 ms convergence deadline
   cannot be canceled and may complete later. That attempt is terminal and sends
   no input; every later attempt rechecks exact geometry. Cross-monitor
   mixed-DPI placement is deterministically covered and safely fail-closed but
   has not been physically exercised on this one-monitor machine.
+- The four-device-pixel menu correlation bound is proven only on the retained
+  fixed-client 175% layout. Arbitrary layouts require fresh measurement; the
+  activation, canonical-aim, target-bound, and exact-menu gates remain strict.
 - One short user-performed manual demonstration and `inspect-demo` verification
-  remain required afterward. It needs a current-checkpoint launch and
-  saved-session login when the user is ready.
+  plus post-demo endpoint/client cleanup are **NOT YET EVALUATED**. The current
+  client may remain available for that explicit human step.
 - The pre-audit proof package retains only the terminal gameplay receipt rather than
   all 82 transaction receipts. The runtime result and plugin timeline strongly
   prove the cycle outcome, but the artifact is not a full action-by-action audit.
@@ -384,6 +481,6 @@ is not a complete raw audit of every intermediate transaction.
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
-  demonstration, and frontend composition contracts are implemented. The fresh
-  cycle, manual demo/inspection, and final confirmation that no client or proof
-  endpoint remains are pending.
+  demonstration, and frontend composition contracts are implemented. The full
+  current-checkpoint cycle, manual demo/inspection, and final confirmation that
+  no client or proof endpoint remains are pending.
