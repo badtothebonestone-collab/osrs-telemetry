@@ -420,6 +420,15 @@ def _disconnected_dialog_candidate(
     bottom_border = screenshot.crop(
         (center_x - 120, center_y + 30, center_x + 120, center_y + 45)
     )
+    left_border = screenshot.crop(
+        (center_x - 120, center_y - 45, center_x - 105, center_y + 45)
+    )
+    right_border = screenshot.crop(
+        (center_x + 105, center_y - 45, center_x + 120, center_y + 45)
+    )
+    center_label = screenshot.crop(
+        (center_x - 80, center_y - 25, center_x + 80, center_y + 25)
+    )
     if min(dialog.width, dialog.height, button.width, button.height) <= 0:
         return None
 
@@ -427,16 +436,30 @@ def _disconnected_dialog_candidate(
     button_luma = _mean_luma(button)
     top_border_luma = _mean_luma(top_border)
     bottom_border_luma = _mean_luma(bottom_border)
+    side_border_luma = min(_mean_luma(left_border), _mean_luma(right_border))
     button_gray = button.convert("L")
     histogram = button_gray.histogram()
     bright_ratio = sum(histogram[165:]) / max(1, sum(histogram))
+    center_histogram = center_label.convert("L").histogram()
+    center_bright_ratio = sum(center_histogram[165:]) / max(
+        1,
+        sum(center_histogram),
+    )
+    balanced_horizontal_border = (
+        top_border_luma < button_luma + 10.0
+        and bottom_border_luma < button_luma + 10.0
+        and abs(top_border_luma - bottom_border_luma) <= 20.0
+    )
+    cursor_tolerant_button_shape = (
+        min(top_border_luma, bottom_border_luma) < button_luma + 10.0
+        and side_border_luma <= button_luma - 5.0
+        and center_bright_ratio >= 0.004
+    )
     detected = (
         28.0 <= dialog_luma <= 120.0
         and 20.0 <= button_luma <= 115.0
-        and top_border_luma < button_luma + 10.0
-        and bottom_border_luma < button_luma + 10.0
-        and abs(top_border_luma - bottom_border_luma) <= 20.0
         and bright_ratio >= 0.004
+        and (balanced_horizontal_border or cursor_tolerant_button_shape)
     )
     if not detected:
         return None

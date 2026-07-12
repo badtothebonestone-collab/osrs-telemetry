@@ -839,6 +839,31 @@ class LoginDetectionTests(unittest.TestCase):
 
         self.assertEqual(detect_login_surfaces(screenshot), ())
 
+    def test_cursor_contaminated_disconnect_border_remains_detectable(self) -> None:
+        screenshot = Image.new("RGB", (1000, 700), (55, 18, 14))
+        for x in range(250, 750):
+            for y in range(238, 483):
+                screenshot.putpixel((x, y), (60, 38, 32))
+        center_x, center_y = 500, 427
+        for x in range(center_x - 120, center_x + 120):
+            for y in range(center_y - 45, center_y + 45):
+                screenshot.putpixel((x, y), (55, 42, 35))
+        for x in range(center_x - 120, center_x + 120):
+            for y in range(center_y - 45, center_y - 30):
+                screenshot.putpixel((x, y), (15, 10, 8))
+            for y in range(center_y + 30, center_y + 45):
+                screenshot.putpixel((x, y), (235, 220, 185))
+        for x in range(center_x + 105, center_x + 120):
+            for y in range(center_y - 45, center_y + 30):
+                screenshot.putpixel((x, y), (15, 10, 8))
+        for x in range(center_x - 40, center_x + 41, 8):
+            for y in range(center_y - 10, center_y + 11):
+                screenshot.putpixel((x, y), (235, 220, 185))
+
+        candidates = detect_login_surfaces(screenshot)
+
+        self.assertEqual(["disconnected_ok"], [item.name for item in candidates])
+
     def test_detects_play_now_at_the_live_high_dpi_scale(self) -> None:
         screenshot = Image.new("RGB", (2219, 1573), (55, 18, 14))
         with Image.open(Path(TEMPLATE_DIR) / "play_now.png") as template:
