@@ -4,23 +4,18 @@
 
 **Phase 8 is complete - external-cursor final regression is active.**
 
-The host/input stack through the current delayed-MOVE candidate passes its
-offline gates. The stitched displaced-login component proof and current
-displaced-gameplay
-handoff/reobserve subcriterion are **PASS** at the retained fixed-client 175%
-layout. The committed `07de1ef` uninterrupted attempt was **BLOCKED** after
-reaching a fresh outbound route at step `16/19`; a complete cycle on the new
-200/240 ms delayed-MOVE candidate is **NOT YET EVALUATED**. The user-performed
-demonstration, artifact inspection, and post-demo cleanup are
+The host/input stack through delayed-MOVE checkpoint `6eef48c` passes its
+offline and live gates. Displaced login/gameplay recovery, one directly
+observed 78 ms delayed MOVE, and a complete current-checkpoint default cycle are
+**PASS** at the retained fixed-client 175% layout. The user-performed
+demonstration, artifact inspection, and post-demo cleanup remain
 **NOT YET EVALUATED**.
 
-Current checkpoint: `input: await bounded cursor move feedback` (D035; use Git
-history for its final hash).
+Current input checkpoint: `6eef48c input: await bounded cursor move feedback`.
 
-Current input candidate: the committed source-blind 500 ms owned-button bound
-plus the absolute 200 ms MOVE-effect / 240 ms stability contract,
-conservative post-activation classification, and persisted receipt/EngineFrame
-truth.
+Current input contract: the source-blind 500 ms owned-button bound plus the
+absolute 200 ms MOVE-effect / 240 ms stability contract, conservative
+post-activation classification, and persisted receipt/EngineFrame truth.
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -420,6 +415,34 @@ the geometry condition and recovery behavior rather than source attribution.
   The user was asleep, so this failure also does not support manual movement as
   its cause. A later PASS observation was console-only and is not claimed as a
   retained JSON artifact.
+- Checkpoint `6eef48c` then produced direct live delayed-MOVE proof during a
+  25.656-second saved-session login. All three allowed clicks passed. The final
+  click retained one settled feedback wait: effect first/fully observed at
+  78 ms, three extra no-input polls, stable completion at 125 ms, and no
+  unresolved command. Every click ended with acknowledged `STOP_ALL`, `DISARM`,
+  disarmed zero-held STATUS, and closed ledger/backend. The proof SHA-256 is
+  `C28224D84623D70F8B60D49512355590CB45B4B12BCD0BF0A97BC8ED33743B37`.
+- The first `6eef48c` gameplay continuation began from full inventory at
+  outbound step `16/19`. It crossed the old terminal boundary, completed the
+  restart recovery, harvested and banked a fresh inventory, deposited to empty,
+  and reached return step `9/15` before the configured 100-action cap. Its
+  2,137 observations over 807.586603 seconds ended with a successful final
+  action receipt and authoritative safe cleanup; this was a bounded limit, not
+  a cursor failure. The proof SHA-256 is
+  `420FC2929A713EC8EF787492209073B02DE93F44B78D70898B2EA9D56D8DDBA5`.
+- From that exact empty-inventory return step, one final bounded continuation
+  completed a new current-checkpoint cycle in 89 actions, 2,214 observations,
+  and 810.725564 seconds. Terminal state was `COMPLETE`, `cycles 1/1`, reason
+  `arrived at route step west_trees`, with no blocker and fully safe final
+  receipt/runtime cleanup. Its SHA-256 is
+  `B91B1025CD9343991A46ABB55045CA63DA5DB978748466338E7B264CAF83130D`.
+  A retained post-run observation then passed fresh/coherent/loaded with empty
+  inventory, no warnings/missing capabilities, and SHA-256
+  `2CF4755C91074505A683919066FAA14B6B06BEBED1E6AED54ABD262DE59A6F6C`.
+  No bot process or Arduino lease remained. The user was asleep throughout, so
+  this direct regression required no manual mouse positioning or assistance.
+  All `6eef48c` artifacts are retained under
+  `_run_proofs/final_regression/20260711_cursor_handoff_complete_cycle/`.
 - The current client log also contains unrelated/nonfatal startup and plugin
   noise: a reflective-access exception, repeated NpcAggroArea null-player
   subscriber exceptions during login-state transitions, World Hopper ping/DNS
@@ -500,8 +523,8 @@ the geometry condition and recovery behavior rather than source attribution.
   reset, source-blind same-button limits, and written/ambiguous/rejected/failed
   widget and key activation evidence.
 - D035 delayed-MOVE offline gate: 560 Python tests and the focused 154-test
-  cross-boundary suite pass;
-  coordinator-only coverage passes 107 tests. `python -m compileall` and
+  cross-boundary suite pass; coordinator-only coverage passes 107 tests.
+  `python -m compileall` and
   `git diff --check`, `run.cmd test`, golden replay 2/2, catalog,
   profile-schema, and default-profile validation pass. A forced noncached Java
   rerun executed 76 tests across 8 suites with zero failures, errors, or skips
@@ -510,7 +533,7 @@ the geometry condition and recovery behavior rather than source attribution.
   observed after 200 ms, instability at 240 ms, staggered axes, point-owner
   loss, physical-button activity, final drift, clock failure, safe BLOCKED
   cleanup classification, and nonempty EngineFrame serialization.
-- Current live handoff evidence: displaced saved-session login and displaced
+- Earlier live handoff evidence: displaced saved-session login and displaced
   gameplay recovery subcriteria are PASS at the retained layout. Login is the
   stitched `31e1391` direct handoff plus current prompt/loaded and lease-test
   chain described above, not one direct `ae8b9f8` run. The bounded gameplay run
@@ -525,11 +548,21 @@ the geometry condition and recovery behavior rather than source attribution.
   boundary before the semantic context-row click. Cleanup was fully safe. Its
   SHA-256 is
   `8F1DB084865262C58B322F6B52D0C439BE59611DAD7A0C5FFA70F40400242960`.
-- Latest live attempt at `07de1ef`: the 12.5-minute run reached outbound step
+- Prior live attempt at `07de1ef`: the 12.5-minute run reached outbound step
   `16/19` and then ended BLOCKED before activation on an acknowledged MOVE whose
   Windows effect was not observed inside the old roughly 60 ms samples. Cleanup
   was fully safe. Its SHA-256 is
   `61D7DFE5C7C168941BD0E827DF5307B1853F0BA8F7B22FE467D7711D9800AA99`.
+- Current `6eef48c` live gate: saved-session login passed in 25.656 seconds and
+  directly settled one delayed cursor effect first/fully seen at 78 ms, with
+  three extra polls and stable completion at 125 ms. A bounded 100-action
+  recovery run then crossed the former step-16 blocker and progressed through a
+  fresh harvest/bank/deposit to empty-inventory return step `9/15`, ending only
+  on its configured action limit with safe cleanup. From that exact state, the
+  final continuation completed `cycles 1/1` at `west_trees` in 89 actions,
+  2,214 observations, and 810.725564 seconds. Terminal and post-run cleanup were
+  safe; the retained post-observation was loaded/fresh/coherent with no warnings
+  or missing capabilities. No Python bot or Arduino lease remained.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -545,14 +578,10 @@ the geometry condition and recovery behavior rather than source attribution.
 
 ## Remaining limitations and next work
 
-- A complete default bank-and-return cycle on the D035 delayed-MOVE candidate
-  is **NOT YET EVALUATED**. The committed `07de1ef` attempt reached fresh
-  outbound step `16/19` but not terminal `COMPLETE`. It live-integrated the
-  500 ms button code without proving a transition over 100 ms, then exposed the
-  separate ACKed-MOVE/Windows-feedback boundary. D035 now retains the elapsed
-  and sampled evidence instead of relying on another blind deadline extension.
-  The client later idled to `LOGIN_SCREEN`, so the next live retry requires a
-  fresh Arduino-only loaded-scene login proof first.
+- The D035 delayed-MOVE path and a complete default cycle are now directly live-
+  proven. The separate 500 ms owned-button code is live-integrated and its old
+  terminal blocker did not recur, but no artifact measures a button transition
+  over 100 ms. Windows same-button state remains source-indistinguishable.
 - An async window-position request that misses its 750 ms convergence deadline
   cannot be canceled and may complete later. That attempt is terminal and sends
   no input; every later attempt rechecks exact geometry. Cross-monitor
@@ -581,6 +610,6 @@ the geometry condition and recovery behavior rather than source attribution.
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
-  demonstration, and frontend composition contracts are implemented. The full
-  D035 cycle, manual demo/inspection, and final confirmation that
-  no client or proof endpoint remains are pending.
+  demonstration, and frontend composition contracts are implemented. Manual
+  demo/inspection and final confirmation that no client or proof endpoint
+  remains are pending.

@@ -226,7 +226,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | In progress | The stitched displaced-login component proof and current displaced-gameplay handoff/reobserve subcriterion are **PASS** at the retained layout. A complete current-checkpoint bank-and-return cycle is **NOT YET EVALUATED**. The user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup are **NOT YET EVALUATED**. |
+| Final regression | In progress | Displaced login/gameplay recovery, direct delayed-MOVE settlement, and a complete current-checkpoint bank-and-return cycle are **PASS** at the retained layout. The user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup are **NOT YET EVALUATED**. |
 
 ## Phase 0 completed work
 
@@ -613,9 +613,10 @@ runtime logic.
 - The 90-second combined proof ended top-level **BLOCKED** because its
   deliberately short wall-clock bound expired while verifying the final/tenth
   action attempt (the ninth Tree click). This does not change the handoff and
-  continued-gameplay subcriterion above, but a complete current-checkpoint
-  bank-and-return cycle remains **NOT YET EVALUATED**. An earlier post-fix
-  long-run attempt was also interrupted by a real server disconnect.
+  continued-gameplay subcriterion above. At that checkpoint a complete cycle
+  was not evaluated, and an earlier long run was interrupted by a real server
+  disconnect; the later `6eef48c` proof below now supplies the complete current-
+  checkpoint cycle.
 - Historical `ae8b9f8` offline gate: 527 Python tests, golden replay 2/2, compile/diff,
   facade catalog/schema/profile validation, and `run.cmd test` pass. A forced
   Java rerun executed 76/76 tests across 8 suites with zero failures, errors,
@@ -662,16 +663,33 @@ runtime logic.
   `61D7DFE5C7C168941BD0E827DF5307B1853F0BA8F7B22FE467D7711D9800AA99`). The
   artifact cannot distinguish a late Windows report from lost/no effect. The
   user was asleep, so it does not support manual movement as the cause.
-- The D035 checkpoint candidate replaces that blind sampling limit with the
+- Checkpoint `6eef48c` replaces that blind sampling limit with the
   absolute 200/240 ms contract and retained per-transaction feedback evidence.
   Its offline gate passes 560 Python tests, the 107-test coordinator suite, the
   154-test cross-boundary suite, compileall, diff-check, golden replay 2/2,
   `run.cmd test`, catalog, profile-schema, and default-profile validation. A
   forced noncached Java rerun executed 76/76 tests across 8 suites from the
   configured external build directory.
-- A complete fresh cycle on the D035 candidate remains **NOT YET EVALUATED**.
-  After checkpointing, the next live action is one bounded Arduino-only retry
-  from fresh loaded-scene evidence, followed by explicit cleanup proof.
+- **PASS - direct delayed-MOVE proof.** The `6eef48c` login passed
+  `loaded_scene_verified` in 25.656 seconds with three allowed Arduino-only
+  clicks. The final click retained one settled feedback wait: effect
+  first/fully observed at 78 ms, three extra no-input polls, stable completion
+  at 125 ms, and fully safe cleanup. Its SHA-256 is
+  `C28224D84623D70F8B60D49512355590CB45B4B12BCD0BF0A97BC8ED33743B37`.
+- A first bounded current-checkpoint gameplay continuation crossed the former
+  step-16 cursor blocker, completed recovery plus a fresh harvest/bank/deposit,
+  and reached empty-inventory return step `9/15`. Its configured 100-action cap
+  ended the 2,137-observation/807.586603-second run with safe cleanup, not a
+  cursor failure (SHA-256
+  `420FC2929A713EC8EF787492209073B02DE93F44B78D70898B2EA9D56D8DDBA5`).
+- **PASS - complete current-checkpoint cycle.** From that exact return state,
+  one final bounded continuation reached `COMPLETE`, `cycles 1/1`, and
+  `west_trees` in 89 actions, 2,214 observations, and 810.725564 seconds. It had
+  no blocker and proved acknowledged `STOP_ALL`, `DISARM`, disarmed zero-held
+  STATUS, zero unresolved commands, and closed ledger/backend (SHA-256
+  `B91B1025CD9343991A46ABB55045CA63DA5DB978748466338E7B264CAF83130D`). The
+  retained post-observation was loaded/fresh/coherent with no warnings or
+  missing capabilities. No bot process or Arduino lease remained.
 
 ## Prohibited during this mission
 
@@ -691,8 +709,8 @@ runtime logic.
   command/ACK receipts, and immutable source provenance. The 2026-07-11 PID
   `11440` proof is a separate uninterrupted pre-audit cycle with its terminal
   JSON and final receipt preserved in ignored local evidence. Current evidence
-  proves displaced login/gameplay recovery and progress to outbound step
-  `16/19`, but not a complete current-candidate bank-and-return cycle.
+  now proves displaced login/gameplay recovery, direct 78 ms delayed-MOVE
+  settlement, and a complete current-checkpoint bank-and-return cycle.
 - Each new source tick can still force a world-model refresh behind a 250 ms
   provider wait. The final pre/post observations were fresh, coherent, and
   warning-free, but this remains a latency cost rather than a second cache.
@@ -712,10 +730,9 @@ runtime logic.
 - The four-device-pixel menu correlation is proven only for the retained
   fixed-client layout on the 175% display. A different layout requires fresh
   measurement; activation authority remains at +/-3 pixels everywhere.
-- Structural tests cover neutral `Chatmenu` dialogue capture; a complete
-  current-checkpoint cycle still needs to confirm the live staircase
-  prompt/options use the pinned widget shape. Any mismatch remains fail-closed
-  and is not permission to restore text classification in the sensor.
+- Structural tests cover neutral `Chatmenu` dialogue capture, and the complete
+  current-checkpoint cycle confirms the live staircase prompt/options remained
+  compatible with the pinned widget shape.
 - `EngineFrame` intentionally retains only the latest execution receipt. A
   delayed-feedback receipt is complete for its transaction, but a successful
   one-reobservation retry can replace it in terminal run output; bounded prior-
