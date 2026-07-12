@@ -35,6 +35,28 @@ DEFAULT_CURSOR_START_REGION_TOLERANCE_PX = 8
 DEFAULT_COMMAND_TIMEOUT_MS = 2000
 DEFAULT_SERIAL_LOCK_TIMEOUT_MS = 1500
 DEFAULT_SERIAL_LOCK_STALE_MS = 120000
+_GA_ROOT = 2
+_MONITOR_DEFAULTTONULL = 0
+_PHYSICAL_MOUSE_BUTTON_VKS = (0x01, 0x02, 0x04, 0x05, 0x06)
+_SWP_NOSIZE = 0x0001
+_SWP_NOZORDER = 0x0004
+_SWP_NOACTIVATE = 0x0010
+_SWP_NOOWNERZORDER = 0x0200
+_SWP_ASYNCWINDOWPOS = 0x4000
+_CURSOR_WINDOW_HANDOFF_FLAGS = (
+    _SWP_NOSIZE
+    | _SWP_NOZORDER
+    | _SWP_NOACTIVATE
+    | _SWP_NOOWNERZORDER
+    | _SWP_ASYNCWINDOWPOS
+)
+_CURSOR_WINDOW_HANDOFF_RECT_TIMEOUT_SECONDS = 0.75
+_CURSOR_WINDOW_HANDOFF_RECT_POLL_SECONDS = 0.01
+_OWNED_MOUSE_TRANSITION_SETTLE_SECONDS = 0.01
+_OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS = 0.10
+_OWNED_MOUSE_TRANSITION_MIN_SAMPLES = 3
+_PHYSICAL_MOUSE_QUIET_DWELL_SECONDS = 0.01
+_PHYSICAL_MOUSE_QUIET_CLEAR_SAMPLES = 2
 _COMMAND_TERMINAL_STATUSES = {
     "PASS",
     "WRITE_FAIL",
@@ -48,6 +70,16 @@ _PROCESS_SERIAL_LOCKS_GUARD = threading.Lock()
 
 class ArduinoHIDError(RuntimeError):
     pass
+
+
+class CursorWindowHandoffError(ArduinoHIDError):
+    """A cursor-window handoff failed after its sole mutation was attempted."""
+
+    __slots__ = ()
+
+    @property
+    def window_mutation_attempted(self) -> bool:
+        return True
 
 
 @dataclass
@@ -429,6 +461,759 @@ def _cursor_position(user32: Any | None = None) -> tuple[int, int]:
     except Exception as error:  # noqa: BLE001
         raise ArduinoHIDError(
             f"DPI-aware Windows cursor sampling failed: {error}"
+        ) from error
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = (
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    )
+
+
+def _handle_int(value: Any) -> int:
+    return int(getattr(value, "value", value) or 0)
+
+
+def _strict_coordinate_tuple(
+    value: tuple[int, ...],
+    *,
+    length: int,
+    label: str,
+) -> tuple[int, ...]:
+    if (
+        not isinstance(value, tuple)
+        or len(value) != length
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in value)
+    ):
+        raise ArduinoHIDError(f"{label} must contain exactly {length} integers")
+    return value
+
+
+def _bounds_payload(bounds: tuple[int, int, int, int]) -> dict[str, int]:
+    x, y, width, height = bounds
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "right": x + width,
+        "bottom": y + height,
+    }
+
+
+def _window_pid(user32: Any, hwnd: int) -> int:
+    getter = getattr(user32, "GetWindowThreadProcessId", None)
+    if not callable(getter):
+        raise ArduinoHIDError("Windows GetWindowThreadProcessId is unavailable")
+    getter.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    getter.restype = wintypes.DWORD
+    pid = wintypes.DWORD()
+    if not getter(wintypes.HWND(hwnd), ctypes.byref(pid)) or int(pid.value) <= 0:
+        raise ArduinoHIDError("Windows could not resolve the RuneLite window PID")
+    return int(pid.value)
+
+
+def _exact_foreground_window(user32: Any, *, expected_pid: int, expected_hwnd: int) -> None:
+    getter = getattr(user32, "GetForegroundWindow", None)
+    if not callable(getter):
+        raise ArduinoHIDError("Windows GetForegroundWindow is unavailable")
+    getter.argtypes = ()
+    getter.restype = wintypes.HWND
+    foreground = _handle_int(getter())
+    if foreground != expected_hwnd:
+        raise ArduinoHIDError("foreground HWND changed before cursor window handoff")
+    if _window_pid(user32, foreground) != expected_pid:
+        raise ArduinoHIDError("foreground PID changed before cursor window handoff")
+
+
+def _exact_foreground_root_window(
+    user32: Any,
+    *,
+    expected_pid: int,
+    expected_hwnd: int,
+) -> None:
+    foreground_getter = getattr(user32, "GetForegroundWindow", None)
+    ancestor_getter = getattr(user32, "GetAncestor", None)
+    if not callable(foreground_getter) or not callable(ancestor_getter):
+        raise ArduinoHIDError("Windows foreground-root APIs are unavailable")
+    foreground_getter.argtypes = ()
+    foreground_getter.restype = wintypes.HWND
+    ancestor_getter.argtypes = (wintypes.HWND, wintypes.UINT)
+    ancestor_getter.restype = wintypes.HWND
+    foreground = _handle_int(foreground_getter())
+    root = _handle_int(
+        ancestor_getter(wintypes.HWND(foreground), _GA_ROOT)
+    )
+    if root != expected_hwnd:
+        raise ArduinoHIDError(
+            "foreground root HWND changed during client geometry verification"
+        )
+    if _window_pid(user32, root) != expected_pid:
+        raise ArduinoHIDError(
+            "foreground root PID changed during client geometry verification"
+        )
+
+
+def _physical_mouse_button_states(user32: Any) -> dict[int, int]:
+    getter = getattr(user32, "GetAsyncKeyState", None)
+    if not callable(getter):
+        raise ArduinoHIDError("Windows GetAsyncKeyState is unavailable")
+    getter.argtypes = (ctypes.c_int,)
+    getter.restype = ctypes.c_short
+    return {vk: int(getter(vk)) for vk in _PHYSICAL_MOUSE_BUTTON_VKS}
+
+
+def _require_physical_mouse_buttons_up(user32: Any) -> None:
+    states = _physical_mouse_button_states(user32)
+    active = [
+        vk for vk, state in states.items() if state & 0x8001
+    ]
+    if active:
+        raise ArduinoHIDError(
+            "physical mouse button held or pressed during guarded operation"
+        )
+
+
+def _verify_physical_mouse_quiet(
+    user32: Any | None = None,
+) -> dict[str, Any]:
+    """Prove all physical mouse buttons are up with no queued activity."""
+
+    try:
+        user32 = user32 or ctypes.windll.user32  # type: ignore[attr-defined]
+        _ensure_cursor_dpi_awareness(user32)
+        initial = _physical_mouse_button_states(user32)
+        if any(state & 0x8000 for state in initial.values()):
+            raise ArduinoHIDError(
+                "physical mouse button held during quiet baseline"
+            )
+        historical_activity_consumed = any(
+            state & 0x0001 for state in initial.values()
+        )
+        sample_count = 1
+        for _ in range(_PHYSICAL_MOUSE_QUIET_CLEAR_SAMPLES):
+            time.sleep(_PHYSICAL_MOUSE_QUIET_DWELL_SECONDS)
+            sample = _physical_mouse_button_states(user32)
+            sample_count += 1
+            if any(state & 0x8001 for state in sample.values()):
+                raise ArduinoHIDError(
+                    "physical mouse activity detected during quiet dwell"
+                )
+        return {
+            "schema": "physical_mouse_quiet.v1",
+            "buttonsUp": True,
+            "activityClear": True,
+            "historicalActivityConsumed": historical_activity_consumed,
+            "sampleCount": sample_count,
+        }
+    except ArduinoHIDError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise ArduinoHIDError(
+            f"DPI-aware physical mouse quiet verification failed: {error}"
+        ) from error
+
+
+def _consume_owned_mouse_transition(
+    *,
+    button: str,
+    user32: Any | None = None,
+) -> dict[str, Any]:
+    """Consume only one acknowledged Arduino button-release transition."""
+
+    if not isinstance(button, str) or button.strip().lower() not in {
+        "left",
+        "right",
+    }:
+        raise ArduinoHIDError(
+            "owned mouse transition button must be left or right"
+        )
+    canonical_button = button.strip().lower()
+    owned_vk = 0x01 if canonical_button == "left" else 0x02
+    try:
+        user32 = user32 or ctypes.windll.user32  # type: ignore[attr-defined]
+        _ensure_cursor_dpi_awareness(user32)
+        deadline = time.monotonic() + _OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS
+        states = _physical_mouse_button_states(user32)
+        owned_transition_consumed = False
+        sample_count = 0
+        while True:
+            sample_count += 1
+            if any(state & 0x8000 for state in states.values()):
+                raise ArduinoHIDError(
+                    "physical mouse button held during owned transition consumption"
+                )
+            if any(
+                vk != owned_vk and state & 0x0001
+                for vk, state in states.items()
+            ):
+                raise ArduinoHIDError(
+                    "unowned physical mouse activity during owned transition consumption"
+                )
+            expected_transition = bool(states[owned_vk] & 0x0001)
+            owned_transition_consumed = (
+                owned_transition_consumed or expected_transition
+            )
+            if (
+                sample_count >= _OWNED_MOUSE_TRANSITION_MIN_SAMPLES
+                and not expected_transition
+            ):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ArduinoHIDError(
+                    "owned physical mouse transition did not settle before deadline"
+                )
+            time.sleep(
+                min(_OWNED_MOUSE_TRANSITION_SETTLE_SECONDS, remaining)
+            )
+            states = _physical_mouse_button_states(user32)
+        return {
+            "schema": "owned_mouse_transition.v1",
+            "button": canonical_button,
+            "ownedTransitionConsumed": owned_transition_consumed,
+            "buttonsUp": True,
+            "activityClear": True,
+        }
+    except ArduinoHIDError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise ArduinoHIDError(
+            f"owned physical mouse transition verification failed: {error}"
+        ) from error
+
+
+def _window_rect(user32: Any, hwnd: int) -> tuple[int, int, int, int]:
+    getter = getattr(user32, "GetWindowRect", None)
+    if not callable(getter):
+        raise ArduinoHIDError("Windows GetWindowRect is unavailable")
+    getter.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    getter.restype = wintypes.BOOL
+    rect = wintypes.RECT()
+    if not getter(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        raise ArduinoHIDError("Windows GetWindowRect failed")
+    width = int(rect.right) - int(rect.left)
+    height = int(rect.bottom) - int(rect.top)
+    if width <= 0 or height <= 0:
+        raise ArduinoHIDError("RuneLite window has invalid physical dimensions")
+    return int(rect.left), int(rect.top), width, height
+
+
+def _wait_for_exact_window_rect(
+    user32: Any,
+    *,
+    hwnd: int,
+    expected: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    deadline = (
+        time.monotonic() + _CURSOR_WINDOW_HANDOFF_RECT_TIMEOUT_SECONDS
+    )
+    while True:
+        actual = _window_rect(user32, hwnd)
+        if actual == expected:
+            return actual
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ArduinoHIDError(
+                "RuneLite window did not reach the exact handoff bounds before "
+                "deadline; the queued async move cannot be canceled and geometry "
+                "must be reverified"
+            )
+        time.sleep(
+            min(_CURSOR_WINDOW_HANDOFF_RECT_POLL_SECONDS, remaining)
+        )
+
+
+def _cursor_monitor_work_area(
+    user32: Any, cursor: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    monitor_from_point = getattr(user32, "MonitorFromPoint", None)
+    monitor_info_getter = getattr(user32, "GetMonitorInfoW", None)
+    if not callable(monitor_from_point) or not callable(monitor_info_getter):
+        raise ArduinoHIDError("Windows monitor work-area APIs are unavailable")
+    monitor_from_point.argtypes = (wintypes.POINT, wintypes.DWORD)
+    monitor_from_point.restype = wintypes.HANDLE
+    monitor_info_getter.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_MonitorInfo),
+    )
+    monitor_info_getter.restype = wintypes.BOOL
+    monitor = monitor_from_point(
+        wintypes.POINT(cursor[0], cursor[1]), _MONITOR_DEFAULTTONULL
+    )
+    if not monitor:
+        raise ArduinoHIDError("cursor is not on a physical monitor")
+    info = _MonitorInfo()
+    info.cbSize = ctypes.sizeof(_MonitorInfo)
+    if not monitor_info_getter(monitor, ctypes.byref(info)):
+        raise ArduinoHIDError("Windows GetMonitorInfoW failed")
+    left = int(info.rcWork.left)
+    top = int(info.rcWork.top)
+    width = int(info.rcWork.right) - left
+    height = int(info.rcWork.bottom) - top
+    if width <= 0 or height <= 0:
+        raise ArduinoHIDError("cursor monitor has an invalid work area")
+    if not (
+        left <= cursor[0] < left + width
+        and top <= cursor[1] < top + height
+    ):
+        raise ArduinoHIDError("cursor is outside its monitor work area")
+    return left, top, width, height
+
+
+def _confirm_cursor_window_guard(
+    user32: Any,
+    *,
+    expected_pid: int,
+    expected_hwnd: int,
+    cursor: tuple[int, int],
+) -> None:
+    _exact_foreground_window(
+        user32, expected_pid=expected_pid, expected_hwnd=expected_hwnd
+    )
+    first_cursor = _cursor_position(user32)
+    _require_physical_mouse_buttons_up(user32)
+    second_cursor = _cursor_position(user32)
+    _exact_foreground_window(
+        user32, expected_pid=expected_pid, expected_hwnd=expected_hwnd
+    )
+    if first_cursor != cursor or second_cursor != cursor:
+        raise ArduinoHIDError("cursor changed before cursor window handoff")
+
+
+def _verify_window_geometry(
+    *,
+    expected_pid: int,
+    expected_hwnd: int,
+    expected_outer_bounds: tuple[int, int, int, int] | None,
+    expected_client_bounds: tuple[int, int, int, int] | None,
+    required_inner_bounds: tuple[int, int, int, int],
+    user32: Any | None = None,
+) -> dict[str, Any]:
+    """Prove outer, client, and required-inner geometry without mutation."""
+
+    if (
+        not isinstance(expected_pid, int)
+        or isinstance(expected_pid, bool)
+        or expected_pid <= 0
+        or not isinstance(expected_hwnd, int)
+        or isinstance(expected_hwnd, bool)
+        or expected_hwnd <= 0
+    ):
+        raise ArduinoHIDError(
+            "window geometry verification requires positive PID and HWND"
+        )
+
+    def validated_bounds(
+        value: tuple[int, int, int, int] | None,
+        *,
+        label: str,
+        optional: bool,
+    ) -> tuple[int, int, int, int] | None:
+        if value is None:
+            if optional:
+                return None
+            raise ArduinoHIDError(f"{label} are required")
+        values = _strict_coordinate_tuple(value, length=4, label=label)
+        result = (values[0], values[1], values[2], values[3])
+        if result[2] <= 0 or result[3] <= 0:
+            raise ArduinoHIDError(f"{label} dimensions must be positive")
+        return result
+
+    expected_outer = validated_bounds(
+        expected_outer_bounds,
+        label="expected outer bounds",
+        optional=True,
+    )
+    expected_client = validated_bounds(
+        expected_client_bounds,
+        label="expected client bounds",
+        optional=True,
+    )
+    required_inner_value = validated_bounds(
+        required_inner_bounds,
+        label="required inner bounds",
+        optional=False,
+    )
+    if required_inner_value is None:
+        raise ArduinoHIDError("required inner bounds are required")
+    required_inner = required_inner_value
+
+    try:
+        user32 = user32 or ctypes.windll.user32  # type: ignore[attr-defined]
+        _ensure_cursor_dpi_awareness(user32)
+        required_functions = (
+            "IsWindow",
+            "IsWindowVisible",
+            "GetAncestor",
+            "IsIconic",
+            "GetWindowRect",
+            "GetClientRect",
+            "ClientToScreen",
+        )
+        if any(
+            not callable(getattr(user32, name, None))
+            for name in required_functions
+        ):
+            raise ArduinoHIDError(
+                "required Windows window geometry API is unavailable"
+            )
+        user32.IsWindow.argtypes = (wintypes.HWND,)
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.IsIconic.argtypes = (wintypes.HWND,)
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.GetClientRect.argtypes = (
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.RECT),
+        )
+        user32.GetClientRect.restype = wintypes.BOOL
+        user32.ClientToScreen.argtypes = (
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.POINT),
+        )
+        user32.ClientToScreen.restype = wintypes.BOOL
+
+        hwnd = wintypes.HWND(expected_hwnd)
+        if not user32.IsWindow(hwnd):
+            raise ArduinoHIDError("expected RuneLite HWND is not a window")
+        if not user32.IsWindowVisible(hwnd):
+            raise ArduinoHIDError("expected RuneLite window is not visible")
+        if _handle_int(user32.GetAncestor(hwnd, _GA_ROOT)) != expected_hwnd:
+            raise ArduinoHIDError("expected RuneLite window is not top-level")
+        if user32.IsIconic(hwnd):
+            raise ArduinoHIDError("expected RuneLite window is minimized")
+        if _window_pid(user32, expected_hwnd) != expected_pid:
+            raise ArduinoHIDError(
+                "expected RuneLite HWND belongs to a different PID"
+            )
+        _exact_foreground_root_window(
+            user32,
+            expected_pid=expected_pid,
+            expected_hwnd=expected_hwnd,
+        )
+
+        actual_outer = _window_rect(user32, expected_hwnd)
+        client_rect = wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+            raise ArduinoHIDError("Windows GetClientRect failed")
+        client_left = int(client_rect.left)
+        client_top = int(client_rect.top)
+        client_width = int(client_rect.right) - client_left
+        client_height = int(client_rect.bottom) - client_top
+        if client_left != 0 or client_top != 0:
+            raise ArduinoHIDError("Windows GetClientRect returned a nonzero origin")
+        if client_width <= 0 or client_height <= 0:
+            raise ArduinoHIDError("RuneLite client has invalid physical dimensions")
+        origin = wintypes.POINT(client_left, client_top)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+            raise ArduinoHIDError("Windows ClientToScreen failed")
+        actual_client = (
+            int(origin.x),
+            int(origin.y),
+            client_width,
+            client_height,
+        )
+        if _window_rect(user32, expected_hwnd) != actual_outer:
+            raise ArduinoHIDError(
+                "RuneLite outer geometry changed during verification"
+            )
+        _exact_foreground_root_window(
+            user32,
+            expected_pid=expected_pid,
+            expected_hwnd=expected_hwnd,
+        )
+
+        inner_x, inner_y, inner_width, inner_height = required_inner
+        client_x, client_y, client_width, client_height = actual_client
+        inner_contained = (
+            client_x <= inner_x
+            and client_y <= inner_y
+            and inner_x + inner_width <= client_x + client_width
+            and inner_y + inner_height <= client_y + client_height
+        )
+        return {
+            "schema": "cursor_window_geometry.v1",
+            "expectedPid": expected_pid,
+            "expectedHwnd": expected_hwnd,
+            "expectedOuterBounds": (
+                _bounds_payload(expected_outer)
+                if expected_outer is not None
+                else None
+            ),
+            "expectedClientBounds": (
+                _bounds_payload(expected_client)
+                if expected_client is not None
+                else None
+            ),
+            "requiredInnerBounds": _bounds_payload(required_inner),
+            "actualOuterBounds": _bounds_payload(actual_outer),
+            "actualClientBounds": _bounds_payload(actual_client),
+            "outerMatches": (
+                actual_outer == expected_outer
+                if expected_outer is not None
+                else None
+            ),
+            "clientMatches": (
+                actual_client == expected_client
+                if expected_client is not None
+                else None
+            ),
+            "innerContainedByClient": inner_contained,
+        }
+    except ArduinoHIDError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise ArduinoHIDError(
+            f"DPI-aware RuneLite window geometry verification failed: {error}"
+        ) from error
+
+
+def _reposition_window_for_cursor(
+    *,
+    expected_pid: int,
+    expected_hwnd: int,
+    cursor: tuple[int, int],
+    movement_bounds: tuple[int, int, int, int],
+    inset_px: int,
+    user32: Any | None = None,
+) -> dict[str, Any]:
+    """Translate one verified RuneLite window under a stationary cursor.
+
+    This performs no cursor, keyboard, mouse-button, or Arduino operation.  All
+    coordinates are sampled in a per-monitor-v2 device-pixel context.
+    """
+
+    if (
+        not isinstance(expected_pid, int)
+        or isinstance(expected_pid, bool)
+        or expected_pid <= 0
+        or not isinstance(expected_hwnd, int)
+        or isinstance(expected_hwnd, bool)
+        or expected_hwnd <= 0
+    ):
+        raise ArduinoHIDError("cursor window handoff requires positive PID and HWND")
+    cursor_values = _strict_coordinate_tuple(cursor, length=2, label="cursor")
+    movement_values = _strict_coordinate_tuple(
+        movement_bounds, length=4, label="movement bounds"
+    )
+    if (
+        not isinstance(inset_px, int)
+        or isinstance(inset_px, bool)
+        or inset_px < 0
+    ):
+        raise ArduinoHIDError("cursor window handoff inset must be a nonnegative integer")
+    cursor_x, cursor_y = cursor_values
+    move_x, move_y, move_width, move_height = movement_values
+    if move_width <= 0 or move_height <= 0:
+        raise ArduinoHIDError("movement bounds dimensions must be positive")
+    if move_width < 2 * inset_px + 1 or move_height < 2 * inset_px + 1:
+        raise ArduinoHIDError("movement bounds are too small for the handoff inset")
+
+    window_mutation_attempted = False
+    try:
+        user32 = user32 or ctypes.windll.user32  # type: ignore[attr-defined]
+        _ensure_cursor_dpi_awareness(user32)
+
+        required_functions = (
+            "IsWindow",
+            "IsWindowVisible",
+            "GetAncestor",
+            "IsIconic",
+            "IsZoomed",
+            "SetWindowPos",
+        )
+        if any(not callable(getattr(user32, name, None)) for name in required_functions):
+            raise ArduinoHIDError("required Windows cursor handoff API is unavailable")
+        user32.IsWindow.argtypes = (wintypes.HWND,)
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.IsIconic.argtypes = (wintypes.HWND,)
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.IsZoomed.argtypes = (wintypes.HWND,)
+        user32.IsZoomed.restype = wintypes.BOOL
+        user32.SetWindowPos.argtypes = (
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        )
+        user32.SetWindowPos.restype = wintypes.BOOL
+
+        hwnd = wintypes.HWND(expected_hwnd)
+        if not user32.IsWindow(hwnd):
+            raise ArduinoHIDError("expected RuneLite HWND is not a window")
+        if not user32.IsWindowVisible(hwnd):
+            raise ArduinoHIDError("expected RuneLite window is not visible")
+        if _handle_int(user32.GetAncestor(hwnd, _GA_ROOT)) != expected_hwnd:
+            raise ArduinoHIDError("expected RuneLite window is not top-level")
+        if user32.IsIconic(hwnd):
+            raise ArduinoHIDError("expected RuneLite window is minimized")
+        if user32.IsZoomed(hwnd):
+            raise ArduinoHIDError("expected RuneLite window is maximized")
+        if _window_pid(user32, expected_hwnd) != expected_pid:
+            raise ArduinoHIDError("expected RuneLite HWND belongs to a different PID")
+
+        old_window = _window_rect(user32, expected_hwnd)
+        old_window_x, old_window_y, window_width, window_height = old_window
+        if not (
+            old_window_x <= move_x
+            and old_window_y <= move_y
+            and move_x + move_width <= old_window_x + window_width
+            and move_y + move_height <= old_window_y + window_height
+        ):
+            raise ArduinoHIDError("movement bounds are not contained in the RuneLite window")
+
+        work_area = _cursor_monitor_work_area(
+            user32, (cursor_x, cursor_y)
+        )
+        work_x, work_y, work_width, work_height = work_area
+        if window_width > work_width or window_height > work_height:
+            raise ArduinoHIDError("RuneLite window cannot fit in the cursor monitor work area")
+
+        movement_offset_x = move_x - old_window_x
+        movement_offset_y = move_y - old_window_y
+        feasible_left = max(
+            work_x,
+            cursor_x - movement_offset_x - move_width + inset_px + 1,
+        )
+        feasible_right = min(
+            work_x + work_width - window_width,
+            cursor_x - movement_offset_x - inset_px,
+        )
+        feasible_top = max(
+            work_y,
+            cursor_y - movement_offset_y - move_height + inset_px + 1,
+        )
+        feasible_bottom = min(
+            work_y + work_height - window_height,
+            cursor_y - movement_offset_y - inset_px,
+        )
+        if feasible_left > feasible_right or feasible_top > feasible_bottom:
+            raise ArduinoHIDError(
+                "RuneLite window cannot place movement bounds under the cursor in its work area"
+            )
+
+        new_window_x = min(max(old_window_x, feasible_left), feasible_right)
+        new_window_y = min(max(old_window_y, feasible_top), feasible_bottom)
+        new_window = (new_window_x, new_window_y, window_width, window_height)
+        new_movement = (
+            new_window_x + movement_offset_x,
+            new_window_y + movement_offset_y,
+            move_width,
+            move_height,
+        )
+
+        _confirm_cursor_window_guard(
+            user32,
+            expected_pid=expected_pid,
+            expected_hwnd=expected_hwnd,
+            cursor=(cursor_x, cursor_y),
+        )
+        window_mutation_attempted = True
+        if not user32.SetWindowPos(
+            hwnd,
+            wintypes.HWND(0),
+            new_window_x,
+            new_window_y,
+            0,
+            0,
+            _CURSOR_WINDOW_HANDOFF_FLAGS,
+        ):
+            raise ArduinoHIDError("Windows SetWindowPos failed during cursor window handoff")
+
+        _wait_for_exact_window_rect(
+            user32,
+            hwnd=expected_hwnd,
+            expected=new_window,
+        )
+        post_cursor = _cursor_position(user32)
+        _require_physical_mouse_buttons_up(user32)
+        _exact_foreground_window(
+            user32, expected_pid=expected_pid, expected_hwnd=expected_hwnd
+        )
+        if _window_rect(user32, expected_hwnd) != new_window:
+            raise ArduinoHIDError(
+                "RuneLite window changed after async handoff convergence"
+            )
+        time.sleep(_CURSOR_WINDOW_HANDOFF_RECT_POLL_SECONDS)
+        if _window_rect(user32, expected_hwnd) != new_window:
+            raise ArduinoHIDError(
+                "RuneLite window changed during final handoff stability check"
+            )
+        final_cursor = _cursor_position(user32)
+        _require_physical_mouse_buttons_up(user32)
+        _exact_foreground_window(
+            user32, expected_pid=expected_pid, expected_hwnd=expected_hwnd
+        )
+        point_owner = _window_info_at_point((cursor_x, cursor_y), user32)
+
+        if post_cursor != (cursor_x, cursor_y) or final_cursor != (cursor_x, cursor_y):
+            raise ArduinoHIDError("cursor changed during cursor window handoff")
+        if (
+            not point_owner.get("available")
+            or int(point_owner.get("hwnd") or 0) != expected_hwnd
+            or int(point_owner.get("pid") or 0) != expected_pid
+        ):
+            raise ArduinoHIDError("cursor point is not owned by the repositioned RuneLite window")
+        new_move_x, new_move_y, new_move_width, new_move_height = new_movement
+        if not (
+            new_move_x + inset_px <= cursor_x < new_move_x + new_move_width - inset_px
+            and new_move_y + inset_px <= cursor_y < new_move_y + new_move_height - inset_px
+        ):
+            raise ArduinoHIDError("cursor is not inside the translated movement bounds inset")
+        if _window_rect(user32, expected_hwnd) != new_window:
+            raise ArduinoHIDError(
+                "RuneLite window changed after final cursor ownership validation"
+            )
+
+        return {
+            "schema": "cursor_window_handoff.v1",
+            "expectedPid": expected_pid,
+            "expectedHwnd": expected_hwnd,
+            "cursor": {"x": cursor_x, "y": cursor_y},
+            "insetPx": inset_px,
+            "oldWindowBounds": _bounds_payload(old_window),
+            "newWindowBounds": _bounds_payload(new_window),
+            "monitorWorkArea": _bounds_payload(work_area),
+            "oldMovementBounds": _bounds_payload(
+                (move_x, move_y, move_width, move_height)
+            ),
+            "newMovementBounds": _bounds_payload(new_movement),
+            "repositioned": (new_window_x, new_window_y)
+            != (old_window_x, old_window_y),
+            "cursorUnchanged": True,
+            "buttonsUpConfirmed": True,
+            "foregroundConfirmed": True,
+            "pointOwnerConfirmed": True,
+            "windowSizeUnchanged": True,
+            "setWindowPosCount": 1,
+        }
+    except CursorWindowHandoffError:
+        raise
+    except ArduinoHIDError as error:
+        if window_mutation_attempted:
+            raise CursorWindowHandoffError(str(error)) from error
+        raise
+    except Exception as error:  # noqa: BLE001
+        if window_mutation_attempted:
+            raise CursorWindowHandoffError(
+                f"cursor window handoff failed after mutation attempt: {error}"
+            ) from error
+        raise ArduinoHIDError(
+            f"DPI-aware cursor window handoff failed: {error}"
         ) from error
 
 
@@ -1198,6 +1983,48 @@ class _ArduinoHIDTransport:
         position = _cursor_position()
         self._tracked_position = position
         return position
+
+    def _verify_physical_mouse_quiet(self) -> dict[str, Any]:
+        return _verify_physical_mouse_quiet()
+
+    def _consume_owned_mouse_transition(
+        self, button: str
+    ) -> dict[str, Any]:
+        return _consume_owned_mouse_transition(button=button)
+
+    def _reposition_window_for_cursor(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        cursor: tuple[int, int],
+        movement_bounds: tuple[int, int, int, int],
+        inset_px: int,
+    ) -> dict[str, Any]:
+        return _reposition_window_for_cursor(
+            expected_pid=expected_pid,
+            expected_hwnd=expected_hwnd,
+            cursor=cursor,
+            movement_bounds=movement_bounds,
+            inset_px=inset_px,
+        )
+
+    def _verify_window_geometry(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        expected_outer_bounds: tuple[int, int, int, int] | None,
+        expected_client_bounds: tuple[int, int, int, int] | None,
+        required_inner_bounds: tuple[int, int, int, int],
+    ) -> dict[str, Any]:
+        return _verify_window_geometry(
+            expected_pid=expected_pid,
+            expected_hwnd=expected_hwnd,
+            expected_outer_bounds=expected_outer_bounds,
+            expected_client_bounds=expected_client_bounds,
+            required_inner_bounds=required_inner_bounds,
+        )
 
     def _legacy_configure_movement_safety(
         self,

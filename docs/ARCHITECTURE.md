@@ -128,9 +128,11 @@ menu bounds and deterministic visible row bounds used by the input path.
 Actions and verifications are bound to the plugin session; live input is also
 bound to the exact telemetry-owning RuneLite process.
 
-The optional device-pixel client window is all-or-none, has positive dimensions,
-and must contain the canvas. It is ownership and movement-only cursor-ingress
-evidence, never an activation region. Object aim points are likewise paired to
+The optional device-pixel `clientWindow*` envelope is all-or-none, has positive
+dimensions, and must contain the canvas. It represents the outer window and is
+ownership/movement-only cursor-ingress evidence, never an activation region;
+the input preflight matches it to `GetWindowRect` and separately proves the
+canvas inside the actual Win32 client. Object aim points are likewise paired to
 authoritative geometry: the point must be inside the viewport and the first
 present API shape in clickbox -> convex hull -> canvas tile order. A present
 shape never falls through to weaker geometry, and `canvasLocation` alone is
@@ -213,35 +215,43 @@ layer carries those values, including bounded retry attempts, in
 `CoordinatedActionInterface` and the saved-session login helper submit typed
 approved intents to the sole `InputCoordinator`. The coordinator then:
 
-1. opens one private Arduino transport, command ledger, and armed transaction;
-2. samples the actual current cursor and point owner in the calling thread's
-   proven per-monitor-v2 device-pixel context, never from command history;
-3. when that fresh cursor is just outside the canvas but still inside the exact
-   pinned client on one axis, performs only the bounded movement-only ingress
-   and proves stable canvas headroom before continuing; unsupported displacement
-   blocks without activation;
-4. retains the canonical action identity/aim separately from the actual settled
+1. creates one private backend and empty in-memory command ledger without
+   opening serial;
+2. proves a bounded physical-button quiet dwell, samples the actual current
+   cursor in the calling thread's PMv2 device-pixel context, pins the exact
+   foreground root HWND/PID, matches the telemetry outer window to
+   `GetWindowRect`, and proves the canvas inside the actual Win32 client;
+3. when the stationary cursor is beyond that outer window, performs one
+   bounded non-activating window translation under the cursor, closes with an
+   empty safely-unsent receipt, discards every stale coordinate, and requires a
+   fresh login scan or newer same-identity gameplay tick before another intent;
+4. only after a valid preflight opens and arms the private Arduino transport;
+5. when the fresh cursor is just outside the canvas but still inside the exact
+   pinned outer window on one axis, performs only the bounded movement-only
+   ingress and proves stable canvas headroom before continuing;
+6. retains the canonical action identity/aim separately from the actual settled
    cursor, selects bounded command-space waypoints toward the exact observed
    screen point, runs the pure exact planner for each waypoint with bounded velocity,
    acceleration, braking, four-sided transfer headroom, transaction-wide plan
    and MOVE caps, and actual-feedback correction, then accepts only a complete-
    plan settled endpoint inside the caller's explicit activation region;
-5. if an acknowledged MOVE has an unchanged ordinary sample, polls once more
+7. if an acknowledged MOVE has an unchanged ordinary sample, polls once more
    without another MOVE and independently validates both sample intervals before
    applying the existing bounded delayed/no-effect accounting;
-6. passes that actual stable device-pixel endpoint to the caller's
+8. passes that actual stable device-pixel endpoint to the caller's
    lane-specific validator under a checked firmware-watchdog lease; if that
    validator outlives the lease, performs at most one explicit safe rearm and
    reruns the same semantic validator, while a second expiry blocks input;
-7. for pointer lanes, requires a newer menu sample whose top/default entry,
-   scene parameters, and pointer position match the intended target; typed key
-   lanes instead require their exact camera/interface/dialogue constraint;
-8. when the exact action is a unique lower context entry, opens the menu,
+9. for pointer lanes, repeatedly requires quiet physical buttons and exact
+   `WindowFromPoint` root ownership around the newer menu/widget proof; typed
+   key lanes instead require their exact camera/interface/dialogue constraint;
+10. when the exact action is a unique lower context entry, opens the menu,
    derives that row from RuneLite menu geometry, moves to it, revalidates the
    fresh open-menu sample and pointer, and clicks it once;
-9. otherwise clicks the exact default entry or submits the one approved key;
-10. records each command and firmware acknowledgement without truncation; and
-11. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
+11. otherwise clicks the exact default entry or submits the one approved key,
+    then consumes only its own acknowledged Windows button transition;
+12. records each command and firmware acknowledgement without truncation; and
+13. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
    wire `STATUS` proving disarmed with zero held inputs before closing.
 
 The immutable `InputReceipt` is successful only when the activation and final
@@ -255,8 +265,9 @@ The action layer may emit typed `TARGET_EVIDENCE_INVALIDATED` when an adaptive
 object/walk proposal exhausts bounded fresh hover reobservation before
 activation, or `CURSOR_STATE_INVALIDATED` when real cursor/ownership/bounds
 evidence changes. Runtime may discard at most one consecutive such proposal,
-and only when the immutable receipt proves the matching failure kind, complete
-safe cleanup, and a preactivation-only ledger. Target invalidation suppresses
+and only when the immutable receipt proves the matching failure kind, either
+complete connected cleanup or a closed empty pre-serial ledger/backend, and no
+activation. Target invalidation suppresses
 the exact resource key for one fresh alternate; cursor invalidation preserves
 the target and merely reobserves. Reason text is diagnostic and never selects
 the transition. Any activation, incomplete cleanup, mismatch, or repetition

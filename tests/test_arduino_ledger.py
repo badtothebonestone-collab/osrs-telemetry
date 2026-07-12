@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import patch
 
 import osrs_bot.arduino as arduino_module
-from osrs_bot.arduino import ArduinoHIDError, _ArduinoHIDTransport
+from osrs_bot.arduino import (
+    ArduinoHIDError,
+    CursorWindowHandoffError,
+    _ArduinoHIDTransport,
+)
 
 
 class _FakeSerial:
@@ -122,6 +126,233 @@ class _FakeCursorUser32:
         return 1
 
 
+class _FakeWindowHandoffUser32(_FakeCursorUser32):
+    def __init__(
+        self,
+        *,
+        expected_pid: int = 1968,
+        expected_hwnd: int = 328854,
+        actual_pid: int | None = None,
+        cursor: tuple[int, int] = (3446, 1631),
+        cursor_positions: list[tuple[int, int]] | None = None,
+        window_bounds: tuple[int, int, int, int] = (1179, 472, 2243, 1585),
+        work_area: tuple[int, int, int, int] = (0, 0, 3840, 2076),
+        foreground_hwnd: int | None = None,
+        owner_hwnd: int | None = None,
+        visible: bool = True,
+        top_level: bool = True,
+        iconic: bool = False,
+        maximized: bool = False,
+        held_buttons: tuple[int, ...] = (),
+        button_states: dict[int, int] | None = None,
+        button_state_sequences: dict[int, list[int]] | None = None,
+        set_window_pos_succeeds: bool = True,
+        set_window_rect_delay_reads: int = 0,
+        set_window_rect_arrives: bool = True,
+        post_set_window_rects: list[tuple[int, int, int, int]] | None = None,
+        window_rect_fail_after: int | None = None,
+        client_bounds: tuple[int, int, int, int] = (
+            1191,
+            472,
+            2219,
+            1573,
+        ),
+        get_client_rect_succeeds: bool = True,
+        client_to_screen_succeeds: bool = True,
+    ) -> None:
+        per_monitor_v2 = (-4) & (
+            (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+        )
+        super().__init__(context=per_monitor_v2)
+        self.expected_pid = expected_pid
+        self.expected_hwnd = expected_hwnd
+        self.actual_pid = expected_pid if actual_pid is None else actual_pid
+        self.cursor = cursor
+        self.cursor_positions = list(cursor_positions or [])
+        self.window_rect = (
+            window_bounds[0],
+            window_bounds[1],
+            window_bounds[0] + window_bounds[2],
+            window_bounds[1] + window_bounds[3],
+        )
+        self.work_rect = (
+            work_area[0],
+            work_area[1],
+            work_area[0] + work_area[2],
+            work_area[1] + work_area[3],
+        )
+        self.foreground_hwnd = (
+            expected_hwnd if foreground_hwnd is None else foreground_hwnd
+        )
+        self.owner_hwnd = expected_hwnd if owner_hwnd is None else owner_hwnd
+        self.root_hwnd = expected_hwnd if top_level else expected_hwnd + 7
+        self.visible = visible
+        self.iconic = iconic
+        self.maximized = maximized
+        self.held_buttons = set(held_buttons)
+        self.button_states = dict(button_states or {})
+        self.button_state_sequences = {
+            key: list(values)
+            for key, values in (button_state_sequences or {}).items()
+        }
+        self.set_window_pos_succeeds = set_window_pos_succeeds
+        self.set_window_rect_delay_reads = set_window_rect_delay_reads
+        self.set_window_rect_arrives = set_window_rect_arrives
+        self.pending_window_rect: tuple[int, int, int, int] | None = None
+        self.pending_window_rect_reads = 0
+        self.post_set_window_rects = list(post_set_window_rects or [])
+        self.active_post_set_window_rects: list[
+            tuple[int, int, int, int]
+        ] = []
+        self.window_rect_fail_after = window_rect_fail_after
+        self.window_rect_reads = 0
+        self.client_bounds = client_bounds
+        self.get_client_rect_succeeds = get_client_rect_succeeds
+        self.client_to_screen_succeeds = client_to_screen_succeeds
+
+        self.GetCursorPos = _FakeWinFunction(self._get_handoff_cursor_pos)
+        self.GetForegroundWindow = _FakeWinFunction(
+            lambda: self.foreground_hwnd
+        )
+        self.GetWindowThreadProcessId = _FakeWinFunction(
+            self._get_handoff_window_thread_process_id
+        )
+        self.IsWindow = _FakeWinFunction(
+            lambda hwnd: _pointer_value(hwnd) == self.expected_hwnd
+        )
+        self.IsWindowVisible = _FakeWinFunction(
+            lambda hwnd: self.visible
+            and _pointer_value(hwnd) == self.expected_hwnd
+        )
+        self.GetAncestor = _FakeWinFunction(self._get_ancestor)
+        self.IsIconic = _FakeWinFunction(lambda _hwnd: self.iconic)
+        self.IsZoomed = _FakeWinFunction(lambda _hwnd: self.maximized)
+        self.GetWindowRect = _FakeWinFunction(self._get_window_rect)
+        self.GetClientRect = _FakeWinFunction(self._get_client_rect)
+        self.ClientToScreen = _FakeWinFunction(self._client_to_screen)
+        self.MonitorFromPoint = _FakeWinFunction(lambda _point, _flags: 1)
+        self.GetMonitorInfoW = _FakeWinFunction(self._get_monitor_info)
+        self.GetAsyncKeyState = _FakeWinFunction(self._get_async_key_state)
+        self.WindowFromPoint = _FakeWinFunction(lambda _point: self.owner_hwnd)
+        self.SetWindowPos = _FakeWinFunction(self._set_window_pos)
+
+    def _get_handoff_cursor_pos(self, point_pointer: object) -> bool:
+        point = point_pointer._obj  # type: ignore[attr-defined]
+        value = (
+            self.cursor_positions.pop(0)
+            if self.cursor_positions
+            else self.cursor
+        )
+        point.x, point.y = value
+        return True
+
+    def _get_async_key_state(self, vk: object) -> int:
+        key = int(vk)
+        sequence = self.button_state_sequences.get(key)
+        if sequence:
+            return sequence.pop(0)
+        return self.button_states.get(
+            key, 0x8000 if key in self.held_buttons else 0
+        )
+
+    def _get_handoff_window_thread_process_id(
+        self, hwnd: object, pid_pointer: object
+    ) -> int:
+        value = _pointer_value(hwnd)
+        pid_pointer._obj.value = (  # type: ignore[attr-defined]
+            self.actual_pid
+            if value == self.expected_hwnd
+            else self.expected_pid + 1
+        )
+        return 1
+
+    def _get_ancestor(self, hwnd: object, _kind: object) -> int:
+        value = _pointer_value(hwnd)
+        return self.root_hwnd if value == self.expected_hwnd else value
+
+    def _get_window_rect(self, _hwnd: object, rect_pointer: object) -> bool:
+        self.window_rect_reads += 1
+        if (
+            self.window_rect_fail_after is not None
+            and self.window_rect_reads > self.window_rect_fail_after
+        ):
+            return False
+        if self.pending_window_rect is not None and self.set_window_rect_arrives:
+            if self.pending_window_rect_reads <= 1:
+                self.window_rect = self.pending_window_rect
+                self.pending_window_rect = None
+            else:
+                self.pending_window_rect_reads -= 1
+        if self.active_post_set_window_rects:
+            x, y, width, height = self.active_post_set_window_rects.pop(0)
+            self.window_rect = (x, y, x + width, y + height)
+        rect = rect_pointer._obj  # type: ignore[attr-defined]
+        rect.left, rect.top, rect.right, rect.bottom = self.window_rect
+        return True
+
+    def _get_client_rect(self, _hwnd: object, rect_pointer: object) -> bool:
+        if not self.get_client_rect_succeeds:
+            return False
+        rect = rect_pointer._obj  # type: ignore[attr-defined]
+        _x, _y, width, height = self.client_bounds
+        rect.left = 0
+        rect.top = 0
+        rect.right = width
+        rect.bottom = height
+        return True
+
+    def _client_to_screen(self, _hwnd: object, point_pointer: object) -> bool:
+        if not self.client_to_screen_succeeds:
+            return False
+        point = point_pointer._obj  # type: ignore[attr-defined]
+        x, y, _width, _height = self.client_bounds
+        point.x += x
+        point.y += y
+        return True
+
+    def _get_monitor_info(self, _monitor: object, info_pointer: object) -> bool:
+        info = info_pointer._obj  # type: ignore[attr-defined]
+        left, top, right, bottom = self.work_rect
+        info.rcMonitor.left = left
+        info.rcMonitor.top = top
+        info.rcMonitor.right = right
+        info.rcMonitor.bottom = bottom
+        info.rcWork.left = left
+        info.rcWork.top = top
+        info.rcWork.right = right
+        info.rcWork.bottom = bottom
+        return True
+
+    def _set_window_pos(
+        self,
+        _hwnd: object,
+        _insert_after: object,
+        x: object,
+        y: object,
+        _width: object,
+        _height: object,
+        _flags: object,
+    ) -> bool:
+        if not self.set_window_pos_succeeds:
+            return False
+        left, top, right, bottom = self.window_rect
+        width = right - left
+        height = bottom - top
+        target = (
+            int(x),
+            int(y),
+            int(x) + width,
+            int(y) + height,
+        )
+        if self.set_window_rect_delay_reads > 0 or not self.set_window_rect_arrives:
+            self.pending_window_rect = target
+            self.pending_window_rect_reads = self.set_window_rect_delay_reads
+        else:
+            self.window_rect = target
+        self.active_post_set_window_rects = list(self.post_set_window_rects)
+        return True
+
+
 class CursorDpiAwarenessTests(unittest.TestCase):
     def test_cursor_sample_establishes_thread_device_pixel_context_first(self) -> None:
         user32 = _FakeCursorUser32()
@@ -216,6 +447,764 @@ class CursorDpiAwarenessTests(unittest.TestCase):
                 arduino_module._cursor_position(user32)
 
         self.assertEqual(1, len(user32.GetCursorPos.calls))
+
+
+class PhysicalMouseQuietTests(unittest.TestCase):
+    @staticmethod
+    def _verify(user32: _FakeWindowHandoffUser32) -> dict[str, object]:
+        with patch.object(arduino_module.os, "name", "nt"):
+            return arduino_module._verify_physical_mouse_quiet(user32)
+
+    def test_all_five_buttons_quiet_returns_positive_evidence(self) -> None:
+        user32 = _FakeWindowHandoffUser32()
+
+        with patch.object(arduino_module.time, "sleep") as dwell:
+            result = self._verify(user32)
+
+        self.assertEqual(
+            {
+                "schema": "physical_mouse_quiet.v1",
+                "buttonsUp": True,
+                "activityClear": True,
+                "historicalActivityConsumed": False,
+                "sampleCount": 3,
+            },
+            result,
+        )
+        self.assertEqual(
+            [(0x01,), (0x02,), (0x04,), (0x05,), (0x06,)] * 3,
+            user32.GetAsyncKeyState.calls,
+        )
+        self.assertEqual(2, dwell.call_count)
+        self.assertEqual([], user32.GetCursorPos.calls)
+        self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_initial_historical_low_is_consumed_before_clear_dwell(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x05: [0x0001, 0x0000, 0x0000]}
+        )
+
+        with patch.object(arduino_module.time, "sleep") as dwell:
+            result = self._verify(user32)
+
+        self.assertIs(True, result["historicalActivityConsumed"])
+        self.assertIs(True, result["buttonsUp"])
+        self.assertIs(True, result["activityClear"])
+        self.assertEqual(3, result["sampleCount"])
+        self.assertEqual(2, dwell.call_count)
+
+    def test_held_button_rejects_quiet_evidence(self) -> None:
+        user32 = _FakeWindowHandoffUser32(held_buttons=(0x02,))
+
+        with self.assertRaisesRegex(ArduinoHIDError, "held during quiet baseline"):
+            self._verify(user32)
+
+    def test_new_low_bit_during_dwell_is_rejected(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x05: [0x0000, 0x0001]}
+        )
+
+        with patch.object(arduino_module.time, "sleep"):
+            with self.assertRaisesRegex(ArduinoHIDError, "during quiet dwell"):
+                self._verify(user32)
+
+    def test_new_high_bit_during_later_dwell_sample_is_rejected(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x02: [0x0000, 0x0000, 0x8000]}
+        )
+
+        with patch.object(arduino_module.time, "sleep"):
+            with self.assertRaisesRegex(ArduinoHIDError, "during quiet dwell"):
+                self._verify(user32)
+
+    def test_transport_quiet_method_delegates_without_serial_input(self) -> None:
+        serial = _FakeSerial()
+        backend = _backend(serial)
+        expected = {"schema": "physical_mouse_quiet.v1"}
+        with patch.object(
+            arduino_module,
+            "_verify_physical_mouse_quiet",
+            return_value=expected,
+        ) as helper:
+            result = backend._verify_physical_mouse_quiet()
+
+        self.assertIs(expected, result)
+        helper.assert_called_once_with()
+        self.assertEqual([], serial.writes)
+
+
+class OwnedMouseTransitionTests(unittest.TestCase):
+    @staticmethod
+    def _consume(
+        user32: _FakeWindowHandoffUser32,
+        button: str = "left",
+    ) -> dict[str, object]:
+        with patch.object(arduino_module.os, "name", "nt"):
+            return arduino_module._consume_owned_mouse_transition(
+                button=button,
+                user32=user32,
+            )
+
+    def test_owned_low_bit_is_consumed_then_all_buttons_are_clear(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x01: [0x0001, 0x0000]}
+        )
+
+        with patch.object(arduino_module.time, "sleep") as settle:
+            result = self._consume(user32)
+
+        self.assertEqual(
+            {
+                "schema": "owned_mouse_transition.v1",
+                "button": "left",
+                "ownedTransitionConsumed": True,
+                "buttonsUp": True,
+                "activityClear": True,
+            },
+            result,
+        )
+        self.assertEqual(
+            [
+                (arduino_module._OWNED_MOUSE_TRANSITION_SETTLE_SECONDS,),
+                (arduino_module._OWNED_MOUSE_TRANSITION_SETTLE_SECONDS,),
+            ],
+            [record.args for record in settle.call_args_list],
+        )
+        self.assertEqual(15, len(user32.GetAsyncKeyState.calls))
+
+    def test_already_consumed_owned_low_bit_is_valid(self) -> None:
+        user32 = _FakeWindowHandoffUser32()
+
+        with patch.object(arduino_module.time, "sleep"):
+            result = self._consume(user32, "right")
+
+        self.assertEqual("right", result["button"])
+        self.assertIs(False, result["ownedTransitionConsumed"])
+        self.assertIs(True, result["activityClear"])
+
+    def test_owned_high_bit_is_rejected(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x01: [0x8000]}
+        )
+
+        with self.assertRaisesRegex(ArduinoHIDError, "button held"):
+            self._consume(user32)
+
+    def test_other_button_low_and_high_bits_are_rejected(self) -> None:
+        cases = (
+            (
+                _FakeWindowHandoffUser32(
+                    button_state_sequences={0x02: [0x0001]}
+                ),
+                "unowned physical mouse activity",
+            ),
+            (
+                _FakeWindowHandoffUser32(
+                    button_state_sequences={0x04: [0x8000]}
+                ),
+                "button held",
+            ),
+        )
+        for user32, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ArduinoHIDError, reason):
+                    self._consume(user32)
+
+    def test_delayed_owned_transition_is_consumed_before_final_clear(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x01: [0x0000, 0x0001, 0x0000]}
+        )
+
+        with patch.object(arduino_module.time, "sleep") as settle:
+            result = self._consume(user32)
+
+        self.assertIs(True, result["ownedTransitionConsumed"])
+        self.assertEqual(2, settle.call_count)
+
+    def test_delayed_other_button_transition_is_rejected(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x02: [0x0000, 0x0001]}
+        )
+
+        with patch.object(arduino_module.time, "sleep") as settle:
+            with self.assertRaisesRegex(
+                ArduinoHIDError, "unowned physical mouse activity"
+            ):
+                self._consume(user32)
+
+        settle.assert_called_once()
+
+    def test_transport_owned_transition_delegates_without_serial_input(self) -> None:
+        serial = _FakeSerial()
+        backend = _backend(serial)
+        expected = {"schema": "owned_mouse_transition.v1"}
+        with patch.object(
+            arduino_module,
+            "_consume_owned_mouse_transition",
+            return_value=expected,
+        ) as helper:
+            result = backend._consume_owned_mouse_transition("left")
+
+        self.assertIs(expected, result)
+        helper.assert_called_once_with(button="left")
+        self.assertEqual([], serial.writes)
+
+
+class WindowGeometryTests(unittest.TestCase):
+    LIVE_OUTER = (1179, 472, 2243, 1585)
+    LIVE_CLIENT = (1191, 472, 2219, 1573)
+    LIVE_CANVAS = (1199, 520, 2151, 1519)
+
+    @staticmethod
+    def _verify(
+        user32: _FakeWindowHandoffUser32,
+        *,
+        expected_outer: tuple[int, int, int, int] | None,
+        expected_client: tuple[int, int, int, int] | None,
+        required_inner: tuple[int, int, int, int],
+    ) -> dict[str, object]:
+        with patch.object(arduino_module.os, "name", "nt"):
+            return arduino_module._verify_window_geometry(
+                expected_pid=user32.expected_pid,
+                expected_hwnd=user32.expected_hwnd,
+                expected_outer_bounds=expected_outer,
+                expected_client_bounds=expected_client,
+                required_inner_bounds=required_inner,
+                user32=user32,
+            )
+
+    def test_exact_live_outer_client_canvas_geometry(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            window_bounds=self.LIVE_OUTER,
+            client_bounds=self.LIVE_CLIENT,
+        )
+
+        result = self._verify(
+            user32,
+            expected_outer=self.LIVE_OUTER,
+            expected_client=self.LIVE_CLIENT,
+            required_inner=self.LIVE_CANVAS,
+        )
+
+        self.assertEqual("cursor_window_geometry.v1", result["schema"])
+        self.assertEqual(1968, result["expectedPid"])
+        self.assertEqual(328854, result["expectedHwnd"])
+        self.assertEqual(
+            {
+                "x": 1179,
+                "y": 472,
+                "width": 2243,
+                "height": 1585,
+                "right": 3422,
+                "bottom": 2057,
+            },
+            result["actualOuterBounds"],
+        )
+        self.assertEqual(
+            {
+                "x": 1191,
+                "y": 472,
+                "width": 2219,
+                "height": 1573,
+                "right": 3410,
+                "bottom": 2045,
+            },
+            result["actualClientBounds"],
+        )
+        self.assertEqual(
+            {
+                "x": 1199,
+                "y": 520,
+                "width": 2151,
+                "height": 1519,
+                "right": 3350,
+                "bottom": 2039,
+            },
+            result["requiredInnerBounds"],
+        )
+        self.assertIs(True, result["outerMatches"])
+        self.assertIs(True, result["clientMatches"])
+        self.assertIs(True, result["innerContainedByClient"])
+        self.assertEqual([], user32.SetWindowPos.calls)
+        self.assertEqual([], user32.GetCursorPos.calls)
+        self.assertEqual([], user32.GetAsyncKeyState.calls)
+
+    def test_outer_only_and_client_only_expectations_are_nullable(self) -> None:
+        user32 = _FakeWindowHandoffUser32()
+        outer_only = self._verify(
+            user32,
+            expected_outer=self.LIVE_OUTER,
+            expected_client=None,
+            required_inner=self.LIVE_CANVAS,
+        )
+        self.assertIs(True, outer_only["outerMatches"])
+        self.assertIsNone(outer_only["expectedClientBounds"])
+        self.assertIsNone(outer_only["clientMatches"])
+
+        user32 = _FakeWindowHandoffUser32()
+        client_only = self._verify(
+            user32,
+            expected_outer=None,
+            expected_client=self.LIVE_CLIENT,
+            required_inner=(2300, 1281, 10, 10),
+        )
+        self.assertIsNone(client_only["expectedOuterBounds"])
+        self.assertIsNone(client_only["outerMatches"])
+        self.assertIs(True, client_only["clientMatches"])
+        self.assertIs(True, client_only["innerContainedByClient"])
+
+    def test_negative_outer_client_and_inner_coordinates_are_preserved(self) -> None:
+        outer = (-1820, -80, 1304, 760)
+        client = (-1812, -64, 1280, 720)
+        inner = (-1800, -50, 100, 100)
+        user32 = _FakeWindowHandoffUser32(
+            window_bounds=outer,
+            client_bounds=client,
+        )
+
+        result = self._verify(
+            user32,
+            expected_outer=outer,
+            expected_client=client,
+            required_inner=inner,
+        )
+
+        self.assertEqual(-1820, result["actualOuterBounds"]["x"])
+        self.assertEqual(-1812, result["actualClientBounds"]["x"])
+        self.assertEqual(-1800, result["requiredInnerBounds"]["x"])
+        self.assertIs(True, result["outerMatches"])
+        self.assertIs(True, result["clientMatches"])
+        self.assertIs(True, result["innerContainedByClient"])
+
+    def test_mismatches_and_uncontained_inner_are_reported_without_mutation(self) -> None:
+        user32 = _FakeWindowHandoffUser32()
+
+        result = self._verify(
+            user32,
+            expected_outer=(1180, 472, 2243, 1585),
+            expected_client=(1192, 472, 2219, 1573),
+            required_inner=(1179, 472, 10, 10),
+        )
+
+        self.assertIs(False, result["outerMatches"])
+        self.assertIs(False, result["clientMatches"])
+        self.assertIs(False, result["innerContainedByClient"])
+        self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_foreground_and_pid_mismatches_fail_closed(self) -> None:
+        cases = (
+            (
+                _FakeWindowHandoffUser32(foreground_hwnd=99001),
+                "foreground root HWND changed",
+            ),
+            (
+                _FakeWindowHandoffUser32(actual_pid=1969),
+                "belongs to a different PID",
+            ),
+        )
+        for user32, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ArduinoHIDError, reason):
+                    self._verify(
+                        user32,
+                        expected_outer=self.LIVE_OUTER,
+                        expected_client=self.LIVE_CLIENT,
+                        required_inner=self.LIVE_CANVAS,
+                    )
+                self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_window_geometry_api_failures_are_explicit(self) -> None:
+        cases = (
+            (
+                _FakeWindowHandoffUser32(window_rect_fail_after=0),
+                "GetWindowRect failed",
+            ),
+            (
+                _FakeWindowHandoffUser32(
+                    get_client_rect_succeeds=False
+                ),
+                "GetClientRect failed",
+            ),
+            (
+                _FakeWindowHandoffUser32(
+                    client_to_screen_succeeds=False
+                ),
+                "ClientToScreen failed",
+            ),
+        )
+        for user32, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ArduinoHIDError, reason):
+                    self._verify(
+                        user32,
+                        expected_outer=self.LIVE_OUTER,
+                        expected_client=self.LIVE_CLIENT,
+                        required_inner=self.LIVE_CANVAS,
+                    )
+                self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_window_geometry_arguments_are_strict(self) -> None:
+        user32 = _FakeWindowHandoffUser32()
+        cases = (
+            ({"expected_pid": True}, "positive PID and HWND"),
+            ({"expected_outer_bounds": [1179, 472, 2243, 1585]}, "exactly 4 integers"),
+            ({"expected_client_bounds": (1191, 472, 0, 1573)}, "dimensions must be positive"),
+            ({"required_inner_bounds": None}, "required inner bounds are required"),
+            ({"required_inner_bounds": (1199, 520, 0, 1519)}, "dimensions must be positive"),
+        )
+        for overrides, reason in cases:
+            arguments = {
+                "expected_pid": user32.expected_pid,
+                "expected_hwnd": user32.expected_hwnd,
+                "expected_outer_bounds": self.LIVE_OUTER,
+                "expected_client_bounds": self.LIVE_CLIENT,
+                "required_inner_bounds": self.LIVE_CANVAS,
+                "user32": user32,
+            }
+            arguments.update(overrides)
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ArduinoHIDError, reason):
+                    arduino_module._verify_window_geometry(**arguments)
+
+    def test_transport_window_geometry_method_delegates_without_input(self) -> None:
+        serial = _FakeSerial()
+        backend = _backend(serial)
+        expected = {"schema": "cursor_window_geometry.v1"}
+        with patch.object(
+            arduino_module,
+            "_verify_window_geometry",
+            return_value=expected,
+        ) as helper:
+            result = backend._verify_window_geometry(
+                expected_pid=1968,
+                expected_hwnd=328854,
+                expected_outer_bounds=self.LIVE_OUTER,
+                expected_client_bounds=self.LIVE_CLIENT,
+                required_inner_bounds=self.LIVE_CANVAS,
+            )
+
+        self.assertIs(expected, result)
+        helper.assert_called_once_with(
+            expected_pid=1968,
+            expected_hwnd=328854,
+            expected_outer_bounds=self.LIVE_OUTER,
+            expected_client_bounds=self.LIVE_CLIENT,
+            required_inner_bounds=self.LIVE_CANVAS,
+        )
+        self.assertEqual([], serial.writes)
+
+
+class CursorWindowHandoffTests(unittest.TestCase):
+    @staticmethod
+    def _handoff(
+        user32: _FakeWindowHandoffUser32,
+        *,
+        cursor: tuple[int, int] = (3446, 1631),
+        movement_bounds: tuple[int, int, int, int] = (
+            1191,
+            472,
+            2219,
+            1573,
+        ),
+        inset_px: int = 16,
+    ) -> dict[str, object]:
+        with patch.object(arduino_module.os, "name", "nt"):
+            return arduino_module._reposition_window_for_cursor(
+                expected_pid=user32.expected_pid,
+                expected_hwnd=user32.expected_hwnd,
+                cursor=cursor,
+                movement_bounds=movement_bounds,
+                inset_px=inset_px,
+                user32=user32,
+            )
+
+    def test_live_geometry_moves_window_once_under_stationary_cursor(self) -> None:
+        user32 = _FakeWindowHandoffUser32()
+
+        result = self._handoff(user32)
+
+        self.assertEqual("cursor_window_handoff.v1", result["schema"])
+        self.assertEqual(1968, result["expectedPid"])
+        self.assertEqual(328854, result["expectedHwnd"])
+        self.assertEqual({"x": 3446, "y": 1631}, result["cursor"])
+        self.assertEqual(
+            {
+                "x": 1232,
+                "y": 472,
+                "width": 2243,
+                "height": 1585,
+                "right": 3475,
+                "bottom": 2057,
+            },
+            result["newWindowBounds"],
+        )
+        self.assertEqual(
+            {
+                "x": 1244,
+                "y": 472,
+                "width": 2219,
+                "height": 1573,
+                "right": 3463,
+                "bottom": 2045,
+            },
+            result["newMovementBounds"],
+        )
+        for key in (
+            "repositioned",
+            "cursorUnchanged",
+            "buttonsUpConfirmed",
+            "foregroundConfirmed",
+            "pointOwnerConfirmed",
+            "windowSizeUnchanged",
+        ):
+            self.assertIs(True, result[key])
+        self.assertEqual(1, result["setWindowPosCount"])
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+        call = user32.SetWindowPos.calls[0]
+        self.assertEqual((1232, 472, 0, 0), tuple(map(int, call[2:6])))
+        self.assertEqual(
+            arduino_module._CURSOR_WINDOW_HANDOFF_FLAGS,
+            int(call[6]),
+        )
+        self.assertEqual(
+            arduino_module._SWP_NOSIZE
+            | arduino_module._SWP_NOZORDER
+            | arduino_module._SWP_NOACTIVATE
+            | arduino_module._SWP_NOOWNERZORDER
+            | arduino_module._SWP_ASYNCWINDOWPOS,
+            int(call[6]),
+        )
+
+    def test_negative_monitor_coordinates_choose_minimal_valid_origin(self) -> None:
+        cursor = (-1500, 400)
+        movement = (-490, 120, 760, 550)
+        user32 = _FakeWindowHandoffUser32(
+            cursor=cursor,
+            window_bounds=(-500, 100, 800, 600),
+            work_area=(-1920, 0, 1920, 1080),
+        )
+
+        result = self._handoff(
+            user32,
+            cursor=cursor,
+            movement_bounds=movement,
+            inset_px=10,
+        )
+
+        self.assertEqual(-1520, result["newWindowBounds"]["x"])
+        self.assertEqual(-1510, result["newMovementBounds"]["x"])
+        self.assertEqual(100, result["newWindowBounds"]["y"])
+        self.assertEqual(-1920, result["monitorWorkArea"]["x"])
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+
+    def test_held_physical_button_blocks_before_set_window_pos(self) -> None:
+        user32 = _FakeWindowHandoffUser32(held_buttons=(0x01,))
+
+        with self.assertRaisesRegex(
+            ArduinoHIDError, "physical mouse button held"
+        ) as caught:
+            self._handoff(user32)
+
+        self.assertNotIsInstance(caught.exception, CursorWindowHandoffError)
+        self.assertFalse(
+            getattr(caught.exception, "window_mutation_attempted", False)
+        )
+        self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_press_release_activity_blocks_before_set_window_pos(self) -> None:
+        user32 = _FakeWindowHandoffUser32(button_states={0x01: 0x0001})
+
+        with self.assertRaisesRegex(
+            ArduinoHIDError, "physical mouse button held or pressed"
+        ) as caught:
+            self._handoff(user32)
+
+        self.assertNotIsInstance(caught.exception, CursorWindowHandoffError)
+        self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_moving_cursor_blocks_before_set_window_pos(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            cursor_positions=[(3446, 1631), (3447, 1631)]
+        )
+
+        with self.assertRaisesRegex(ArduinoHIDError, "cursor changed before"):
+            self._handoff(user32)
+
+        self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_foreign_foreground_blocks_before_set_window_pos(self) -> None:
+        user32 = _FakeWindowHandoffUser32(foreground_hwnd=99001)
+
+        with self.assertRaisesRegex(
+            ArduinoHIDError, "foreground HWND changed"
+        ) as caught:
+            self._handoff(user32)
+
+        self.assertNotIsInstance(caught.exception, CursorWindowHandoffError)
+        self.assertFalse(
+            getattr(caught.exception, "window_mutation_attempted", False)
+        )
+        self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_foreign_point_owner_fails_closed_after_single_window_move(self) -> None:
+        user32 = _FakeWindowHandoffUser32(owner_hwnd=99002)
+
+        with self.assertRaisesRegex(
+            CursorWindowHandoffError, "cursor point is not owned"
+        ) as caught:
+            self._handoff(user32)
+
+        self.assertIs(True, caught.exception.window_mutation_attempted)
+        with self.assertRaises(AttributeError):
+            caught.exception.window_mutation_attempted = False
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+
+    def test_maximized_and_unfit_windows_block_before_move(self) -> None:
+        cases = (
+            (
+                _FakeWindowHandoffUser32(maximized=True),
+                "window is maximized",
+            ),
+            (
+                _FakeWindowHandoffUser32(
+                    work_area=(3000, 0, 840, 2076)
+                ),
+                "cannot fit in the cursor monitor work area",
+            ),
+        )
+        for user32, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ArduinoHIDError, reason):
+                    self._handoff(user32)
+                self.assertEqual([], user32.SetWindowPos.calls)
+
+    def test_set_window_pos_failure_is_not_retried(self) -> None:
+        user32 = _FakeWindowHandoffUser32(set_window_pos_succeeds=False)
+
+        with self.assertRaisesRegex(
+            CursorWindowHandoffError, "SetWindowPos failed"
+        ) as caught:
+            self._handoff(user32)
+
+        self.assertIs(True, caught.exception.window_mutation_attempted)
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+
+    def test_async_window_rect_delayed_arrival_converges_exactly(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            set_window_rect_delay_reads=2
+        )
+
+        with patch.object(arduino_module.time, "sleep") as sleeper:
+            result = self._handoff(user32)
+
+        self.assertIs(True, result["repositioned"])
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+        self.assertEqual((1232, 472, 3475, 2057), user32.window_rect)
+        self.assertGreaterEqual(user32.window_rect_reads, 6)
+        self.assertGreaterEqual(sleeper.call_count, 2)
+
+    def test_async_window_rect_timeout_is_typed_and_not_cancelable(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            set_window_rect_arrives=False
+        )
+
+        with (
+            patch.object(
+                arduino_module.time,
+                "monotonic",
+                side_effect=(0.0, 0.0, 0.75),
+            ),
+            patch.object(arduino_module.time, "sleep") as sleeper,
+            self.assertRaisesRegex(
+                CursorWindowHandoffError,
+                "queued async move cannot be canceled.*geometry must be reverified",
+            ) as caught,
+        ):
+            self._handoff(user32)
+
+        self.assertIs(True, caught.exception.window_mutation_attempted)
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+        self.assertIsNotNone(user32.pending_window_rect)
+        self.assertEqual([], user32.WindowFromPoint.calls)
+        sleeper.assert_called_once_with(
+            arduino_module._CURSOR_WINDOW_HANDOFF_RECT_POLL_SECONDS
+        )
+
+    def test_async_window_change_during_final_stability_is_typed(self) -> None:
+        expected = (1232, 472, 2243, 1585)
+        changed = (1233, 472, 2243, 1585)
+        user32 = _FakeWindowHandoffUser32(
+            post_set_window_rects=[expected, expected, changed]
+        )
+
+        with (
+            patch.object(arduino_module.time, "sleep"),
+            self.assertRaisesRegex(
+                CursorWindowHandoffError,
+                "changed during final handoff stability check",
+            ) as caught,
+        ):
+            self._handoff(user32)
+
+        self.assertIs(True, caught.exception.window_mutation_attempted)
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+
+    def test_async_window_change_after_owner_check_is_typed(self) -> None:
+        expected = (1232, 472, 2243, 1585)
+        changed = (1232, 473, 2243, 1585)
+        user32 = _FakeWindowHandoffUser32(
+            post_set_window_rects=[expected, expected, expected, changed]
+        )
+
+        with (
+            patch.object(arduino_module.time, "sleep"),
+            self.assertRaisesRegex(
+                CursorWindowHandoffError,
+                "changed after final cursor ownership validation",
+            ) as caught,
+        ):
+            self._handoff(user32)
+
+        self.assertIs(True, caught.exception.window_mutation_attempted)
+        self.assertEqual(1, len(user32.WindowFromPoint.calls))
+
+    def test_post_move_window_rect_failure_carries_mutation_marker(self) -> None:
+        user32 = _FakeWindowHandoffUser32(window_rect_fail_after=1)
+
+        with self.assertRaisesRegex(
+            CursorWindowHandoffError, "GetWindowRect failed"
+        ) as caught:
+            self._handoff(user32)
+
+        self.assertIs(True, caught.exception.window_mutation_attempted)
+        self.assertEqual(1, len(user32.SetWindowPos.calls))
+
+    def test_transport_method_delegates_without_serial_commands(self) -> None:
+        serial = _FakeSerial()
+        backend = _backend(serial)
+        expected = {"schema": "cursor_window_handoff.v1"}
+        with patch.object(
+            arduino_module,
+            "_reposition_window_for_cursor",
+            return_value=expected,
+        ) as helper:
+            result = backend._reposition_window_for_cursor(
+                expected_pid=1968,
+                expected_hwnd=328854,
+                cursor=(3446, 1631),
+                movement_bounds=(1191, 472, 2219, 1573),
+                inset_px=16,
+            )
+
+        self.assertIs(expected, result)
+        helper.assert_called_once_with(
+            expected_pid=1968,
+            expected_hwnd=328854,
+            cursor=(3446, 1631),
+            movement_bounds=(1191, 472, 2219, 1573),
+            inset_px=16,
+        )
+        self.assertEqual([], serial.writes)
 
 
 class ArduinoCommandLedgerTests(unittest.TestCase):

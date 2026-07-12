@@ -131,8 +131,9 @@ def _safe_unsent_execution(
     activation_commands: bool = False,
     complete_cleanup: bool = True,
     receipt_failure_kind: InputFailureKind | None = None,
+    disconnected_preflight: bool = False,
 ) -> ExecutionResult:
-    command_names = (
+    command_names = () if disconnected_preflight else (
         ("ARM", "MOVE", "MOUSE_DOWN", "MOUSE_UP", "STOP_ALL", "DISARM", "STATUS")
         if activation_commands
         else ("ARM", "MOVE", "STOP_ALL", "DISARM", "STATUS")
@@ -147,12 +148,18 @@ def _safe_unsent_execution(
         intent_ids=("runtime-unsent-test",),
         status="BLOCKED",
         reason=reason,
-        connected=True,
-        arm_acknowledged=True,
-        stop_all_acknowledged=complete_cleanup,
-        disarm_acknowledged=True,
-        firmware_status_acknowledged=True,
-        firmware_status=FirmwareSafetyStatus(False, 0, 0),
+        connected=not disconnected_preflight,
+        arm_acknowledged=not disconnected_preflight,
+        stop_all_acknowledged=(
+            complete_cleanup and not disconnected_preflight
+        ),
+        disarm_acknowledged=not disconnected_preflight,
+        firmware_status_acknowledged=not disconnected_preflight,
+        firmware_status=(
+            None
+            if disconnected_preflight
+            else FirmwareSafetyStatus(False, 0, 0)
+        ),
         commands=commands,
         unresolved_command_count=0,
         failed_command_count=0,
@@ -765,10 +772,95 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual([], task.applied)
         self.assertEqual(1, result.actions)
 
+    def test_safely_unsent_cursor_replan_waits_for_strictly_newer_tick(self) -> None:
+        first, _ = _executable(10)
+        complete = Decision(
+            "complete",
+            "newer cursor evidence selected no further action",
+            Action(ActionKind.WAIT, "Wait", 11),
+        )
+
+        class RecordingTask(_Task):
+            def __init__(self) -> None:
+                super().__init__([first, complete])
+                self.decision_ticks: list[int] = []
+
+            def decide(self, observation: Observation) -> Decision:
+                self.decision_ticks.append(observation.tick)
+                return super().decide(observation)
+
+        reason = "cursor_start_outside_verified_movement_bounds"
+        task = RecordingTask()
+        execution = _safe_unsent_execution(
+            first.action,
+            10,
+            reason,
+            disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+            disconnected_preflight=True,
+        )
+        assert execution.receipt is not None
+        self.assertTrue(execution.receipt.safely_unsent)
+        interface = _ActionInterface(execution)
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(10), _observation(11)),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        self.assertEqual([10, 11], task.decision_ticks)
+        self.assertEqual([reason], task.discarded)
+        self.assertEqual([False], task.discard_policies)
+        self.assertEqual(3, result.observations)
+        self.assertEqual(1, result.actions)
+        self.assertEqual(1, len(interface.calls))
+
+    def test_cursor_replan_rejects_session_or_process_identity_change(self) -> None:
+        first, _ = _executable(10)
+        reason = "cursor_window_repositioned_reobserve_required"
+        task = _Task([first])
+        interface = _ActionInterface(
+            _safe_unsent_execution(
+                first.action,
+                10,
+                reason,
+                disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+                disconnected_preflight=True,
+            )
+        )
+        changed = replace(
+            _observation(0),
+            session_id="replacement-session",
+            client_process_id=4321,
+            menu_session_id="replacement-session",
+            menu_process_id=4321,
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), changed),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("identity changed", result.reason)
+        self.assertEqual([reason], task.discarded)
+        self.assertEqual(1, result.actions)
+        self.assertEqual(2, result.observations)
+        self.assertEqual(1, len(interface.calls))
+
     def test_second_consecutive_cursor_state_invalidation_blocks(self) -> None:
         first, _ = _executable(10)
         second, _ = _executable(11)
         reason = "cursor_changed_after_pointer_validation"
+        stale_geometry = "cursor_window_geometry_changed_reobserve_required"
         task = _Task([first, second])
         interface = _SequencedActionInterface(
             _safe_unsent_execution(
@@ -776,12 +868,14 @@ class TaskRuntimeTests(unittest.TestCase):
                 10,
                 reason,
                 disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+                disconnected_preflight=True,
             ),
             _safe_unsent_execution(
                 second.action,
                 11,
-                reason,
+                stale_geometry,
                 disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+                disconnected_preflight=True,
             ),
         )
         runtime = TaskRuntime(
@@ -795,6 +889,7 @@ class TaskRuntimeTests(unittest.TestCase):
         result = runtime.run(execute=True)
 
         self.assertEqual("BLOCKED", result.status)
+        self.assertIn(stale_geometry, result.reason)
         self.assertEqual([reason], task.discarded)
         self.assertEqual([False], task.discard_policies)
         self.assertEqual(2, result.actions)

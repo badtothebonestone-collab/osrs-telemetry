@@ -60,6 +60,13 @@ class FakeBackend:
         foreground_hwnds: list[int] | None = None,
         point_owner_hwnds: list[int] | None = None,
         position_error: Exception | None = None,
+        position_samples: list[tuple[int, int]] | None = None,
+        window_handoff_error: Exception | None = None,
+        window_handoff_evidence_overrides: dict[str, Any] | None = None,
+        window_geometry_evidence_overrides: dict[str, Any] | None = None,
+        physical_mouse_errors: list[Exception | None] | None = None,
+        physical_mouse_evidence_overrides: dict[str, Any] | None = None,
+        owned_transition_error: Exception | None = None,
     ) -> None:
         self.position = start
         self.fail_commands = set(fail_commands or ())
@@ -91,6 +98,21 @@ class FakeBackend:
         self.foreground_hwnds = list(foreground_hwnds or ())
         self.point_owner_hwnds = list(point_owner_hwnds or ())
         self.position_error = position_error
+        self.position_samples = list(position_samples or ())
+        self.window_handoff_error = window_handoff_error
+        self.window_handoff_evidence_overrides = dict(
+            window_handoff_evidence_overrides or {}
+        )
+        self.window_geometry_evidence_overrides = dict(
+            window_geometry_evidence_overrides or {}
+        )
+        self.physical_mouse_errors = list(physical_mouse_errors or ())
+        self.physical_mouse_evidence_overrides = dict(
+            physical_mouse_evidence_overrides or {}
+        )
+        self.owned_transition_error = owned_transition_error
+        self.owned_transition_pending: str | None = None
+        self.last_window_handoff: dict[str, Any] | None = None
         self.last_foreground_hwnd = 77
         self.last_point_owner_hwnd = 77
         self.positions: list[tuple[int, int]] = [start]
@@ -157,6 +179,9 @@ class FakeBackend:
         if self.position_error is not None:
             raise self.position_error
         self.position_call_count += 1
+        if self.position_samples:
+            self.position = self.position_samples.pop(0)
+            self.positions.append(self.position)
         release_x = (
             self.delayed_x
             if self.position_call_count == self.release_delayed_x_on_position_call
@@ -243,8 +268,132 @@ class FakeBackend:
             self.last_point_owner_hwnd = self.point_owner_hwnds.pop(0)
         return {"pid": 321, "hwnd": self.last_point_owner_hwnd}
 
+    def _reposition_window_for_cursor(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        cursor: tuple[int, int],
+        movement_bounds: tuple[int, int, int, int],
+        inset_px: int,
+    ) -> dict[str, Any]:
+        self.events.append("window_handoff")
+        if self.window_handoff_error is not None:
+            raise self.window_handoff_error
+        x, y, width, height = movement_bounds
+        cursor_x, cursor_y = cursor
+        dx = 0
+        dy = 0
+        if cursor_x < x + inset_px:
+            dx = cursor_x - (x + inset_px)
+        elif cursor_x >= x + width - inset_px:
+            dx = cursor_x - (x + width - inset_px - 1)
+        if cursor_y < y + inset_px:
+            dy = cursor_y - (y + inset_px)
+        elif cursor_y >= y + height - inset_px:
+            dy = cursor_y - (y + height - inset_px - 1)
+        if dx == 0 and dy == 0:
+            dx = 1
+        evidence: dict[str, Any] = {
+            "schema": "cursor_window_handoff.v1",
+            "expectedPid": expected_pid,
+            "expectedHwnd": expected_hwnd,
+            "cursor": {"x": cursor_x, "y": cursor_y},
+            "oldMovementBounds": {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            },
+            "newMovementBounds": {
+                "x": x + dx,
+                "y": y + dy,
+                "width": width,
+                "height": height,
+            },
+            "repositioned": True,
+            "cursorUnchanged": True,
+            "buttonsUpConfirmed": True,
+            "foregroundConfirmed": True,
+            "pointOwnerConfirmed": True,
+        }
+        evidence.update(self.window_handoff_evidence_overrides)
+        self.last_window_handoff = evidence
+        return evidence
+
+    def _verify_window_geometry(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        expected_outer_bounds: tuple[int, int, int, int] | None,
+        expected_client_bounds: tuple[int, int, int, int] | None,
+        required_inner_bounds: tuple[int, int, int, int],
+    ) -> dict[str, Any]:
+        self.events.append("window_geometry")
+        def payload(
+            values: tuple[int, int, int, int] | None,
+        ) -> dict[str, int] | None:
+            if values is None:
+                return None
+            x, y, width, height = values
+            return {"x": x, "y": y, "width": width, "height": height}
+
+        actual_outer = expected_outer_bounds or expected_client_bounds
+        actual_client = expected_client_bounds or required_inner_bounds
+        evidence: dict[str, Any] = {
+            "schema": "cursor_window_geometry.v1",
+            "expectedPid": expected_pid,
+            "expectedHwnd": expected_hwnd,
+            "expectedOuterBounds": payload(expected_outer_bounds),
+            "expectedClientBounds": payload(expected_client_bounds),
+            "requiredInnerBounds": payload(required_inner_bounds),
+            "actualOuterBounds": payload(actual_outer),
+            "actualClientBounds": payload(actual_client),
+            "outerMatches": (
+                None if expected_outer_bounds is None else True
+            ),
+            "clientMatches": (
+                None if expected_client_bounds is None else True
+            ),
+            "innerContainedByClient": True,
+        }
+        evidence.update(self.window_geometry_evidence_overrides)
+        return evidence
+
+    def _verify_physical_mouse_quiet(self) -> dict[str, Any]:
+        self.events.append("physical_mouse_quiet")
+        if self.owned_transition_pending is not None:
+            raise ArduinoHIDError("owned Arduino mouse transition was not consumed")
+        if self.physical_mouse_errors:
+            error = self.physical_mouse_errors.pop(0)
+            if error is not None:
+                raise error
+        evidence: dict[str, Any] = {
+            "schema": "physical_mouse_quiet.v1",
+            "buttonsUp": True,
+            "activityClear": True,
+        }
+        evidence.update(self.physical_mouse_evidence_overrides)
+        return evidence
+
+    def _consume_owned_mouse_transition(self, button: str) -> dict[str, Any]:
+        self.events.append(f"consume_owned_mouse:{button}")
+        if self.owned_transition_error is not None:
+            raise self.owned_transition_error
+        consumed = self.owned_transition_pending == button
+        self.owned_transition_pending = None
+        return {
+            "schema": "owned_mouse_transition.v1",
+            "button": button,
+            "ownedTransitionConsumed": consumed,
+            "buttonsUp": True,
+            "activityClear": True,
+        }
+
     def _mouse_down(self, *, button: str = "left") -> None:
         self.events.append(f"mouse_down:{button}")
+        self.owned_transition_pending = button
         self._record("MOUSE_DOWN")
 
     def _mouse_up(self, *, button: str = "left") -> None:
@@ -425,6 +574,57 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertTrue(second_receipt.successful)
         self.assertTrue(second.target_bounds.contains(ScreenPoint(*backend.position)))
 
+    def test_physical_mouse_activity_blocks_before_serial_connect(self) -> None:
+        backend = FakeBackend(
+            physical_mouse_errors=[
+                ArduinoHIDError(
+                    "physical mouse button held or pressed during cursor window handoff"
+                )
+            ]
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertTrue(receipt.safely_unsent)
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertIn("physical_mouse_not_quiet_pointer_preflight", receipt.reason)
+        self.assertNotIn("connect", backend.events)
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in backend.events
+        ))
+
+    def test_physical_mouse_activity_during_transaction_blocks_activation(self) -> None:
+        backend = FakeBackend(
+            physical_mouse_errors=[
+                None,
+                None,
+                ArduinoHIDError(
+                    "physical mouse button held or pressed during cursor window handoff"
+                ),
+            ]
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertFalse(receipt.safely_unsent)
+        self.assertIn("physical_mouse_not_quiet_before_pointer_validation", receipt.reason)
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
     def test_outer_chrome_reacquires_live_shaped_login_cursor_with_headroom(self) -> None:
         backend = FakeBackend(
             start=(3421, 1594),
@@ -490,6 +690,227 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertFalse(any(
             event.startswith("mouse_down") for event in backend.events
         ))
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_external_live_cursor_repositions_window_then_requires_reobserve(self) -> None:
+        client = ScreenBounds(1191, 472, 2219, 1573)
+        outer = ScreenBounds(1179, 472, 2243, 1585)
+        target = ScreenPoint(2300, 1281)
+        target_bounds = ScreenBounds(2220, 1230, 160, 102)
+        first_backend = FakeBackend(
+            start=(3446, 1631),
+            physical_mouse_evidence_overrides={
+                "historicalActivityConsumed": True,
+                "sampleCount": 3,
+            },
+        )
+        stale_intent = ApprovedPointerIntent(
+            intent_id="login-external-handoff-stale",
+            purpose=InputPurpose.LOGIN_PROMPT,
+            target=target,
+            movement_bounds=client,
+            target_bounds=target_bounds,
+            expected_pid=321,
+            expected_hwnd=77,
+            reacquisition_bounds=outer,
+        )
+
+        first_receipt = coordinator(first_backend).execute_pointer(
+            stale_intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", first_receipt.status)
+        self.assertIn("repositioned_reobserve_required", first_receipt.reason)
+        self.assertIs(
+            first_receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertTrue(first_receipt.safely_unsent)
+        self.assertFalse(first_receipt.connected)
+        self.assertEqual((), first_receipt.commands)
+        self.assertIn("window_handoff", first_backend.events)
+        self.assertNotIn("connect", first_backend.events)
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in first_backend.events
+        ))
+        self.assertNotIn("stop_all", first_backend.events)
+        self.assertNotIn("disarm", first_backend.events)
+        self.assertEqual(
+            {
+                "x": 1260,
+                "y": 472,
+                "width": 2219,
+                "height": 1573,
+            },
+            (first_backend.last_window_handoff or {}).get(
+                "newMovementBounds"
+            ),
+        )
+
+        dx = 69
+        fresh_client = ScreenBounds(client.x + dx, client.y, client.width, client.height)
+        fresh_outer = ScreenBounds(outer.x + dx, outer.y, outer.width, outer.height)
+        fresh_intent = ApprovedPointerIntent(
+            intent_id="login-external-handoff-fresh",
+            purpose=InputPurpose.LOGIN_PROMPT,
+            target=ScreenPoint(target.x + dx, target.y),
+            movement_bounds=fresh_client,
+            target_bounds=ScreenBounds(
+                target_bounds.x + dx,
+                target_bounds.y,
+                target_bounds.width,
+                target_bounds.height,
+            ),
+            expected_pid=321,
+            expected_hwnd=77,
+            reacquisition_bounds=fresh_outer,
+        )
+        second_backend = FakeBackend(start=(3446, 1631))
+        second_receipt = coordinator(second_backend).execute_pointer(
+            fresh_intent,
+            validate=lambda _intent, actual: (
+                InputValidation.allow()
+                if fresh_intent.target_bounds.contains(actual)
+                else InputValidation.deny("fresh target mismatch")
+            ),
+        )
+
+        self.assertTrue(second_receipt.successful)
+        self.assertFalse(second_receipt.safely_unsent)
+        self.assertNotIn("window_handoff", second_backend.events)
+        self.assertTrue(all(
+            fresh_client.contains(ScreenPoint(*point))
+            for point in second_backend.positions
+        ))
+
+    def test_window_handoff_requires_stationary_cursor_and_complete_proof(self) -> None:
+        intent = ApprovedPointerIntent(
+            intent_id="stationary-window-handoff",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(150, 150),
+            movement_bounds=ScreenBounds(100, 100, 200, 200),
+            target_bounds=ScreenBounds(147, 147, 7, 7),
+            expected_pid=321,
+            expected_hwnd=77,
+            reacquisition_bounds=ScreenBounds(90, 90, 220, 220),
+        )
+        moving = FakeBackend(
+            start=(320, 150),
+            position_samples=[(320, 150), (321, 150)],
+        )
+        moving_receipt = coordinator(moving).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+        self.assertTrue(moving_receipt.safely_unsent)
+        self.assertIn("not_settled", moving_receipt.reason)
+        self.assertNotIn("window_handoff", moving.events)
+        self.assertNotIn("connect", moving.events)
+
+        incomplete = FakeBackend(
+            start=(320, 150),
+            window_handoff_evidence_overrides={
+                "pointOwnerConfirmed": False
+            },
+        )
+        incomplete_receipt = coordinator(incomplete).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+        self.assertTrue(incomplete_receipt.safely_unsent)
+        self.assertIs(
+            incomplete_receipt.failure_kind,
+            InputFailureKind.NONE,
+        )
+        self.assertIn("post_mutation_evidence_unproved", incomplete_receipt.reason)
+        self.assertIn("evidence_invalid", incomplete_receipt.reason)
+        self.assertNotIn("connect", incomplete.events)
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in incomplete.events
+        ))
+
+        post_mutation_error = ArduinoHIDError("point owner proof failed")
+        post_mutation_error.window_mutation_attempted = True
+        unproved = FakeBackend(
+            start=(320, 150),
+            window_handoff_error=post_mutation_error,
+        )
+        unproved_receipt = coordinator(unproved).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+        self.assertTrue(unproved_receipt.safely_unsent)
+        self.assertIs(
+            unproved_receipt.failure_kind,
+            InputFailureKind.NONE,
+        )
+        self.assertIn("post_mutation_unproved", unproved_receipt.reason)
+        self.assertNotIn("connect", unproved.events)
+
+    def test_stale_client_geometry_blocks_before_serial_or_pointer_motion(self) -> None:
+        client = ScreenBounds(90, 90, 220, 220)
+        backend = FakeBackend(
+            start=(150, 150),
+            window_geometry_evidence_overrides={
+                "actualOuterBounds": {
+                    "x": 159,
+                    "y": 90,
+                    "width": 220,
+                    "height": 220,
+                },
+                "outerMatches": False,
+            },
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="stale-client-geometry",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(160, 160),
+            movement_bounds=ScreenBounds(100, 100, 200, 200),
+            target_bounds=ScreenBounds(157, 157, 7, 7),
+            expected_pid=321,
+            reacquisition_bounds=client,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertTrue(receipt.safely_unsent)
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertIn("geometry_changed_reobserve_required", receipt.reason)
+        self.assertIn("window_geometry", backend.events)
+        self.assertNotIn("connect", backend.events)
+        self.assertFalse(any(
+            event.startswith(("move:", "mouse_down:"))
+            for event in backend.events
+        ))
+
+    def test_final_point_owner_mismatch_blocks_activation(self) -> None:
+        backend = FakeBackend(
+            start=(10, 10),
+            point_owner_hwnds=[77, 88],
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn("point_owner_mismatch", receipt.reason)
+        self.assertIs(
+            receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
     def test_reacquisition_requires_the_pinned_foreground_window_to_own_cursor(self) -> None:
@@ -698,37 +1119,29 @@ class InputCoordinatorTests(unittest.TestCase):
         ))
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
-    def test_reacquisition_rejects_corner_or_unverified_outer_start(self) -> None:
+    def test_reacquisition_rejects_corner_inside_outer_envelope(self) -> None:
         client = ScreenBounds(100, 100, 200, 200)
         outer = ScreenBounds(90, 90, 220, 220)
-        cases = (
-            ("corner", (305, 305), "requires_one_outside_axis"),
-            ("outside", (320, 150), "outside_verified_movement_bounds"),
+        backend = FakeBackend(start=(305, 305))
+        intent = ApprovedPointerIntent(
+            intent_id="reacquire-corner",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(150, 150),
+            movement_bounds=client,
+            target_bounds=ScreenBounds(147, 147, 7, 7),
+            expected_pid=321,
+            reacquisition_bounds=outer,
         )
-        for label, start, reason in cases:
-            with self.subTest(label=label):
-                backend = FakeBackend(start=start)
-                intent = ApprovedPointerIntent(
-                    intent_id=f"reacquire-{label}",
-                    purpose=InputPurpose.GAMEPLAY_OBJECT,
-                    target=ScreenPoint(150, 150),
-                    movement_bounds=client,
-                    target_bounds=ScreenBounds(147, 147, 7, 7),
-                    expected_pid=321,
-                    reacquisition_bounds=outer,
-                )
-                receipt = coordinator(backend).execute_pointer(
-                    intent,
-                    validate=lambda _intent, _actual: InputValidation.allow(),
-                )
-                self.assertFalse(receipt.successful)
-                self.assertIn(reason, receipt.reason)
-                self.assertFalse(any(
-                    event.startswith("mouse_down") for event in backend.events
-                ))
-                self.assertTrue(
-                    receipt.firmware_status and receipt.firmware_status.safe
-                )
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+        self.assertFalse(receipt.successful)
+        self.assertIn("requires_one_outside_axis", receipt.reason)
+        self.assertFalse(any(
+            event.startswith("mouse_down") for event in backend.events
+        ))
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
     def test_pointer_success_has_ordered_wire_evidence_and_safe_cleanup(self) -> None:
         backend = FakeBackend()
@@ -765,6 +1178,8 @@ class InputCoordinatorTests(unittest.TestCase):
                 "STATUS",
             ],
         )
+        self.assertIn("consume_owned_mouse:left", backend.events)
+        self.assertIsNone(backend.owned_transition_pending)
         self.assertLess(
             backend.events.index("validator"),
             backend.events.index("mouse_down:left"),
@@ -789,6 +1204,27 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertFalse(hasattr(receipt.commands[0], "__dict__"))
         with self.assertRaises(FrozenInstanceError):
             receipt.status = "ERROR"  # type: ignore[misc]
+
+    def test_unproved_owned_transition_after_click_is_terminal(self) -> None:
+        backend = FakeBackend(
+            owned_transition_error=ArduinoHIDError(
+                "physical mouse changed during owned-transition settle"
+            )
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("ERROR", receipt.status)
+        self.assertIs(receipt.failure_kind, InputFailureKind.NONE)
+        self.assertIn("owned_mouse_transition_unproved", receipt.reason)
+        self.assertIn("mouse_down:left", backend.events)
+        self.assertIn("mouse_up:left", backend.events)
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
     def test_key_validator_runs_after_arm_and_immediately_before_key(self) -> None:
         backend = FakeBackend()

@@ -61,7 +61,7 @@ def _may_replan_unsent_action(
                 is InputFailureKind.CURSOR_STATE_INVALIDATED
             )
         )
-        and execution.cleanup_confirmed
+        and (execution.cleanup_confirmed or receipt.safely_unsent)
         and all(
             command.command in _PREACTIVATION_COMMANDS
             for command in receipt.commands
@@ -405,6 +405,7 @@ class TaskRuntime:
         last_tick: int | None = None
         last_decision: Decision | None = None
         consecutive_unsent_replans = 0
+        cursor_replan_after: tuple[int, str | None, int] | None = None
         runtime_deadline = self._clock() + self._max_runtime_seconds
         focus_deadline = self._clock() + LIVE_FOCUS_HANDOFF_SECONDS
 
@@ -497,6 +498,24 @@ class TaskRuntime:
                 # A pause can make a previously fresh observation stale. It is
                 # diagnostic evidence only; refetch before task state changes.
                 continue
+            if cursor_replan_after is not None:
+                expected_pid, expected_session, minimum_tick = cursor_replan_after
+                if (
+                    observation.client_process_id != expected_pid
+                    or observation.session_id != expected_session
+                ):
+                    return self._result(
+                        "BLOCKED",
+                        "cursor replan observation identity changed",
+                        observations,
+                        actions,
+                        last_tick,
+                        last_decision,
+                    )
+                if observation.tick <= minimum_tick:
+                    self._sleep(self._poll_seconds)
+                    continue
+                cursor_replan_after = None
             if execute and (
                 not observation.client_focused
                 or observation.client_process_id is None
@@ -666,6 +685,16 @@ class TaskRuntime:
                         execution,
                     )
                 consecutive_unsent_replans += 1
+                if (
+                    execution.unsent_disposition
+                    is UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+                ):
+                    assert observation.client_process_id is not None
+                    cursor_replan_after = (
+                        observation.client_process_id,
+                        observation.session_id,
+                        observation.tick,
+                    )
                 self._frame_pending = None
                 self._publish_frame(EngineStage.EXECUTED)
                 continue

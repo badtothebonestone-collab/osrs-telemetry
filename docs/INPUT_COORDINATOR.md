@@ -77,6 +77,31 @@ therefore see the same physical device-pixel point. Missing APIs, an ineffective
 thread-context change, or a failed cursor read blocks and never substitutes
 `(0,0)` or the last commanded location.
 
+Every initial pointer intent has a no-input preflight before serial connect.
+The first physical-button sample consumes only historical released-button bits,
+then two bounded all-clear samples must prove no held or new button activity.
+The exact foreground root HWND/PID is pinned, and native PMv2 Win32 geometry is
+split deliberately: gameplay's telemetry `clientWindow*` envelope must equal
+`GetWindowRect`, its canvas must be contained by the current
+`GetClientRect`/`ClientToScreen` rectangle, and login must match both its exact
+outer and exact client rectangles. A same-PID window with different geometry
+does not qualify.
+
+If the stationary cursor is beyond that verified outer window, the coordinator
+does not move it through the desktop. Instead, while the mouse remains quiet,
+it issues one no-resize/no-z-order/no-activation `SWP_ASYNCWINDOWPOS` for the
+exact non-minimized, non-maximized RuneLite HWND on the cursor's monitor. The
+window must fit the work area and converge within 750 ms so the translated
+strict movement region contains the unchanged cursor with 32 device pixels of
+headroom. Cursor, focus, buttons, final root ownership, and two settled plus one
+final exact window rectangles must all pass. The old intent is then always
+returned as typed safely unsent: login re-finds the window and re-screens the
+whole client even though login tick remains zero; gameplay waits for a newer
+tick from the same PID/session. A post-`SetWindowPos` error or contradictory
+handoff evidence is terminal and cannot consume the retry path. An async request
+that times out cannot be canceled and may move the window later, but no input or
+automatic retry follows it and every future run rechecks exact geometry.
+
 An unknown axis begins with one HID-count probe. Before every MOVE, all four
 directions on both screen axes must contain an explicit envelope of eight device
 pixels per HID count across the complete planner path; this also contains a
@@ -100,11 +125,12 @@ aborts. These retries consume the same 64-plan and 512-MOVE transaction caps and
 never authorize activation without a settled point and fresh validation.
 
 Normal gameplay transit is confined to the loaded-scene telemetry canvas in
-Win32 device pixels. The optional telemetry client-window bounds form only an
-outer movement-only reacquisition region. A freshly sampled cursor just outside
-the canvas may enter when it is still owned by the exact pinned RuneLite root
-HWND/PID, lies outside on exactly one axis, is no more than 64 device pixels from
-the canvas, and has the required cross-axis and four-sided transfer headroom.
+Win32 device pixels. The optional telemetry `clientWindow*` bounds are the outer
+window rectangle and form only a movement-only reacquisition region. A freshly
+sampled cursor just outside the canvas may enter when it is still owned by the
+exact pinned RuneLite root HWND/PID, lies outside on exactly one axis, is no more
+than 64 device pixels from the canvas, and has the required cross-axis and
+four-sided transfer headroom.
 At most 72 one-count inward MOVEs may reach a stable eight-pixel inset. Cross-
 axis motion, wrong direction, excess gain, no progress/effect, ownership/focus
 change, multiple outside axes, or insufficient outer-edge headroom blocks before
@@ -141,10 +167,15 @@ The coordinator checks focus/PID and actual cursor feedback throughout the
 trajectory. Every correction is another bounded deterministic plan. Immediately
 before activation, it passes the actual settled device-pixel point to the
 caller's fresh validator. The cursor must remain unchanged and inside both the
-verified transit and activation bounds before and after that validation. The
-validator must still prove the exact hover/default action or open-menu row at
-that actual point. Context-menu failures attempt an acknowledged Escape before
-normal cleanup.
+verified transit and activation bounds before and after that validation, the
+physical mouse must remain quiet, and `WindowFromPoint` must still resolve to
+the exact pinned root HWND/PID. The validator must still prove the exact
+hover/default action or open-menu row at that actual point. After each
+acknowledged Arduino `MOUSE_UP`, one bounded reader attributes and consumes only
+that owned button's possibly delayed Windows transition, rejects other/held/new
+activity, and leaves an all-clear baseline for a context row or the next
+transaction. Context-menu failures attempt an acknowledged Escape before normal
+cleanup.
 
 The coordinator treats the firmware watchdog as a short activation lease. It
 checks or explicitly refreshes that lease before each lane-specific validator,
@@ -167,11 +198,13 @@ activation; the resource task may suppress that exact pending key for one fresh
 alternate selection. `CURSOR_STATE_INVALIDATED` means the observed physical
 cursor/ownership/bounds state changed; it permits one fresh reobservation but
 does not suppress the target. Runtime accepts either only when the receipt is
-blocked, cleanup is authoritative and safe, the failure kind matches the typed
-disposition, and the complete ledger contains preactivation/cleanup commands--
-never mouse activation or a key press. Neither is input success or a verification
-result. Any activation command, incomplete cleanup, mismatched denial, or second
-consecutive invalidation fails closed instead of replanning.
+blocked, the failure kind matches the typed disposition, and either connected
+cleanup is authoritative and safe or a pre-serial receipt proves an empty closed
+ledger and closed backend. Any ledger commands must remain preactivation/
+cleanup-only--never mouse activation or a key press. Neither lane is input
+success or a verification result. Any activation command, incomplete terminal
+proof, mismatched denial, identity change, or second consecutive invalidation
+fails closed instead of replanning.
 
 ## Supported callers
 

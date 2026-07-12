@@ -81,15 +81,26 @@ Regression command:
 - Gameplay and saved-session login now submit immutable approved intents to one
   `InputCoordinator`; neither can open an Arduino session or call raw input.
 - Normal gameplay pointer transit remains inside the loaded-scene telemetry
-  canvas. The exact PID-owned Win32 client is only an outer movement-only
-  reacquisition envelope: a fresh cursor on one outside axis may move inward
-  under the fixed distance/headroom/ownership caps, then the ordinary canvas
-  planner takes over. Before scene geometry exists, saved-session login uses the
-  same exact client boundary. Screenshot dimensions must still match it.
+  canvas. Telemetry `clientWindow*` is the outer `GetWindowRect` reacquisition
+  envelope; the canvas must also fit the separately sampled actual Win32 client.
+  A fresh cursor on one outside axis may move inward under the fixed distance,
+  headroom, ownership, and physical-button caps. A quiet stationary cursor
+  beyond the outer window is handled before serial connect by one bounded,
+  non-activating exact-window translation under that cursor--never desktop-wide
+  pointer motion. The stale intent is discarded; login re-finds and re-screens
+  at tick zero, while gameplay requires a newer same-PID/session tick and exact
+  updated outer/client/canvas proof. Post-mutation uncertainty is terminal.
 - Every cursor and point-owner read independently establishes per-monitor-v2
   device pixels on the calling thread. A failed/ineffective context change or
   `GetCursorPos` failure blocks; the engine never substitutes `(0,0)` or a
   remembered command endpoint.
+- Every pointer transaction consumes only historical released-button bits at a
+  pre-serial baseline, then requires two quiet physical-button samples. New or
+  held activity blocks again around motion and activation. After Arduino
+  `MOUSE_UP`, a bounded settle attributes only that owned possibly delayed
+  Windows transition so a context row or next action does not mistake the
+  engine's own click for manual takeover. Final activation also requires the
+  exact pinned root HWND/PID from `WindowFromPoint`.
 - Object aim points lie inside the viewport and the first present RuneLite API
   shape in clickbox -> convex hull -> canvas tile order. `canvasLocation` alone
   is not activation proof, and a present stronger shape cannot fall through.
@@ -250,6 +261,16 @@ is not a complete raw audit of every intermediate transaction.
   made before per-monitor-v2 awareness landed at `(2063,826)` instead of
   `(1179,472)`; it was immediately corrected after establishing PMv2. No
   software cursor input was used.
+- The later recurring manual-takeover failure reproduced independently without
+  user action at physical PMv2 cursor `(3446,1631)`. RuneLite PID `1968`/HWND
+  `328854` was foreground, but the point was 25 pixels beyond outer
+  `(1179,472,2243,1585)`, 37 beyond client
+  `(1191,472,2219,1573)`, and owned by the visible ChatGPT root window. Both
+  login attempts correctly sent no MOVE/click and ended with acknowledged
+  `STOP_ALL`, `DISARM`, safe zero-held status, and zero unresolved commands.
+  The defect was therefore policy coverage, not forgotten coordinates. The new
+  pre-serial window handoff directly covers this exact geometry while retaining
+  the no-pointer-motion-outside-RuneLite invariant.
 - An earlier transaction received acknowledged MOVE commands but Windows still
   reported no X movement at the ordinary sample. Cursor, telemetry, foreground,
   and exact HWND ownership agreed, so manual interference was not supported.
@@ -313,6 +334,15 @@ is not a complete raw audit of every intermediate transaction.
   external Gradle reports were counted directly. The deterministic Java fixture
   SHA-256 is
   `80AF03C08681D242033D5ED4FBFF56AF6069263C40E0D290CABF5B7DDA549081`.
+- External-cursor handoff gate: 508 Python tests passed and the focused
+  Arduino/coordinator/login/runtime set passed 216/216; golden replay remains
+  2/2; `python -m compileall`, `git diff --check`, catalog, profile-schema, and
+  default-profile validation pass. A forced Java rerun executed 76 tests across
+  8 suites with zero failures, errors, or skips. Read-only live PMv2 proof on
+  PID `1968`/HWND `328854` matched outer
+  `(1179,472,2243,1585)`, client `(1191,472,2219,1573)`, and contained canvas
+  `(1199,520,2151,1519)`. Physical login/gameplay execution from this source
+  checkpoint is the next gate.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -328,10 +358,16 @@ is not a complete raw audit of every intermediate transaction.
 
 ## Remaining limitations and next work
 
-- A fresh `f2007eb` observation/default cycle is required because production
-  sensor code changed after PID `11440`. The same run should confirm the real
+- A fresh current-checkpoint observation/default cycle is required because both
+  production sensor and cursor/input code changed after PID `11440`. The same
+  run should confirm the displaced-cursor login and gameplay handoffs plus real
   `Chatmenu` staircase prompt/option structure; any mismatch remains
   fail-closed.
+- An async window-position request that misses its 750 ms convergence deadline
+  cannot be canceled and may complete later. That attempt is terminal and sends
+  no input; every later attempt rechecks exact geometry. Cross-monitor
+  mixed-DPI placement is deterministically covered and safely fail-closed but
+  has not been physically exercised on this one-monitor machine.
 - One short user-performed manual demonstration and `inspect-demo` verification
   remain required afterward. It needs a current-checkpoint launch and
   saved-session login when the user is ready.

@@ -10,7 +10,11 @@ from unittest.mock import patch
 from PIL import Image
 
 from osrs_bot import login as login_module
-from osrs_bot.input_coordinator import InputCoordinator, InputFailureKind
+from osrs_bot.input_coordinator import (
+    InputCoordinator,
+    InputFailureKind,
+    InputReceipt,
+)
 from osrs_bot.login import (
     LoginCandidate,
     LoginPromptHelper,
@@ -139,12 +143,15 @@ class FakeBackend:
         start: tuple[int, int] = (150, 500),
         foreground_hwnd: int = 77,
         change_position_on_call: int | None = None,
+        window_handoff_callback=None,
     ) -> None:
         self.calls: list[object] = []
         self.fail_at = fail_at
         self.position = start
         self.foreground_hwnd = foreground_hwnd
         self.change_position_on_call = change_position_on_call
+        self.window_handoff_callback = window_handoff_callback
+        self.owned_transition_pending: str | None = None
         self.position_call_count = 0
         self.armed = False
         self.records: list[dict[str, object]] = []
@@ -221,6 +228,115 @@ class FakeBackend:
         self._call("point_owner", point)
         return {"pid": 4242, "hwnd": 77}
 
+    def _reposition_window_for_cursor(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        cursor: tuple[int, int],
+        movement_bounds: tuple[int, int, int, int],
+        inset_px: int,
+    ) -> dict[str, object]:
+        self._call("window_handoff")
+        x, y, width, height = movement_bounds
+        cursor_x, cursor_y = cursor
+        dx = 0
+        dy = 0
+        if cursor_x < x + inset_px:
+            dx = cursor_x - (x + inset_px)
+        elif cursor_x >= x + width - inset_px:
+            dx = cursor_x - (x + width - inset_px - 1)
+        if cursor_y < y + inset_px:
+            dy = cursor_y - (y + inset_px)
+        elif cursor_y >= y + height - inset_px:
+            dy = cursor_y - (y + height - inset_px - 1)
+        evidence: dict[str, object] = {
+            "schema": "cursor_window_handoff.v1",
+            "expectedPid": expected_pid,
+            "expectedHwnd": expected_hwnd,
+            "cursor": {"x": cursor_x, "y": cursor_y},
+            "oldMovementBounds": {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            },
+            "newMovementBounds": {
+                "x": x + dx,
+                "y": y + dy,
+                "width": width,
+                "height": height,
+            },
+            "repositioned": True,
+            "cursorUnchanged": True,
+            "buttonsUpConfirmed": True,
+            "foregroundConfirmed": True,
+            "pointOwnerConfirmed": True,
+        }
+        if self.window_handoff_callback is not None:
+            self.window_handoff_callback(evidence)
+        return evidence
+
+    def _verify_window_geometry(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        expected_outer_bounds: tuple[int, int, int, int] | None,
+        expected_client_bounds: tuple[int, int, int, int] | None,
+        required_inner_bounds: tuple[int, int, int, int],
+    ) -> dict[str, object]:
+        self._call("window_geometry")
+        def payload(
+            values: tuple[int, int, int, int] | None,
+        ) -> dict[str, int] | None:
+            if values is None:
+                return None
+            x, y, width, height = values
+            return {"x": x, "y": y, "width": width, "height": height}
+
+        actual_outer = expected_outer_bounds or expected_client_bounds
+        actual_client = expected_client_bounds or required_inner_bounds
+        return {
+            "schema": "cursor_window_geometry.v1",
+            "expectedPid": expected_pid,
+            "expectedHwnd": expected_hwnd,
+            "expectedOuterBounds": payload(expected_outer_bounds),
+            "expectedClientBounds": payload(expected_client_bounds),
+            "requiredInnerBounds": payload(required_inner_bounds),
+            "actualOuterBounds": payload(actual_outer),
+            "actualClientBounds": payload(actual_client),
+            "outerMatches": (
+                None if expected_outer_bounds is None else True
+            ),
+            "clientMatches": (
+                None if expected_client_bounds is None else True
+            ),
+            "innerContainedByClient": True,
+        }
+
+    def _verify_physical_mouse_quiet(self) -> dict[str, object]:
+        self._call("physical_mouse_quiet")
+        if self.owned_transition_pending is not None:
+            raise RuntimeError("owned Arduino mouse transition was not consumed")
+        return {
+            "schema": "physical_mouse_quiet.v1",
+            "buttonsUp": True,
+            "activityClear": True,
+        }
+
+    def _consume_owned_mouse_transition(self, button: str) -> dict[str, object]:
+        self._call("consume_owned_mouse", button)
+        consumed = self.owned_transition_pending == button
+        self.owned_transition_pending = None
+        return {
+            "schema": "owned_mouse_transition.v1",
+            "button": button,
+            "ownedTransitionConsumed": consumed,
+            "buttonsUp": True,
+            "activityClear": True,
+        }
+
     def _move_relative(self, dx: int, dy: int) -> dict[str, object]:
         self._call("move", {"dx": dx, "dy": dy})
         self._record("MOVE", fail_name="move")
@@ -229,6 +345,7 @@ class FakeBackend:
 
     def _mouse_down(self, *, button: str) -> None:
         self._call("mouse_down")
+        self.owned_transition_pending = button
         self._record("MOUSE_DOWN", fail_name="mouse_down")
 
     def _mouse_up(self, *, button: str) -> None:
@@ -280,11 +397,14 @@ def build_helper(
     source: FakeObservations,
     detector,
     *,
+    coordinator: InputCoordinator | None = None,
     backends: list[FakeBackend] | None = None,
     fail_at: str | None = None,
     cursor_start: tuple[int, int] = (150, 500),
     foreground_hwnd: int = 77,
     cursor_change_calls: list[int | None] | None = None,
+    window_finder=None,
+    window_handoff_callback=None,
     loaded_scene_detector=None,
     clock: FakeClock | None = None,
 ) -> LoginPromptHelper:
@@ -302,19 +422,21 @@ def build_helper(
                 if pending_cursor_changes
                 else None
             ),
+            window_handoff_callback=window_handoff_callback,
         )
         collection.append(backend)
         return backend
 
-    coordinator = InputCoordinator(
-        backend_factory,
-        sleep=clock.sleep,
-        pointer_timestep_seconds=0.02,
-    )
+    if coordinator is None:
+        coordinator = InputCoordinator(
+            backend_factory,
+            sleep=clock.sleep,
+            pointer_timestep_seconds=0.02,
+        )
     return LoginPromptHelper(
         source,
         coordinator,
-        window_finder=lambda pid: WINDOW,
+        window_finder=window_finder or (lambda pid: WINDOW),
         focus_window=lambda window: True,
         point_owner=lambda window, point: window.client_bounds.contains(point),
         screenshot=lambda bounds: Image.new("RGB", (bounds.width, bounds.height), (20, 20, 20)),
@@ -324,6 +446,30 @@ def build_helper(
         sleep=clock.sleep,
         poll_seconds=0.1,
         transition_seconds=0.3,
+    )
+
+
+def safely_unsent_cursor_receipt(transaction_id: str) -> InputReceipt:
+    return InputReceipt(
+        transaction_id=transaction_id,
+        mode="pointer",
+        intent_ids=(f"{transaction_id}-intent",),
+        status="BLOCKED",
+        reason="cursor_window_repositioned_reobserve_required",
+        connected=False,
+        arm_acknowledged=False,
+        stop_all_acknowledged=False,
+        disarm_acknowledged=False,
+        firmware_status_acknowledged=False,
+        firmware_status=None,
+        commands=(),
+        unresolved_command_count=0,
+        failed_command_count=0,
+        ack_missing_count=0,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+        failure_kind=InputFailureKind.CURSOR_STATE_INVALIDATED,
     )
 
 
@@ -992,7 +1138,7 @@ class LoginHelperTests(unittest.TestCase):
         self.assertEqual(result.reason, "candidate_outside_exact_runelite_client")
         self.assertEqual(backends, [])
 
-    def test_cursor_must_start_inside_the_exact_runelite_client(self) -> None:
+    def test_cursor_window_handoff_blocks_after_one_stale_geometry_retry(self) -> None:
         backends: list[FakeBackend] = []
         helper = build_helper(
             FakeObservations(
@@ -1009,14 +1155,87 @@ class LoginHelperTests(unittest.TestCase):
         result = helper.run()
 
         self.assertEqual("BLOCKED", result.status)
-        self.assertIn("cursor_start_outside_verified", result.reason)
+        self.assertIn("repositioned_reobserve_required", result.reason)
         self.assertEqual(2, len(backends))
         self.assertTrue(all("mouse_down" not in backend.calls for backend in backends))
-        self.assertTrue(all("stop_all" in backend.calls for backend in backends))
-        self.assertTrue(
-            all("firmware_status" in backend.calls for backend in backends)
+        self.assertTrue(all("window_handoff" in backend.calls for backend in backends))
+        self.assertTrue(all("connect" not in backend.calls for backend in backends))
+        self.assertTrue(all("stop_all" not in backend.calls for backend in backends))
+        self.assertEqual([1, 2], [click.source_tick for click in result.clicks])
+        self.assertTrue(all(click.receipt.safely_unsent for click in result.clicks))
+        self.assertTrue(all(not click.receipt.commands for click in result.clicks))
+
+    def test_login_reobserves_shifted_window_after_safely_unsent_handoff(self) -> None:
+        source = FakeObservations(
+            [
+                observation("LOGIN_SCREEN", 0),
+                observation("LOGIN_SCREEN", 0),
+                observation("LOGGING_IN", 3),
+                observation("LOGGED_IN", 4, loaded=True),
+                observation("LOGGED_IN", 5, loaded=True),
+            ]
         )
-        self.assertFalse(result.clicks[-1].sent)
+        detections = iter(((PLAY,), (PLAY,), (PLAY,), (), ()))
+        backends: list[FakeBackend] = []
+        current_window = [WINDOW]
+
+        def apply_handoff(evidence: dict[str, object]) -> None:
+            old = current_window[0]
+            translated = evidence["newMovementBounds"]
+            assert isinstance(translated, dict)
+            client = ScreenBounds(
+                translated["x"],
+                translated["y"],
+                translated["width"],
+                translated["height"],
+            )
+            dx = client.x - old.client_bounds.x
+            dy = client.y - old.client_bounds.y
+            current_window[0] = RuneLiteWindow(
+                old.hwnd,
+                old.pid,
+                old.title,
+                client,
+                ScreenBounds(
+                    old.outer_bounds.x + dx,
+                    old.outer_bounds.y + dy,
+                    old.outer_bounds.width,
+                    old.outer_bounds.height,
+                ),
+            )
+
+        helper = build_helper(
+            source,
+            lambda image: next(detections),
+            backends=backends,
+            cursor_start=(1500, 500),
+            window_finder=lambda pid: current_window[0],
+            window_handoff_callback=apply_handoff,
+        )
+
+        result = helper.run(max_clicks=1, timeout_seconds=10)
+
+        self.assertTrue(result.successful)
+        self.assertEqual(2, len(result.clicks))
+        first, second = result.clicks
+        self.assertTrue(first.receipt.safely_unsent)
+        self.assertIs(
+            first.receipt.failure_kind,
+            InputFailureKind.CURSOR_STATE_INVALIDATED,
+        )
+        self.assertEqual((), first.receipt.commands)
+        self.assertFalse(first.receipt.connected)
+        self.assertTrue(first.receipt.backend_closed)
+        self.assertTrue(second.receipt.successful)
+        self.assertEqual([0, 0], [first.source_tick, second.source_tick])
+        self.assertEqual(2, len(backends))
+        self.assertIn("window_handoff", backends[0].calls)
+        self.assertNotIn("connect", backends[0].calls)
+        self.assertNotIn("mouse_down", backends[0].calls)
+        self.assertIn("connect", backends[1].calls)
+        self.assertIn("mouse_down", backends[1].calls)
+        self.assertIn("stop_all", backends[1].calls)
+        self.assertIn("disarm", backends[1].calls)
 
     def test_login_prompt_remains_safe_when_pregame_canvas_is_unavailable(self) -> None:
         source = FakeObservations(
@@ -1087,7 +1306,7 @@ class LoginHelperTests(unittest.TestCase):
             lambda image: next(detections),
             backends=backends,
             cursor_start=(600, 440),
-            cursor_change_calls=[5, None],
+            cursor_change_calls=[6, None],
         )
 
         result = helper.run(max_clicks=1, timeout_seconds=10)
@@ -1105,6 +1324,37 @@ class LoginHelperTests(unittest.TestCase):
         self.assertIn("mouse_down", backends[1].calls)
         self.assertTrue(all("stop_all" in backend.calls for backend in backends))
         self.assertTrue(all("disarm" in backend.calls for backend in backends))
+
+    def test_login_safely_unsent_replans_with_fresh_window_scan_at_tick_zero(self) -> None:
+        source = FakeObservations(
+            [
+                observation("LOGIN_SCREEN", 0),
+                observation("LOGIN_SCREEN", 0),
+            ]
+        )
+        coordinator = InputCoordinator(lambda: FakeBackend())
+        first = safely_unsent_cursor_receipt("input-safe-unsent-1")
+        second = safely_unsent_cursor_receipt("input-safe-unsent-2")
+        self.assertTrue(first.safely_unsent)
+        helper = build_helper(
+            source,
+            lambda image: (PLAY,),
+            coordinator=coordinator,
+        )
+
+        with patch.object(
+            coordinator,
+            "execute_pointer",
+            side_effect=(first, second),
+        ) as execute_pointer:
+            result = helper.run(max_clicks=1, timeout_seconds=10)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual(2, execute_pointer.call_count)
+        self.assertEqual([0, 0], [click.source_tick for click in result.clicks])
+        self.assertTrue(all(not click.sent for click in result.clicks))
+        self.assertTrue(all(click.receipt.backend_closed for click in result.clicks))
+        self.assertIn("repositioned_reobserve_required", result.reason)
 
     def test_login_pins_exact_hwnd_even_when_cursor_starts_inside_client(self) -> None:
         source = FakeObservations([observation("LOGIN_SCREEN", 1)])
@@ -1126,8 +1376,10 @@ class LoginHelperTests(unittest.TestCase):
             for call in backends[0].calls
         ))
         self.assertNotIn("mouse_down", backends[0].calls)
-        self.assertIn("stop_all", backends[0].calls)
-        self.assertIn("disarm", backends[0].calls)
+        self.assertNotIn("connect", backends[0].calls)
+        self.assertNotIn("stop_all", backends[0].calls)
+        self.assertNotIn("disarm", backends[0].calls)
+        self.assertTrue(result.clicks[0].receipt.safely_unsent)
 
     def test_click_failure_still_stops_and_disarms(self) -> None:
         backends: list[FakeBackend] = []

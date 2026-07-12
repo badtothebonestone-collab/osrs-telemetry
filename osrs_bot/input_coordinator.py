@@ -26,6 +26,8 @@ MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT = 4
 CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT = 8
 MAX_CURSOR_REACQUISITION_GAP_DEVICE_PX = 64
 MAX_CURSOR_REACQUISITION_STEPS = 72
+CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX = 32
+CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS = 0.05
 MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES = 1
 MAX_TRANSACTION_NO_EFFECT_EVENTS = 8
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
@@ -516,6 +518,34 @@ class InputReceipt:
         return _wire_proof_complete(self.commands)
 
     @property
+    def safely_unsent(self) -> bool:
+        """Prove that a blocked preflight never connected to the Arduino.
+
+        A window-geometry handoff happens before serial connect or ARM.  It
+        therefore has no firmware cleanup to perform, but the empty ledger and
+        closed backend still prove that no automated input was possible.
+        """
+
+        return bool(
+            self.status == "BLOCKED"
+            and not self.connected
+            and not self.arm_acknowledged
+            and not self.stop_all_acknowledged
+            and not self.disarm_acknowledged
+            and not self.firmware_status_acknowledged
+            and self.firmware_status is None
+            and not self.commands
+            and self.unresolved_command_count == 0
+            and self.failed_command_count == 0
+            and self.ack_missing_count == 0
+            and self.ledger_complete
+            and self.ledger_closed
+            and self.backend_closed
+            and not self.context_cancel_attempted
+            and not self.context_cancel_acknowledged
+        )
+
+    @property
     def successful(self) -> bool:
         return (
             self.status == "PASS"
@@ -547,6 +577,7 @@ class InputReceipt:
             "reason": self.reason,
             "failureKind": self.failure_kind.value,
             "successful": self.successful,
+            "safelyUnsent": self.safely_unsent,
             "wireProofComplete": self.wire_proof_complete,
             "connected": self.connected,
             "armAcknowledged": self.arm_acknowledged,
@@ -594,6 +625,32 @@ class _Backend(Protocol):
     ) -> dict[str, Any]: ...
 
     def _window_info_at_point(self, point: tuple[int, int]) -> dict[str, Any]: ...
+
+    def _verify_physical_mouse_quiet(self) -> dict[str, Any]: ...
+
+    def _consume_owned_mouse_transition(
+        self, button: str
+    ) -> dict[str, Any]: ...
+
+    def _verify_window_geometry(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        expected_outer_bounds: tuple[int, int, int, int] | None,
+        expected_client_bounds: tuple[int, int, int, int] | None,
+        required_inner_bounds: tuple[int, int, int, int],
+    ) -> dict[str, Any]: ...
+
+    def _reposition_window_for_cursor(
+        self,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        cursor: tuple[int, int],
+        movement_bounds: tuple[int, int, int, int],
+        inset_px: int,
+    ) -> dict[str, Any]: ...
 
     def _mouse_down(self, *, button: str = "left") -> None: ...
 
@@ -985,7 +1042,12 @@ class InputCoordinator:
                 actual=actual,
             )
 
-        return self._execute("pointer", (intent.intent_id,), body)
+        return self._execute(
+            "pointer",
+            (intent.intent_id,),
+            body,
+            pointer_preflight=intent,
+        )
 
     def execute_key(
         self,
@@ -1112,6 +1174,7 @@ class InputCoordinator:
             external_state=state,
             context_menu_open=menu_open,
             context_pid=open_intent.expected_pid,
+            pointer_preflight=open_intent,
         )
         if not row_id:
             return receipt
@@ -1187,7 +1250,7 @@ class InputCoordinator:
                     transaction.backend, intent.expected_pid
                 )
                 self._assert_cursor_stable_in_target(
-                    transaction.backend,
+                    transaction,
                     intent,
                     actual,
                     phase="before_activation_validation",
@@ -1197,7 +1260,7 @@ class InputCoordinator:
                     transaction.backend, intent.expected_pid
                 )
                 self._assert_cursor_stable_in_target(
-                    transaction.backend,
+                    transaction,
                     intent,
                     actual,
                     phase="after_activation_validation",
@@ -1270,6 +1333,7 @@ class InputCoordinator:
             external_state=state,
             context_menu_open=menu_open,
             context_pid=intent.expected_pid,
+            pointer_preflight=intent,
         )
         return (
             replace(receipt, intent_ids=(intent.intent_id, row_id[0]))
@@ -1286,6 +1350,7 @@ class InputCoordinator:
         external_state: _TransactionState | None = None,
         context_menu_open: list[bool] | None = None,
         context_pid: int | None = None,
+        pointer_preflight: ApprovedPointerIntent | None = None,
     ) -> InputReceipt:
         if not self._transaction_lock.acquire(blocking=False):
             raise RuntimeError("InputCoordinator already owns an active transaction")
@@ -1311,6 +1376,16 @@ class InputCoordinator:
                 ledger_started = True
                 if not transaction.sync() or transaction.snapshot.commands:
                     raise _TransactionAbort("command ledger did not begin empty")
+                if (
+                    pointer_preflight is not None
+                    and self._prepare_stationary_cursor_handoff(
+                        backend,
+                        pointer_preflight,
+                    )
+                ):
+                    raise _cursor_state_invalidated(
+                        "cursor_window_repositioned_reobserve_required"
+                    )
                 connection_attempted = True
                 backend._connect()
                 state.connected = True
@@ -1414,12 +1489,353 @@ class InputCoordinator:
         finally:
             self._transaction_lock.release()
 
+    def _prepare_stationary_cursor_handoff(
+        self,
+        backend: _Backend,
+        intent: ApprovedPointerIntent,
+    ) -> bool:
+        """Place the exact RuneLite window under a quiet external cursor.
+
+        The original intent is deliberately never executed after a window
+        move: every screen coordinate in it is stale.  Returning ``True``
+        makes the caller emit a typed, safely-unsent receipt so login or the
+        runtime can obtain a newer observation and build a fresh intent.
+        """
+
+        self._require_physical_mouse_quiet(
+            backend, phase="pointer_preflight"
+        )
+        envelope = intent.reacquisition_bounds
+        if intent.purpose is InputPurpose.LOGIN_PROMPT:
+            expected_outer = envelope
+            expected_client: ScreenBounds | None = intent.movement_bounds
+        elif envelope is not None:
+            expected_outer = envelope
+            expected_client = None
+        else:
+            return False
+        start = self._current_position(backend)
+
+        try:
+            foreground = self._assert_foreground(
+                backend, intent.expected_pid
+            )
+        except _TransactionAbort:
+            raise
+        except Exception as error:  # fail closed before serial connect
+            raise _TransactionAbort(
+                "cursor_window_handoff_foreground_blocked: "
+                f"{type(error).__name__}: {error}",
+                blocked=True,
+            ) from error
+        pinned_hwnd = self._verified_foreground_hwnd(
+            foreground,
+            expected_hwnd=intent.expected_hwnd,
+        )
+        self._require_window_geometry(
+            backend,
+            expected_pid=intent.expected_pid,
+            expected_hwnd=pinned_hwnd,
+            expected_outer_bounds=expected_outer,
+            expected_client_bounds=expected_client,
+            required_inner_bounds=intent.movement_bounds,
+        )
+        if envelope is None or envelope.contains(start):
+            return False
+
+        self._sleep(CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS)
+        settled = self._current_position(backend)
+        if settled != start:
+            raise _cursor_state_invalidated(
+                "cursor_window_handoff_not_settled"
+            )
+
+        try:
+            evidence = backend._reposition_window_for_cursor(
+                expected_pid=intent.expected_pid,
+                expected_hwnd=pinned_hwnd,
+                cursor=(start.x, start.y),
+                movement_bounds=(
+                    intent.movement_bounds.x,
+                    intent.movement_bounds.y,
+                    intent.movement_bounds.width,
+                    intent.movement_bounds.height,
+                ),
+                inset_px=CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX,
+            )
+        except Exception as error:  # backend performs the atomic Win32 checks
+            if getattr(error, "window_mutation_attempted", False) is True:
+                raise _TransactionAbort(
+                    "cursor_window_handoff_post_mutation_unproved: "
+                    f"{type(error).__name__}: {error}",
+                    blocked=True,
+                ) from error
+            raise _cursor_state_invalidated(
+                "cursor_window_handoff_blocked: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        try:
+            self._require_window_handoff_evidence(
+                evidence,
+                intent=intent,
+                cursor=start,
+                expected_hwnd=pinned_hwnd,
+            )
+        except _TransactionAbort as error:
+            raise _TransactionAbort(
+                "cursor_window_handoff_post_mutation_evidence_unproved: "
+                f"{error}",
+                blocked=True,
+            ) from error
+        return True
+
+    @staticmethod
+    def _require_physical_mouse_quiet(
+        backend: _Backend,
+        *,
+        phase: str,
+    ) -> None:
+        try:
+            raw = backend._verify_physical_mouse_quiet()
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                f"physical_mouse_not_quiet_{phase}: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("schema") != "physical_mouse_quiet.v1"
+            or raw.get("buttonsUp") is not True
+            or raw.get("activityClear") is not True
+        ):
+            raise _cursor_state_invalidated(
+                f"physical_mouse_quiet_evidence_invalid_{phase}"
+            )
+
+    @staticmethod
+    def _consume_owned_mouse_transition(
+        backend: _Backend,
+        button: MouseButton,
+    ) -> None:
+        try:
+            raw = backend._consume_owned_mouse_transition(button.value)
+        except Exception as error:
+            raise _TransactionAbort(
+                "owned_mouse_transition_unproved_after_activation: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("schema") != "owned_mouse_transition.v1"
+            or raw.get("button") != button.value
+            or not isinstance(raw.get("ownedTransitionConsumed"), bool)
+            or raw.get("buttonsUp") is not True
+            or raw.get("activityClear") is not True
+        ):
+            raise _TransactionAbort(
+                "owned_mouse_transition_evidence_invalid_after_activation"
+            )
+
+    @staticmethod
+    def _require_window_geometry(
+        backend: _Backend,
+        *,
+        expected_pid: int,
+        expected_hwnd: int,
+        expected_outer_bounds: ScreenBounds | None,
+        expected_client_bounds: ScreenBounds | None,
+        required_inner_bounds: ScreenBounds,
+    ) -> None:
+        def coordinates(
+            bounds: ScreenBounds | None,
+        ) -> tuple[int, int, int, int] | None:
+            if bounds is None:
+                return None
+            return (bounds.x, bounds.y, bounds.width, bounds.height)
+
+        try:
+            raw = backend._verify_window_geometry(
+                expected_pid=expected_pid,
+                expected_hwnd=expected_hwnd,
+                expected_outer_bounds=coordinates(expected_outer_bounds),
+                expected_client_bounds=coordinates(expected_client_bounds),
+                required_inner_bounds=(
+                    required_inner_bounds.x,
+                    required_inner_bounds.y,
+                    required_inner_bounds.width,
+                    required_inner_bounds.height,
+                ),
+            )
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                "cursor_window_geometry_proof_blocked: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+        try:
+            if not isinstance(raw, Mapping):
+                raise ValueError("geometry evidence is not an object")
+            if raw.get("schema") != "cursor_window_geometry.v1":
+                raise ValueError("geometry evidence schema is unsupported")
+            if raw.get("expectedPid") != expected_pid:
+                raise ValueError("geometry evidence PID changed")
+            if raw.get("expectedHwnd") != expected_hwnd:
+                raise ValueError("geometry evidence HWND changed")
+
+            def bounds(field: str) -> ScreenBounds:
+                value = raw.get(field)
+                if not isinstance(value, Mapping):
+                    raise ValueError(f"{field} is not an object")
+                return _validate_bounds(
+                    ScreenBounds(
+                        value.get("x"),
+                        value.get("y"),
+                        value.get("width"),
+                        value.get("height"),
+                    ),
+                    field,
+                )
+
+            def optional_bounds(field: str) -> ScreenBounds | None:
+                return None if raw.get(field) is None else bounds(field)
+
+            reported_outer = optional_bounds("expectedOuterBounds")
+            reported_client = optional_bounds("expectedClientBounds")
+            reported_inner = bounds("requiredInnerBounds")
+            actual_outer = bounds("actualOuterBounds")
+            actual_client = bounds("actualClientBounds")
+            outer_matches = raw.get("outerMatches")
+            client_matches = raw.get("clientMatches")
+            inner_contained = raw.get("innerContainedByClient")
+            if reported_outer != expected_outer_bounds:
+                raise ValueError("reported expected outer bounds changed")
+            if reported_client != expected_client_bounds:
+                raise ValueError("reported expected client bounds changed")
+            if reported_inner != required_inner_bounds:
+                raise ValueError("reported required inner bounds changed")
+            if outer_matches != (
+                None
+                if expected_outer_bounds is None
+                else actual_outer == expected_outer_bounds
+            ):
+                raise ValueError("outer geometry proof contradicts actual bounds")
+            if client_matches != (
+                None
+                if expected_client_bounds is None
+                else actual_client == expected_client_bounds
+            ):
+                raise ValueError("client geometry proof contradicts actual bounds")
+            actual_contains_inner = _bounds_contains_bounds(
+                actual_client, required_inner_bounds
+            )
+            if inner_contained is not actual_contains_inner:
+                raise ValueError("inner containment proof contradicts actual bounds")
+            if (
+                outer_matches is False
+                or client_matches is False
+                or not inner_contained
+            ):
+                raise _cursor_state_invalidated(
+                    "cursor_window_geometry_changed_reobserve_required"
+                )
+        except _TransactionAbort:
+            raise
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                "cursor_window_geometry_evidence_invalid: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    @staticmethod
+    def _require_window_handoff_evidence(
+        raw: object,
+        *,
+        intent: ApprovedPointerIntent,
+        cursor: ScreenPoint,
+        expected_hwnd: int,
+    ) -> None:
+        """Validate the backend's post-SetWindowPos proof fail-closed."""
+
+        try:
+            if not isinstance(raw, Mapping):
+                raise ValueError("evidence is not an object")
+            if raw.get("schema") != "cursor_window_handoff.v1":
+                raise ValueError("evidence schema is unsupported")
+            if raw.get("expectedPid") != intent.expected_pid:
+                raise ValueError("expected PID changed")
+            if raw.get("expectedHwnd") != expected_hwnd:
+                raise ValueError("expected HWND changed")
+            for field in (
+                "repositioned",
+                "cursorUnchanged",
+                "buttonsUpConfirmed",
+                "foregroundConfirmed",
+                "pointOwnerConfirmed",
+            ):
+                if raw.get(field) is not True:
+                    raise ValueError(f"{field} was not proved")
+
+            raw_cursor = raw.get("cursor")
+            if not isinstance(raw_cursor, Mapping) or (
+                raw_cursor.get("x"), raw_cursor.get("y")
+            ) != (cursor.x, cursor.y):
+                raise ValueError("cursor proof changed")
+
+            def bounds(field: str) -> ScreenBounds:
+                value = raw.get(field)
+                if not isinstance(value, Mapping):
+                    raise ValueError(f"{field} is not an object")
+                candidate = ScreenBounds(
+                    value.get("x"),
+                    value.get("y"),
+                    value.get("width"),
+                    value.get("height"),
+                )
+                return _validate_bounds(candidate, field)
+
+            old_bounds = bounds("oldMovementBounds")
+            new_bounds = bounds("newMovementBounds")
+            if old_bounds != intent.movement_bounds:
+                raise ValueError("old movement bounds changed")
+            if (
+                new_bounds.width != old_bounds.width
+                or new_bounds.height != old_bounds.height
+                or new_bounds == old_bounds
+            ):
+                raise ValueError("movement bounds were not rigidly translated")
+            inset = CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX
+            if (
+                new_bounds.width <= inset * 2
+                or new_bounds.height <= inset * 2
+                or not (
+                    new_bounds.x + inset
+                    <= cursor.x
+                    < new_bounds.x + new_bounds.width - inset
+                    and new_bounds.y + inset
+                    <= cursor.y
+                    < new_bounds.y + new_bounds.height - inset
+                )
+            ):
+                raise ValueError(
+                    "cursor is not inside the translated movement inset"
+                )
+        except _TransactionAbort:
+            raise
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                "cursor_window_handoff_evidence_invalid: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
     def _move(
         self, transaction: _Transaction, intent: ApprovedPointerIntent
     ) -> ScreenPoint:
         backend = transaction.backend
         self._ensure_firmware_armed(transaction)
         self._assert_pointer_foreground(transaction, intent)
+        self._require_physical_mouse_quiet(
+            backend, phase="before_pointer_motion"
+        )
         start = self._current_position(backend)
         if not intent.movement_bounds.contains(start):
             start = self._reacquire_cursor_start(
@@ -2173,13 +2589,11 @@ class InputCoordinator:
         actual: ScreenPoint,
         validate: PointerValidator,
     ) -> None:
-        backend = transaction.backend
-
         def validate_pointer() -> InputValidation:
             # Deliberately after all movement and immediately before activation.
             self._assert_pointer_foreground(transaction, intent)
             self._assert_cursor_stable_in_target(
-                backend,
+                transaction,
                 intent,
                 actual,
                 phase="before_pointer_validation",
@@ -2187,7 +2601,7 @@ class InputCoordinator:
             decision = validate(intent, actual)
             self._assert_pointer_foreground(transaction, intent)
             self._assert_cursor_stable_in_target(
-                backend,
+                transaction,
                 intent,
                 actual,
                 phase="after_pointer_validation",
@@ -2202,13 +2616,16 @@ class InputCoordinator:
 
     def _assert_cursor_stable_in_target(
         self,
-        backend: _Backend,
+        transaction: _Transaction,
         intent: ApprovedPointerIntent,
         actual: ScreenPoint,
         *,
         phase: str,
     ) -> None:
-        current = self._current_position(backend)
+        self._require_physical_mouse_quiet(
+            transaction.backend, phase=phase
+        )
+        current = self._current_position(transaction.backend)
         if current != actual:
             raise _cursor_state_invalidated(f"cursor_changed_{phase}")
         if not intent.movement_bounds.contains(current):
@@ -2219,6 +2636,17 @@ class InputCoordinator:
             raise _cursor_state_invalidated(
                 f"cursor_left_verified_target_{phase}"
             )
+        if transaction.pointer_hwnd is None:
+            raise _TransactionAbort(
+                "pointer_foreground_hwnd_unavailable", blocked=True
+            )
+        self._assert_point_owned_by_window(
+            transaction.backend,
+            current,
+            expected_pid=intent.expected_pid,
+            expected_hwnd=transaction.pointer_hwnd,
+            reason_prefix=f"cursor_{phase}",
+        )
 
     def _click(
         self,
@@ -2237,7 +2665,7 @@ class InputCoordinator:
                 raise _TransactionAbort("pointer activation context is incomplete")
             self._assert_pointer_foreground(transaction, intent)
             self._assert_cursor_stable_in_target(
-                transaction.backend,
+                transaction,
                 intent,
                 actual,
                 phase="after_firmware_lease_check",
@@ -2265,6 +2693,10 @@ class InputCoordinator:
             "MOUSE_UP",
             lambda: transaction.backend._mouse_up(button=button.value),
         )
+        if up_acknowledged:
+            self._consume_owned_mouse_transition(
+                transaction.backend, button
+            )
         if not down_acknowledged or not up_acknowledged:
             raise _TransactionAbort("mouse_click_not_fully_acknowledged")
 
@@ -2439,18 +2871,19 @@ class InputCoordinator:
         *,
         expected_pid: int,
         expected_hwnd: int,
+        reason_prefix: str = "cursor_reacquisition",
     ) -> None:
         info = backend._window_info_at_point((point.x, point.y))
         if not isinstance(info, Mapping):
             raise _TransactionAbort(
-                "cursor_reacquisition_point_owner_unavailable", blocked=True
+                f"{reason_prefix}_point_owner_unavailable", blocked=True
             )
         if (
             info.get("hwnd") != expected_hwnd
             or info.get("pid") != expected_pid
         ):
             raise _cursor_state_invalidated(
-                "cursor_reacquisition_point_owner_mismatch"
+                f"{reason_prefix}_point_owner_mismatch"
             )
 
     @staticmethod
@@ -2507,6 +2940,24 @@ class InputCoordinator:
             and transaction is not None
             and transaction.ledger_complete
         )
+        safely_unsent_ok = (
+            not state.connected
+            and not state.arm_acknowledged
+            and not state.stop_all_acknowledged
+            and not state.disarm_acknowledged
+            and not state.firmware_status_acknowledged
+            and state.firmware_status is None
+            and not snapshot.commands
+            and snapshot.unresolved_count == 0
+            and snapshot.failed_count == 0
+            and snapshot.ack_missing_count == 0
+            and state.ledger_closed
+            and state.backend_closed
+            and not state.context_cancel_attempted
+            and not state.context_cancel_acknowledged
+            and transaction is not None
+            and transaction.ledger_complete
+        )
         wire_proof_ok = _wire_proof_complete(snapshot.commands)
         if (
             state.body_status == "PASS"
@@ -2516,7 +2967,9 @@ class InputCoordinator:
         ):
             status = "PASS"
             reason = "input_transaction_succeeded"
-        elif state.body_status == "BLOCKED" and cleanup_ok:
+        elif state.body_status == "BLOCKED" and (
+            cleanup_ok or safely_unsent_ok
+        ):
             status = "BLOCKED"
             reason = state.body_reason
         else:

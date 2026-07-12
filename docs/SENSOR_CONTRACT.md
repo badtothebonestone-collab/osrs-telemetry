@@ -75,8 +75,12 @@ available geometry whose schema or coordinate space is missing or different.
 be positive and the resulting device-pixel window must contain the complete
 canvas; partial or contradictory bounds reject the observation. This outer
 window is not gameplay transit or activation authority. It is only the pinned
-RuneLite ownership/reacquisition envelope used to move a freshly observed
-manually displaced cursor into the stricter canvas lane.
+RuneLite ownership/reacquisition envelope. The input boundary independently
+matches it to PMv2 `GetWindowRect` and proves the canvas inside the actual Win32
+client. A cursor still inside that envelope may use the stricter movement-only
+canvas ingress. A quiet cursor beyond it can only trigger a pre-serial exact-
+window translation followed by complete reobservation; these sensor coordinates
+are never reused after the window moves.
 
 For a projected object, `aimPoint` must be inside both the viewport and the
 first present authoritative API shape in clickbox -> convex hull -> canvas tile

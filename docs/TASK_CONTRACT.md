@@ -35,9 +35,11 @@ outcome. Reason strings--including the reason passed to
 transition. The runtime may call that discard seam only for typed
 `TARGET_EVIDENCE_INVALIDATED` or `CURSOR_STATE_INVALIDATED`, a matching blocked
 receipt/failure kind, zero activation commands, a preactivation-only ledger,
-authoritative safe cleanup, and its one-consecutive-replan bound still
-available. Repetition blocks rather than silently following manual cursor
-motion or stale target evidence.
+either authoritative connected cleanup or a closed empty pre-serial
+ledger/backend, and its one-consecutive-replan bound still available. Cursor
+replans also pin PID/session identity and require a newer gameplay tick;
+repetition blocks rather than silently following manual cursor motion or stale
+target evidence.
 
 ## Safety ownership
 

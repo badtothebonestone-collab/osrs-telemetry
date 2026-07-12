@@ -60,10 +60,19 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Require a fresh loaded scene before gameplay. `LOGGED_IN` alone is not proof.
 - At every pointer transaction, sample the real current Win32 cursor in the
   calling thread's proven per-monitor-v2 device-pixel context. Never infer its
-  location from a prior command. A manually displaced cursor may use only the
-  bounded movement-only client-to-canvas ingress; otherwise return typed
-  cursor-state invalidation without activation. One fully safe, preactivation-
-  only invalidation may be reobserved; repetition blocks.
+  location from a prior command. A quiet manually displaced cursor inside the
+  pinned RuneLite window may use the bounded movement-only outer-to-canvas
+  ingress. If it is beyond that window, before serial connect the coordinator
+  may translate the exact foreground non-maximized RuneLite window once under
+  the stationary cursor without activation or z-order change, then must discard
+  every stale screen coordinate and reobserve. Never move the pointer across a
+  foreign desktop surface. One fully safe preactivation-only invalidation may
+  be reobserved; repetition blocks.
+- Before pointer motion and again before activation, prove the physical mouse
+  is quiet, the exact root HWND/PID still owns the point, and current Win32
+  outer/client geometry agrees with the intent's outer/client/canvas facts.
+  Attribute and consume only the coordinator's own acknowledged click
+  transition; held or new manual button activity blocks.
 - A firmware MOVE acknowledgement proves command handling, not Windows cursor
   arrival. One late report may receive an additional no-input poll while all
   direction, gain, ownership, focus, and bounds checks remain in force;
@@ -80,6 +89,9 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Every connected attempt must end with confirmed `STOP_ALL`, `DISARM`, and
   authoritative wire `STATUS` proving disarmed, zero held keys, zero held mouse
   buttons, and no unresolved command evidence.
+- A handoff rejected before serial connect instead needs an empty closed ledger
+  and closed backend; never claim firmware cleanup for hardware that was not
+  opened.
 - Fail closed. Missing authorization proof is not permission to add an input-
   capable fallback.
 - Dry-run, replay, overlay, diagnostics, and demonstration capture must not

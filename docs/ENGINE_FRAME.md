@@ -27,7 +27,8 @@ the FSM advances.
 - pending verification and the latest `VerificationResult`/typed `Outcome`;
 - the last immutable `InputReceipt`, including its exact reason, typed
   `failureKind` (such as `cursor_state_invalidated`), complete command/ACK
-  ledger, and final firmware status; and
+  ledger, `safelyUnsent` pre-serial proof when applicable, and final firmware
+  status; and
 - cleanup evidence derived from command/ACK counts and final firmware state,
   plus the current blocker.
 

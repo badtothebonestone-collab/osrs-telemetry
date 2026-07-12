@@ -907,17 +907,23 @@ class LoginPromptHelper:
             receipt.status == "BLOCKED"
             and receipt.failure_kind
             is InputFailureKind.CURSOR_STATE_INVALIDATED
-            and receipt.stop_all_acknowledged
-            and receipt.disarm_acknowledged
-            and receipt.firmware_status_acknowledged
-            and receipt.firmware_status is not None
-            and receipt.firmware_status.safe
-            and receipt.unresolved_command_count == 0
-            and receipt.failed_command_count == 0
-            and receipt.ack_missing_count == 0
-            and receipt.ledger_complete
-            and receipt.ledger_closed
             and receipt.backend_closed
+            and (
+                receipt.safely_unsent
+                or (
+                    receipt.connected
+                    and receipt.stop_all_acknowledged
+                    and receipt.disarm_acknowledged
+                    and receipt.firmware_status_acknowledged
+                    and receipt.firmware_status is not None
+                    and receipt.firmware_status.safe
+                    and receipt.unresolved_command_count == 0
+                    and receipt.failed_command_count == 0
+                    and receipt.ack_missing_count == 0
+                    and receipt.ledger_complete
+                    and receipt.ledger_closed
+                )
+            )
             and all(command.command in preactivation for command in receipt.commands)
         )
 

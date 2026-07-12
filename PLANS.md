@@ -131,10 +131,10 @@ runtime logic.
   historical cycle credit.
 - **D026 — Cursor truth is observed, never remembered:** every cursor and
   point-owner sample establishes per-monitor-v2 device pixels on its current
-  thread. A fresh cursor outside the canvas may enter through a movement-only,
-  exact-client, one-axis bounded lane; unsupported displacement becomes typed
-  cursor-state invalidation and may receive one safe reobservation without
-  suppressing the target.
+  thread. A fresh cursor inside the RuneLite outer envelope may enter through a
+  movement-only, exact-owner, one-axis bounded lane; unsupported displacement
+  becomes typed cursor-state invalidation and may receive one safe
+  reobservation without suppressing the target.
 - **D027 — Serial ACK is not Windows cursor proof:** an acknowledged MOVE with
   an unchanged ordinary sample receives one additional no-input poll before any
   new MOVE. Both the first and incremental samples independently enforce
@@ -155,6 +155,15 @@ runtime logic.
   does not classify resources, routes, services, skills, profiles, tasks, or
   desired classes. Spatial/projection ordering uses only factual geometry,
   identity, and distance; the selected definition/task assigns meaning.
+- **D031 — External cursor recovery moves RuneLite, not the pointer:** after a
+  bounded physical-button quiet dwell, an external stationary cursor may be
+  recovered before serial connect by one exact, non-activating, no-resize
+  translation of the pinned foreground RuneLite window on its containing
+  monitor. Split outer/client/canvas geometry, PID/HWND, cursor stability, and
+  final point ownership must all pass. The old intent is always discarded;
+  login re-finds and re-screens the client, while gameplay requires a newer
+  same-identity sensor tick. Any unproved post-mutation state is terminal, and
+  the pointer never traverses foreign desktop surfaces.
 
 ## Phases and acceptance
 
@@ -169,7 +178,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | In progress | The `f2007eb` offline gate passes. Because it changes the production sensor after the retained PID `11440` cycle, one fresh current-checkpoint observation/cycle is required again, followed by the user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup. |
+| Final regression | In progress | The neutral-sensor and external-cursor offline gates pass. Because both postdate the retained PID `11440` cycle, one fresh current-checkpoint observation/cycle is required again, followed by the user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup. |
 
 ## Phase 0 completed work
 
@@ -389,12 +398,12 @@ runtime logic.
   reject available geometry without the exact schema and coordinate-space
   declaration.
 - Kept normal gameplay transit inside loaded-scene telemetry canvas bounds. The
-  exact visible PID-owned Win32 client is an outer movement-only recovery region
+  exact visible PID-owned Win32 outer window is a movement-only recovery region
   for a freshly sampled cursor displaced just outside the canvas. The bounded
   lane never activates, requires exact point ownership and per-monitor-v2
   device-pixel proof, and hands off to the ordinary canvas planner only after a
-  stable inset. Saved-session login uses the same exact-client boundary and
-  rejects a screenshot whose dimensions differ from it.
+  stable inset. Saved-session login separately uses its exact client boundary
+  and rejects a screenshot whose dimensions differ from it.
 - Offline hardening gate: golden replay 2 passed; all 311 Python tests passed;
   a forced fresh Java run executed 55 tests across 6 suites with zero failures,
   errors, or skips; an actual Windows subprocess verified per-monitor-v2; and
@@ -460,6 +469,16 @@ runtime logic.
   v2 awareness, exactly the display's 1.75 scale. The apparent loss of location
   was coordinate virtualization, while actual manual movement is now handled as
   fresh external cursor state.
+- A later live login attempt reproduced the user's external-cursor failure at
+  PMv2 point `(3446,1631)`: the engine knew the point exactly, but it was 25
+  pixels beyond the RuneLite outer window and therefore rejected it twice with
+  complete safe cleanup. D031 now performs a pre-serial stationary-window
+  handoff, rigidly proves the distinct Win32 outer/client/canvas rectangles,
+  discards the stale intent, and consumes only its own acknowledged mouse
+  transition. Historical button activity receives a quiet dwell; new activity,
+  identity/geometry drift, final point-owner mismatch, or an unproved async
+  window mutation still blocks. Deterministic Python coverage is complete; the
+  fresh physical login/gameplay regression remains pending.
 - A fresh process completed login safely but the first qualifying cycle reached
   the old 80-action default at return step `10/15` after 624.9 seconds. It had
   already harvested, banked, deposited to empty, and passed the earlier cursor
@@ -490,6 +509,12 @@ runtime logic.
   default-profile validation commands pass. This production sensor checkpoint
   postdates PID `11440`, so that retained cycle is no longer current-checkpoint
   proof; a new cycle is pending.
+- External-cursor offline gate: all 508 Python tests and the 216-test focused
+  input set pass, golden replay remains 2/2, compile/diff/catalog/profile gates
+  pass, and the forced Java suite remains 76/76 across 8 suites. Read-only live
+  Win32 evidence matched the exact outer/client/canvas split on PID `1968`; a
+  newly launched current-checkpoint client must now prove the physical login
+  handoff and one complete gameplay cycle.
 - The post-cycle observation still passed fresh/coherent with no warnings.
   About 47 seconds after terminal completion (10 seconds after that observation),
   RuneLite emitted repeated OpenGL out-of-memory/invalid-operation errors and
