@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import re
@@ -38,11 +39,16 @@ MAX_DURATION_SECONDS = 600.0
 MAX_EVENTS = 50_000
 MAX_RECORDING_EVENTS = MAX_EVENTS - 64
 MAX_SCREENSHOTS = 32
+WORLD_MODEL_GAP_GRACE_SECONDS = 1.0
 MAX_ARTIFACT_FILE_BYTES = 64 * 1024 * 1024
 MAX_ARTIFACT_FILES = 128
 MAX_TOTAL_ARTIFACT_BYTES = 256 * 1024 * 1024
 EVENT_FINALIZATION_RESERVE_BYTES = 256 * 1024
 POINTER_INTERVAL_MILLIS = 50
+_TRANSIENT_WORLD_MODEL_CAPABILITIES = frozenset(
+    {"scene_object_census", "actor_census", "collision_window"}
+)
+_TRANSIENT_WORLD_MODEL_WARNINGS = frozenset({"world_model_provenance_mismatch"})
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _TAG = re.compile(r"<[^>]*>")
 _UNSET = object()
@@ -54,6 +60,43 @@ class DemonstrationError(RuntimeError):
 
 class DemonstrationLimitReached(DemonstrationError):
     pass
+
+
+def _is_transient_world_model_unavailable(
+    evidence: DemonstrationEvidenceSnapshot,
+) -> bool:
+    """Recognize only the live-proven additive world-model handoff gap."""
+    observation = evidence.observation
+    raw = evidence.payload()
+    payloads = raw.get("payloads")
+    raw_missing = raw.get("missingCapabilities")
+    raw_warnings = raw.get("warnings")
+    if (
+        not isinstance(raw_missing, list)
+        or any(not isinstance(value, str) for value in raw_missing)
+        or not isinstance(raw_warnings, list)
+        or any(not isinstance(value, str) for value in raw_warnings)
+    ):
+        return False
+    return (
+        observation.status == "WARN"
+        and observation.game_state == "LOGGED_IN"
+        and observation.location is not None
+        and observation.tick >= 0
+        and observation.fresh
+        and observation.cache_wall_clock_fresh
+        and observation.source_coherent
+        and observation.scene_playable
+        and observation.timestamp_not_future
+        and frozenset(observation.missing_capabilities)
+        == _TRANSIENT_WORLD_MODEL_CAPABILITIES
+        and frozenset(observation.warnings) == _TRANSIENT_WORLD_MODEL_WARNINGS
+        and raw.get("status") == "WARN"
+        and frozenset(raw_missing) == _TRANSIENT_WORLD_MODEL_CAPABILITIES
+        and frozenset(raw_warnings) == _TRANSIENT_WORLD_MODEL_WARNINGS
+        and isinstance(payloads, Mapping)
+        and not _TRANSIENT_WORLD_MODEL_CAPABILITIES.intersection(payloads)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +140,7 @@ class DemonstrationRecorder:
         output_root: Path,
         annotations: Iterable[str] = (),
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        monotonic: Callable[[], float] = time.monotonic,
         capture: Callable[..., tuple[Any, CaptureMetadata]] = capture_canvas_region,
         screenshots_enabled: bool = True,
     ) -> None:
@@ -111,6 +155,9 @@ class DemonstrationRecorder:
             cleaned_annotations.append(_clean_text(value))
         self.annotations = tuple(cleaned_annotations)
         self._now = now
+        if not callable(monotonic):
+            raise DemonstrationError("monotonic must be callable")
+        self._monotonic = monotonic
         self._capture = capture
         self._screenshots_enabled = bool(screenshots_enabled)
         self._artifact_path: Path | None = None
@@ -127,6 +174,9 @@ class DemonstrationRecorder:
         self._process_id: int | None = None
         self._first_tick: int | None = None
         self._last_tick: int | None = None
+        self._last_seen_tick: int | None = None
+        self._consecutive_world_model_gaps = 0
+        self._world_model_gap_started_at: float | None = None
         self._last_observation: dict[str, Any] | None = None
         self._last_observation_event_sequence: int | None = None
         self._pending_clicks: list[dict[str, Any]] = []
@@ -151,6 +201,7 @@ class DemonstrationRecorder:
         self._process_id = observation.client_process_id
         self._first_tick = observation.tick
         self._last_tick = observation.tick
+        self._last_seen_tick = observation.tick
         self._artifact_path = _new_artifact_path(
             self.output_root, self.name, self._now()
         )
@@ -207,26 +258,84 @@ class DemonstrationRecorder:
             )
             return False
         if not observation.loaded_scene:
+            if _is_transient_world_model_unavailable(evidence):
+                if (
+                    self._last_seen_tick is not None
+                    and observation.tick < self._last_seen_tick
+                ):
+                    self._append(
+                        "coverage_gap",
+                        _source(observation),
+                        {"code": "source_tick_regressed", "recordingStopped": True},
+                    )
+                    return False
+                _, watermark = _validate_evidence_envelope_and_hot(evidence)
+                if watermark < self._last_hot_watermark:
+                    self._append(
+                        "coverage_gap",
+                        _source(observation),
+                        {"code": "hot_event_sequence_reset", "recordingStopped": True},
+                    )
+                    return False
+                self._last_seen_tick = observation.tick
+                self._last_hot_watermark = watermark
+                self._record_hot_events(evidence.payload(), observation)
+                self._consecutive_world_model_gaps += 1
+                gap_now = self._monotonic()
+                if self._world_model_gap_started_at is None:
+                    self._world_model_gap_started_at = gap_now
+                gap_elapsed = gap_now - self._world_model_gap_started_at
+                if (
+                    not math.isfinite(gap_elapsed)
+                    or gap_elapsed < 0
+                    or gap_elapsed > WORLD_MODEL_GAP_GRACE_SECONDS
+                ):
+                    self._append(
+                        "coverage_gap",
+                        _source(observation),
+                        {
+                            "code": "repeated_demonstration_world_model_unavailable",
+                            "consecutivePolls": self._consecutive_world_model_gaps,
+                            "elapsedMillis": (
+                                max(0, round(gap_elapsed * 1000))
+                                if math.isfinite(gap_elapsed)
+                                else None
+                            ),
+                            "recordingStopped": True,
+                        },
+                    )
+                    return False
+                self._append(
+                    "coverage_gap",
+                    _source(observation),
+                    {
+                        "code": "demonstration_world_model_provenance_unavailable",
+                        "missingCapabilities": list(observation.missing_capabilities),
+                        "warnings": list(observation.warnings),
+                        "recordingStopped": False,
+                    },
+                )
+                return True
             self._append(
                 "coverage_gap",
                 _source(observation),
                 {"code": "loaded_scene_lost", "recordingStopped": True},
             )
             return False
-        if self._last_tick is not None and observation.tick < self._last_tick:
+        if (
+            self._last_seen_tick is not None
+            and observation.tick < self._last_seen_tick
+        ):
             self._append(
                 "coverage_gap",
                 _source(observation),
                 {"code": "source_tick_regressed", "recordingStopped": True},
             )
             return False
-        _validate_evidence_binding(evidence)
+        watermark = _validate_evidence_binding(evidence)
 
         payload = evidence.payload()
-        watermark = _integer_or_none(
-            _hot_payload(payload).get("latestEventSequence")
-        )
-        if watermark is None or watermark < self._last_hot_watermark:
+        if watermark < self._last_hot_watermark:
             self._append(
                 "coverage_gap",
                 _source(observation),
@@ -234,6 +343,9 @@ class DemonstrationRecorder:
             )
             return False
         self._last_hot_watermark = watermark
+        self._last_seen_tick = observation.tick
+        self._consecutive_world_model_gaps = 0
+        self._world_model_gap_started_at = None
         self._record_hot_events(payload, observation)
         if observation.tick != self._last_tick:
             self._record_observation(evidence)
@@ -1054,7 +1166,9 @@ def _require_loaded_identity(observation: Observation) -> None:
         raise DemonstrationError("recording requires a RuneLite process ID")
 
 
-def _validate_evidence_binding(evidence: DemonstrationEvidenceSnapshot) -> None:
+def _validate_evidence_envelope_and_hot(
+    evidence: DemonstrationEvidenceSnapshot,
+) -> tuple[Mapping[str, Any], int]:
     observation = evidence.observation
     raw = evidence.payload()
     if raw.get("schema") != RESPONSE_SCHEMA:
@@ -1108,6 +1222,12 @@ def _validate_evidence_binding(evidence: DemonstrationEvidenceSnapshot) -> None:
             ) != observation.client_process_id:
                 raise DemonstrationError(f"{key} contains evidence from another client")
 
+    return raw, latest_sequence
+
+
+def _validate_evidence_binding(evidence: DemonstrationEvidenceSnapshot) -> int:
+    observation = evidence.observation
+    raw, latest_sequence = _validate_evidence_envelope_and_hot(evidence)
     for name, schema in (
         ("scene_object_census", "scene_object_census.v1"),
         ("actor_census", "world_model_actor_census.v1"),
@@ -1125,6 +1245,7 @@ def _validate_evidence_binding(evidence: DemonstrationEvidenceSnapshot) -> None:
         ):
             raise DemonstrationError(f"{name} evidence is not atomic-frame bound")
         _parse_timestamp(payload.get("capturedAtUtc"), f"{name} capture time")
+    return latest_sequence
 
 
 def _widget_payload(
@@ -2233,7 +2354,39 @@ def record_live(
         annotations=annotations,
         screenshots_enabled=screenshots_enabled,
     )
-    first = client.fetch_demonstration_evidence()
+    first: DemonstrationEvidenceSnapshot | None = None
+    startup_started = time.monotonic()
+    if not math.isfinite(startup_started):
+        raise DemonstrationError("monotonic clock is invalid before recording")
+    startup_deadline = startup_started + WORLD_MODEL_GAP_GRACE_SECONDS
+    startup_polls = 0
+    while first is None:
+        if startup_polls and should_stop():
+            raise DemonstrationError(
+                "demonstration stopped before a loaded scene was captured"
+            )
+        candidate = client.fetch_demonstration_evidence()
+        startup_polls += 1
+        if candidate.observation.loaded_scene:
+            first = candidate
+            break
+        if not _is_transient_world_model_unavailable(candidate):
+            _require_loaded_identity(candidate.observation)
+        _validate_evidence_envelope_and_hot(candidate)
+        if should_stop():
+            raise DemonstrationError(
+                "demonstration stopped before a loaded scene was captured"
+            )
+        startup_now = time.monotonic()
+        if not math.isfinite(startup_now) or startup_now < startup_started:
+            raise DemonstrationError("monotonic clock changed during recording startup")
+        remaining = startup_deadline - startup_now
+        if remaining <= 0:
+            raise DemonstrationError(
+                "demonstration world-model evidence remained unavailable for "
+                f"{startup_polls} polls over {WORLD_MODEL_GAP_GRACE_SECONDS:g} seconds"
+            )
+        time.sleep(min(float(poll_seconds), remaining))
     recorder.start(first)
     deadline = time.monotonic() + float(duration_seconds)
     reason = "duration_elapsed"

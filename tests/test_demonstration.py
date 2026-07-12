@@ -17,6 +17,7 @@ from osrs_bot.demonstration import (
     DemonstrationError,
     DemonstrationLimitReached,
     DemonstrationRecorder,
+    WORLD_MODEL_GAP_GRACE_SECONDS,
     inspect_demonstration,
     record_live,
 )
@@ -177,6 +178,28 @@ def _evidence(observation, hot: dict[str, Any]) -> DemonstrationEvidenceSnapshot
     )
 
 
+def _transient_world_model_evidence(
+    observation, hot: dict[str, Any]
+) -> DemonstrationEvidenceSnapshot:
+    evidence = _evidence(observation, hot)
+    payload = json.loads(evidence.payload_json)
+    payload.update(
+        status="WARN",
+        warnings=["world_model_provenance_mismatch"],
+        missingCapabilities=[
+            "scene_object_census",
+            "actor_census",
+            "collision_window",
+        ],
+    )
+    for name in ("scene_object_census", "actor_census", "collision_window"):
+        payload["payloads"].pop(name)
+    return replace(
+        evidence,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _record_fixture(root: Path) -> Path:
     first = _evidence(
         _base_observation(),
@@ -284,6 +307,81 @@ class DemonstrationRecorderTests(unittest.TestCase):
             self.assertTrue(result.valid, result.errors)
             self.assertEqual("facade_stop_requested", manifest["stopReason"])
 
+    def test_record_live_retries_one_exact_startup_world_model_gap(self) -> None:
+        class Client:
+            calls = 0
+
+            @classmethod
+            def fetch_demonstration_evidence(cls):
+                cls.calls += 1
+                if cls.calls == 1:
+                    unavailable = replace(
+                        _base_observation(),
+                        status="WARN",
+                        missing_capabilities=(
+                            "scene_object_census",
+                            "actor_census",
+                            "collision_window",
+                        ),
+                        warnings=("world_model_provenance_mismatch",),
+                    )
+                    return _transient_world_model_evidence(unavailable, _hot())
+                return _evidence(_base_observation(), _hot())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = record_live(
+                "startup-world-model-retry",
+                Client(),  # type: ignore[arg-type]
+                output_root=Path(temporary),
+                duration_seconds=1.0,
+                poll_seconds=0.02,
+                screenshots_enabled=False,
+                stop_requested=lambda: Client.calls >= 2,
+            )
+            result = inspect_demonstration(artifact)
+
+            self.assertEqual(2, Client.calls)
+            self.assertTrue(result.valid, result.errors)
+
+    def test_record_live_bounds_persistent_startup_world_model_gap(self) -> None:
+        class Client:
+            calls = 0
+
+            @classmethod
+            def fetch_demonstration_evidence(cls):
+                cls.calls += 1
+                unavailable = replace(
+                    _base_observation(),
+                    status="WARN",
+                    missing_capabilities=(
+                        "scene_object_census",
+                        "actor_census",
+                        "collision_window",
+                    ),
+                    warnings=("world_model_provenance_mismatch",),
+                )
+                return _transient_world_model_evidence(unavailable, _hot())
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "osrs_bot.demonstration.time.monotonic",
+            side_effect=(0.0, WORLD_MODEL_GAP_GRACE_SECONDS + 0.01),
+        ):
+            with self.assertRaisesRegex(
+                DemonstrationError,
+                "world-model evidence remained unavailable",
+            ):
+                record_live(
+                    "startup-world-model-timeout",
+                    Client(),  # type: ignore[arg-type]
+                    output_root=Path(temporary),
+                    duration_seconds=1.0,
+                    poll_seconds=0.02,
+                    screenshots_enabled=False,
+                )
+
+            self.assertEqual(1, Client.calls)
+            self.assertEqual([], list(Path(temporary).iterdir()))
+
     def test_records_deduplicated_semantic_before_after_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             artifact = _record_fixture(Path(temporary))
@@ -343,6 +441,297 @@ class DemonstrationRecorderTests(unittest.TestCase):
             result = inspect_demonstration(artifact)
             self.assertTrue(result.valid)
             self.assertIn("session_or_process_changed", result.coverage_gaps)
+
+    def test_transient_world_model_mismatch_skips_only_that_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "world-model-handoff",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            first = _base_observation()
+            recorder.start(_evidence(first, _hot()))
+            unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+
+            self.assertFalse(unavailable.loaded_scene)
+            self.assertTrue(
+                recorder.add(_transient_world_model_evidence(unavailable, _hot()))
+            )
+            self.assertTrue(
+                recorder.add(_evidence(_base_observation(tick=176), _hot()))
+            )
+            result = inspect_demonstration(recorder.finish("test"))
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertIn(
+                "demonstration_world_model_provenance_unavailable",
+                result.coverage_gaps,
+            )
+            self.assertEqual(2, len(result.route_points))
+            self.assertEqual(174, result.route_points[0]["sourceTick"])
+            self.assertEqual(176, result.route_points[1]["sourceTick"])
+
+    def test_repeated_world_model_mismatch_is_bounded_and_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            monotonic_values = iter(
+                (10.0, 10.5, 10.0 + WORLD_MODEL_GAP_GRACE_SECONDS + 0.01)
+            )
+            recorder = DemonstrationRecorder(
+                "world-model-gap-cap",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+                monotonic=lambda: next(monotonic_values),
+            )
+            recorder.start(_evidence(_base_observation(), _hot()))
+
+            for offset in range(1, 4):
+                unavailable = replace(
+                    _base_observation(tick=174 + offset),
+                    status="WARN",
+                    missing_capabilities=(
+                        "scene_object_census",
+                        "actor_census",
+                        "collision_window",
+                    ),
+                    warnings=("world_model_provenance_mismatch",),
+                )
+                accepted = recorder.add(
+                    _transient_world_model_evidence(unavailable, _hot())
+                )
+                self.assertEqual(
+                    offset < 3,
+                    accepted,
+                )
+
+            result = inspect_demonstration(recorder.finish("test"))
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertIn(
+                "repeated_demonstration_world_model_unavailable",
+                result.coverage_gaps,
+            )
+
+    def test_transient_world_model_poll_preserves_bound_walk_click(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "world-model-walk-click",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            recorder.start(_evidence(_base_observation(), _hot()))
+            unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+            walk = {
+                "eventSequence": 1,
+                "eventLane": "menu_option_clicked",
+                "clientTick": 901,
+                "gameTickAtSample": 175,
+                "wallTimeMillis": 1100,
+                "option": "Walk here",
+                "target": "",
+                "type": "WALK",
+                "identifier": 0,
+            }
+
+            self.assertTrue(
+                recorder.add(
+                    _transient_world_model_evidence(unavailable, _hot(walk))
+                )
+            )
+            artifact = recorder.finish("test")
+            events = [
+                json.loads(line)
+                for line in (artifact / "events.jsonl").read_text().splitlines()
+            ]
+            result = inspect_demonstration(artifact)
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertEqual(
+                1,
+                sum(event["kind"] == "menu_option_clicked" for event in events),
+            )
+            self.assertEqual(("Walk here",), result.selected_menu_options)
+            self.assertIn("missing_after_observation", result.coverage_gaps)
+            self.assertEqual((), result.state_changes)
+
+    def test_other_loaded_scene_loss_remains_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "core-scene-loss",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            recorder.start(_evidence(_base_observation(), _hot()))
+            unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=("inventory",),
+                warnings=("sensor_fact_unavailable:inventory",),
+            )
+
+            self.assertFalse(recorder.add(_evidence(unavailable, _hot())))
+            result = inspect_demonstration(recorder.finish("test"))
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertIn("loaded_scene_lost", result.coverage_gaps)
+
+    def test_transient_world_model_exception_requires_matching_raw_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "contradictory-world-model-handoff",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            recorder.start(_evidence(_base_observation(), _hot()))
+            unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+
+            evidence = _transient_world_model_evidence(unavailable, _hot())
+            payload = json.loads(evidence.payload_json)
+            full_payload = json.loads(_evidence(unavailable, _hot()).payload_json)
+            payload["payloads"]["actor_census"] = full_payload["payloads"][
+                "actor_census"
+            ]
+            contradictory = replace(
+                evidence,
+                payload_json=json.dumps(
+                    payload, sort_keys=True, separators=(",", ":")
+                ),
+            )
+
+            self.assertFalse(recorder.add(contradictory))
+            result = inspect_demonstration(recorder.finish("test"))
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertIn("loaded_scene_lost", result.coverage_gaps)
+            self.assertNotIn(
+                "demonstration_world_model_provenance_unavailable",
+                result.coverage_gaps,
+            )
+
+    def test_transient_world_model_mismatch_cannot_hide_tick_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "world-model-regression",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            recorder.start(_evidence(_base_observation(), _hot()))
+            first_unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+            regressed = replace(
+                _base_observation(tick=174),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+
+            self.assertTrue(
+                recorder.add(
+                    _transient_world_model_evidence(first_unavailable, _hot())
+                )
+            )
+            self.assertFalse(
+                recorder.add(_transient_world_model_evidence(regressed, _hot()))
+            )
+            result = inspect_demonstration(recorder.finish("test"))
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertIn("source_tick_regressed", result.coverage_gaps)
+
+    def test_transient_world_model_mismatch_cannot_hide_hot_sequence_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = DemonstrationRecorder(
+                "world-model-hot-reset",
+                output_root=Path(temporary),
+                screenshots_enabled=False,
+            )
+            recorder.start(
+                _evidence(
+                    _base_observation(),
+                    _hot(
+                        {
+                            "eventSequence": 10,
+                            "eventLane": "client_tick",
+                            "clientTick": 900,
+                            "gameTickAtSample": 174,
+                            "wallTimeMillis": 1000,
+                            "mouseCanvasX": 20,
+                            "mouseCanvasY": 30,
+                            "isInCanvas": True,
+                        }
+                    ),
+                )
+            )
+            unavailable = replace(
+                _base_observation(tick=175),
+                status="WARN",
+                missing_capabilities=(
+                    "scene_object_census",
+                    "actor_census",
+                    "collision_window",
+                ),
+                warnings=("world_model_provenance_mismatch",),
+            )
+            reset_hot = _hot(
+                {
+                    "eventSequence": 9,
+                    "eventLane": "client_tick",
+                    "clientTick": 901,
+                    "gameTickAtSample": 175,
+                    "wallTimeMillis": 1100,
+                    "mouseCanvasX": 21,
+                    "mouseCanvasY": 31,
+                    "isInCanvas": True,
+                }
+            )
+
+            self.assertFalse(
+                recorder.add(
+                    _transient_world_model_evidence(unavailable, reset_hot)
+                )
+            )
+            result = inspect_demonstration(recorder.finish("test"))
+
+            self.assertTrue(result.valid, result.errors)
+            self.assertIn("hot_event_sequence_reset", result.coverage_gaps)
 
     def test_tick_regression_stops_before_recording_an_invalid_observation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

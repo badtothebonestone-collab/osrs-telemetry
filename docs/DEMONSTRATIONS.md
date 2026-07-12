@@ -56,6 +56,16 @@ and carry the endpoint's monotonic `eventSequence` and correct lane. A sequence
 reset, client identity change, or loaded-scene loss ends capture rather than
 joining unrelated evidence.
 
+The endpoint can briefly reject all three additive world-model payloads when a
+game tick or geometry publication crosses the read-only query handoff. Recording
+still begins only from a fully loaded, fully bound response. After that start,
+only the exact `world_model_provenance_mismatch` response with precisely
+`scene_object_census`, `actor_census`, and `collision_window` unavailable may be
+omitted and reported as a coverage gap for at most one monotonic second. Its
+independently bound hot-event tail is retained. Any additional warning or
+missing capability, persistent unavailability, source-tick regression, hot
+sequence reset, session/PID change, or core loaded-scene loss remains terminal.
+
 Scene-object response and acquisition caps, plus NPC, collision-cell, and
 hover-menu totals/cap flags, are preserved. If a bounded request truncates a
 crowded scene, the inspector
