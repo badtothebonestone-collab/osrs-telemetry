@@ -2,14 +2,14 @@
 
 ## Current milestone
 
-**Phase 8 and the qualifying live cycle are complete — final closeout is active.**
+**Phase 8 is complete — acceptance-audit live revalidation is active.**
 
-Fresh coherent loaded-scene, real Arduino receipt, passive-overlay, and one
-uninterrupted current-checkpoint default-cycle proof now exist. One short
-user-performed demonstration, artifact inspection, and post-demo cleanup remain
-before closeout; this documentation checkpoint records the current state.
+The `f2007eb` sensor/definition audit passes every offline gate. It postdates the
+retained PID `11440` cycle, so a fresh current-checkpoint observation and default
+cycle are required again. The user-performed demonstration, artifact inspection,
+and post-demo cleanup then remain before closeout.
 
-Current hardening checkpoint: `aaa0290 runtime: fit default live cycle budget`
+Current hardening checkpoint: `f2007eb sensor: enforce neutral source contract`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -33,9 +33,17 @@ Regression command:
 - Inventory truth includes exact visible-empty evidence: a complete 28-slot
   widget may prove structural emptiness, and `BLANKOBJECT` slots normalize away
   before the immutable Observation reaches task logic.
-- The canonical request now consumes one neutral scene-object census. Exact
-  selected-definition facts assign task meaning downstream; RuneLite candidate
-  hints are not authorization.
+- The canonical request consumes one neutral scene-object census. The endpoint
+  exposes no resource/route/service classifiers, task/class hints, or
+  name/action/kind filters; Python ignores retired semantic census names. Exact
+  selected-definition facts assign task meaning downstream.
+- Dialogue capture uses pinned RuneLite option/continue widget identities and
+  publishes arbitrary prompt/option text as facts. Exact staircase wording is
+  interpreted only in the definition/task; hidden or ambiguous widget surfaces
+  fail closed.
+- `tests/fixtures/java_snapshot_endpoint.json` is emitted through the real Java
+  frame/cache/endpoint path, regenerates byte-identically, carries real payload
+  sizes, and parses into a coherent loaded Python Observation.
 - Available input geometry is explicitly Win32 virtual-desktop device pixels.
   RuneLite converts AWT user bounds with one proven monitor transform and
   Python rejects missing or different coordinate-space declarations.
@@ -61,12 +69,14 @@ Regression command:
   `COMPLETE` are represented in the committed golden replay.
 - Live component traces physically reached all of those milestones on
   2026-07-10 and ended at `COMPLETE` with acknowledged `STOP_ALL`/`DISARM`.
-- A separate 2026-07-11 fresh current-checkpoint process completed the default
+- A separate 2026-07-11 pre-audit process completed the default
   profile uninterrupted: PID `11440`, session
   `plugin-11440-1783810438162`, 698.2 seconds, 1,994 observations, 82/100
   actions, terminal `COMPLETE` at `west_trees`, and `cycles 1/1`. Its final
   receipt and runtime cleanup prove `STOP_ALL`, `DISARM`, disarmed zero-held
-  firmware status, zero unresolved commands, and closed ledger/backend.
+  firmware status, zero unresolved commands, and closed ledger/backend. This
+  remains strong input/cycle evidence but no longer proves the later `f2007eb`
+  production sensor checkpoint.
 - All live gameplay input remains Arduino-only; no software fallback exists.
 - Gameplay and saved-session login now submit immutable approved intents to one
   `InputCoordinator`; neither can open an Arduino session or call raw input.
@@ -219,10 +229,10 @@ replay, and the summaries omit full observations, menus, geometry, and command
 receipts. The golden fixture records this caveat and hashes the key ignored
 artifacts.
 
-The separate 2026-07-11 final proof is uninterrupted outcome evidence from the
-current checkpoint. A same-PID/session pre-observation was coherent and empty at
-the exact return-route anchor; the process completed the historical return
-without credit, recorded exactly 28 log gains, bank activity, deposit to empty,
+The separate retained 2026-07-11 proof is uninterrupted outcome evidence from
+the pre-audit checkpoint. A same-PID/session pre-observation was coherent and
+empty at the exact return-route anchor; the process completed the historical
+return without credit, recorded exactly 28 log gains, bank activity, deposit to empty,
 and a genuine `cycles 1/1` return to `west_trees`. The post-observation remained
 fresh/coherent, empty, bank-closed, and warning-free. `execute.json` retains the
 terminal frame and transaction `input-00000082`, not receipts/history for
@@ -246,7 +256,7 @@ is not a complete raw audit of every intermediate transaction.
   The firmware ACK proves command handling rather than OS application; the
   additional no-input poll fixed that boundary, and the final 82-action run did
   not repeat the failure.
-- The final proof itself completed and the post-observation passed before
+- The pre-audit proof itself completed and the post-observation passed before
   RuneLite emitted repeated GPU `GL_OUT_OF_MEMORY`/`GL_INVALID_OPERATION`
   errors. About 47 seconds after terminal completion, the Gradle-wrapper JVM
   (PID `500`, not telemetry PID `11440`) failed a native allocation. The launch
@@ -284,7 +294,7 @@ is not a complete raw audit of every intermediate transaction.
   zero failures/errors/skips; an actual Windows subprocess verified exact
   per-monitor-v2 awareness.
 - Pointer-arrival hardening gate: 323 Python tests passed; golden replay 2
-  passed; and a forced fresh Java run executed 71 tests across 8 suites with
+  passed; and a forced fresh Java run executed 55 tests across 6 suites with
   zero failures, errors, or skips. Coverage reproduces long movement on the
   observed 175% HID/device-pixel lattice, records every point inside bounds,
   exercises the 400% supported ceiling plus four-sided insufficient headroom,
@@ -293,14 +303,23 @@ is not a complete raw audit of every intermediate transaction.
   safe cleanup.
 - Forced closeout gate through `aaa0290`: 457 Python tests passed, golden replay
   remains 2/2, `python -m compileall` and `git diff --check` pass, and the fresh
-  Java rerun executed 71 tests across 8 suites with zero failures, errors, or
-  skips.
-- Qualifying live gate: current-checkpoint PID `11440`/session
+  Java rerun executed 66 tests across 6 suites with zero failures, errors, or
+  skips. Those counts come from the current externally configured Gradle build
+  directory; checkout-local `build/` reports were stale and are not evidence.
+- Acceptance-audit gate at `f2007eb`: 461 Python tests passed; golden replay
+  remains 2/2; `python -m compileall`, `git diff --check`, catalog,
+  profile-schema, and profile validation pass; and a forced Java rerun executed
+  76 tests across 8 suites with zero failures, errors, or skips. The current
+  external Gradle reports were counted directly. The deterministic Java fixture
+  SHA-256 is
+  `80AF03C08681D242033D5ED4FBFF56AF6069263C40E0D290CABF5B7DDA549081`.
+- Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
   `COMPLETE`, reason `arrived at route step west_trees`, progress `cycles 1/1`,
   no blocker, and fully safe final receipt/runtime cleanup. The ignored proof is
   `_run_proofs/final_regression/20260711_cursor_reacquire_complete_cycle/`.
+  It predates `f2007eb` and is not current-checkpoint sensor proof.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -309,10 +328,14 @@ is not a complete raw audit of every intermediate transaction.
 
 ## Remaining limitations and next work
 
+- A fresh `f2007eb` observation/default cycle is required because production
+  sensor code changed after PID `11440`. The same run should confirm the real
+  `Chatmenu` staircase prompt/option structure; any mismatch remains
+  fail-closed.
 - One short user-performed manual demonstration and `inspect-demo` verification
-  remain required. Because the proof launch stack later ended, this needs a
-  fresh current-checkpoint launch and saved-session login when the user is ready.
-- The final proof package retains only the terminal gameplay receipt rather than
+  remain required afterward. It needs a current-checkpoint launch and
+  saved-session login when the user is ready.
+- The pre-audit proof package retains only the terminal gameplay receipt rather than
   all 82 transaction receipts. The runtime result and plugin timeline strongly
   prove the cycle outcome, but the artifact is not a full action-by-action audit.
 - There is intentionally no external profile loader, second definition, or
@@ -323,6 +346,6 @@ is not a complete raw audit of every intermediate transaction.
   transitions. Demonstration manifests declare those gaps and retain semantic
   `MenuOptionClicked` evidence instead.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
-  demonstration, and frontend composition contracts are implemented. Only the
-  manual demo/inspection and post-demo confirmation that no client or proof
+  demonstration, and frontend composition contracts are implemented. The fresh
+  cycle, manual demo/inspection, and final confirmation that no client or proof
   endpoint remains are pending.

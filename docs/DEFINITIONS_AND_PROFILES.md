@@ -71,12 +71,14 @@ cannot change either value or any per-action invariant.
 ## Neutral sensor facts
 
 The canonical snapshot request now asks RuneLite for one neutral
-`scene_object_census`. The adapter still understands the endpoint's supported
-filtered diagnostic censuses, but the task authorizes resource, route, and bank
-meaning only through exact selected-definition facts. Scene rows contain no
-candidate/type/skill labels, and projection scheduling uses explicit request
-state, distance, and stable identity rather than task hints. RuneLite candidate
-hint flags are not authorization.
+`scene_object_census`. The endpoint no longer exposes resource/route/service
+classifiers, and the adapter ignores those retired payload names. Exact
+selected-definition facts assign resource, route, and bank meaning downstream.
+Scene rows contain only object identity, actions, location, and projection
+facts; projection scheduling uses explicit request state, distance, and stable
+identity. Dialogue capture likewise uses authoritative RuneLite widget
+identities and publishes raw prompt/option facts; staircase wording is matched
+only by the selected definition and task.
 
 The committed golden fixture remains independent expected evidence. Tests
 compare every definition route/provenance fact to it, then replay the explicit

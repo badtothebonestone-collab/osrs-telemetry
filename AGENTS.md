@@ -124,6 +124,9 @@ use the disconnect heuristic or authorize input.
 - Use focused tests while iterating. At each checkpoint, run the full affected-
   language suite plus `run.cmd replay`; at phase and final gates run both Python
   and Java. Inspect the diff for prohibited expansion before committing.
+- Gradle writes current build/test output to its configured external
+  `layout.buildDirectory`. Never count Java results from a stale checkout-local
+  `build/` directory; resolve the configured output and verify its timestamps.
 - Use live validation only for evidence replay cannot provide. Keep it bounded;
   after a repeated equivalent failure, preserve evidence and patch the failing
   boundary before another run.

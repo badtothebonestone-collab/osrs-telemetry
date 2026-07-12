@@ -89,11 +89,14 @@ World-model and tile geometry must also match the frame's camera/window
 fingerprint before the endpoint merges them. Menu evidence is independently
 stamped from its real post-menu-sort sample.
 
-The canonical adapter requests one neutral `scene_object_census`. Filtered
-resource/route/service censuses remain endpoint diagnostics. Scene rows omit
-candidate/type/skill labels, and projection selection uses only the explicit
-projection request, factual distance, and stable object key. Candidate labels
-neither bias scene geometry nor authorize task behavior.
+The canonical adapter requests one neutral `scene_object_census`; the endpoint
+does not expose resource/route/service classifiers and Python ignores those
+retired payload names. Scene rows contain factual identity, actions, location,
+and projection only. Projection selection uses the explicit request, factual
+distance, and stable object key. Selected definitions assign resource, route,
+and bank meaning downstream. Dialogue capture is also structural: pinned
+RuneLite widget identities expose raw prompt/option facts, while exact
+staircase wording remains definition/task-owned.
 
 The same endpoint exposes demonstration-only bounded `client_tick_tail`,
 `actor_census`, and `collision_window` needs. Hot rows from client tick,

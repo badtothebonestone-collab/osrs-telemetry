@@ -150,6 +150,11 @@ runtime logic.
   after normal bounded overhead. The default is 100 actions under the unchanged
   hard cap of 500; this changes no per-action safety, verification, input, or
   cleanup bound.
+- **D030 — Sensors publish facts, not task meaning:** RuneLite exposes one
+  neutral scene-object census and structurally identified dialogue facts. It
+  does not classify resources, routes, services, skills, profiles, tasks, or
+  desired classes. Spatial/projection ordering uses only factual geometry,
+  identity, and distance; the selected definition/task assigns meaning.
 
 ## Phases and acceptance
 
@@ -157,14 +162,14 @@ runtime logic.
 |---|---|---|
 | 0. Freeze proven baseline | Complete (`beb9cbb`) | Full diff audited; Python/Java suites pass; terminal trace reaches `COMPLETE`; tracked golden replay passes; stale proof docs corrected; checkpoint committed/tagged. |
 | 1. Governing contract | Complete (`f4c091e`) | Product vision, architecture, rules, status, and this plan describe the OSRS-specific engine and prohibited expansion. |
-| 2. Coherent sensor truth | Complete (`b645d83`) | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
+| 2. Coherent sensor truth | Complete (`b645d83`, audit `f2007eb`) | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; deterministic real-Java fixture parsed by Python; bounded live observe. |
 | 3. Minimal task seam | Complete (`56b8b8b`) | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
-| 4. One task/site definition | Complete (`0c8ec9e`) | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
+| 4. One task/site definition | Complete (`0c8ec9e`, audit `f2007eb`) | One immutable Lumbridge definition/task owns task meaning; neutral sensor facts; one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
 | 5. Arduino boundary | Complete (`8b71ebc`) | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | In progress | Fresh current-checkpoint observation, one uninterrupted default cycle, the forced offline gate, and this documentation checkpoint pass; only the user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup remain. |
+| Final regression | In progress | The `f2007eb` offline gate passes. Because it changes the production sensor after the retained PID `11440` cycle, one fresh current-checkpoint observation/cycle is required again, followed by the user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup. |
 
 ## Phase 0 completed work
 
@@ -213,8 +218,11 @@ runtime logic.
   capture time, and a camera/window `geometryFrameId`; bound menu evidence to
   the real post-menu-sort sample.
 - Updated the immutable Python observation and safety gate to preserve and
-  enforce frame/menu provenance. Added `docs/SENSOR_CONTRACT.md` and a
-  cross-language Java-schema/Python-parser fixture test.
+  enforce frame/menu provenance. Added `docs/SENSOR_CONTRACT.md`.
+- Acceptance audit `f2007eb` added a newly assembled/old-source rejection, a
+  byte-deterministic fixture emitted through the real Java
+  `SensorFrame -> PluginLiveCache -> PluginSnapshotEndpoint` path, exact
+  serialized fact-size checks, and Python parsing of that Java fixture.
 - Validation: golden replay 2 passed; all 123 Python tests passed; a forced
   fresh Java run executed 39 tests across 6 suites with no failures, errors, or
   skips; `git diff --check` passed.
@@ -260,9 +268,11 @@ runtime logic.
   runtime bounds. Profiles contain no safety or runtime switches.
 - Made the canonical RuneLite request use neutral `scene_object_census`; exact
   selected-definition facts assign resource/route/bank meaning downstream.
-  Scene rows strip task-semantic labels and projection selection is
-  request/distance/key based. Golden replay entities pass with all upstream
-  candidate hints false.
+  Acceptance audit `f2007eb` removed the plugin's candidate/type/skill fields,
+  filtered semantic censuses, class/name/action hinting, and skill capture;
+  Python ignores retired payload names and replay passes with no hint fields.
+  Dialogue capture now uses pinned RuneLite widget identities and leaves exact
+  prompt/option interpretation to the definition/task.
 - Corrected a truncated 62-character bank-close evidence digest in the golden
   fixture after verifying the retained trace's 64-character SHA-256.
 - Added `docs/DEFINITIONS_AND_PROFILES.md`. Final gate: golden replay 2 passed,
@@ -412,7 +422,7 @@ runtime logic.
   175% gameplay movement, every-position containment, 400% boundary transfer,
   initial/four-sided headroom, unsupported-gain, stable zero-step, cursor-drift,
   and transaction-wide plan/step caps; golden replay 2 passed; and a forced
-  fresh Java run executed 71 tests across 8 suites with zero failures, errors,
+  fresh Java run executed 55 tests across 6 suites with zero failures, errors,
   or skips.
 - Subsequent checkpoints `18c352e` through `2a26199` added visible-empty
   inventory proof and blank-slot normalization; bounded watchdog and login
@@ -456,7 +466,7 @@ runtime logic.
   no-effect boundary; the final receipt and runtime cleanup were safe. Checkpoint
   `aaa0290` corrected the stale 52-action runtime model to the real 64-action
   ideal and raised only the default budget to 100 under the unchanged 500 cap.
-- Fresh current-checkpoint PID `11440`, session
+- Pre-audit checkpoint PID `11440`, session
   `plugin-11440-1783810438162`, then began with coherent empty-inventory route
   reconciliation and completed one uninterrupted default-profile cycle in
   698.2 seconds, 1,994 observations, and 82 actions. It returned to
@@ -467,7 +477,19 @@ runtime logic.
   `_run_proofs/final_regression/20260711_cursor_reacquire_complete_cycle/`.
 - Forced closeout gate: all 457 Python tests pass, golden replay 2/2 passes,
   `python -m compileall` and `git diff --check` pass, and a fresh Java rerun
-  executed 71 tests across 8 suites with zero failures, errors, or skips.
+  executed 66 tests across 6 suites with zero failures, errors, or skips. Counts
+  come from the current externally configured Gradle build directory; the
+  checkout-local `build/` contained stale reports and is not evidence.
+- Acceptance-audit checkpoint `f2007eb`: all 461 Python tests pass, golden
+  replay 2/2 passes, `python -m compileall` and `git diff --check` pass, and a
+  forced Java rerun executed 76 tests across 8 suites with zero failures,
+  errors, or skips. The Java-produced endpoint fixture regenerates
+  byte-identically at SHA-256
+  `80AF03C08681D242033D5ED4FBFF56AF6069263C40E0D290CABF5B7DDA549081` and
+  parses as a coherent loaded Python Observation. Catalog, profile schema, and
+  default-profile validation commands pass. This production sensor checkpoint
+  postdates PID `11440`, so that retained cycle is no longer current-checkpoint
+  proof; a new cycle is pending.
 - The post-cycle observation still passed fresh/coherent with no warnings.
   About 47 seconds after terminal completion (10 seconds after that observation),
   RuneLite emitted repeated OpenGL out-of-memory/invalid-operation errors and
@@ -492,9 +514,10 @@ runtime logic.
 ## Remaining limitations
 
 - The original baseline corpus is stitched and lacks complete raw observations,
-  command/ACK receipts, and immutable source provenance. The 2026-07-11 final
-  proof is a separate uninterrupted current-checkpoint cycle with its complete
-  terminal JSON and receipts preserved in ignored local evidence.
+  command/ACK receipts, and immutable source provenance. The 2026-07-11 PID
+  `11440` proof is a separate uninterrupted pre-audit cycle with its terminal
+  JSON and final receipt preserved in ignored local evidence. A fresh
+  `f2007eb` cycle must replace it as current-checkpoint proof.
 - Each new source tick can still force a world-model refresh behind a 250 ms
   provider wait. The final pre/post observations were fresh, coherent, and
   warning-free, but this remains a latency cost rather than a second cache.
@@ -511,3 +534,7 @@ runtime logic.
   verification, and cleanup evidence. One short user-performed demonstration
   and its inspected artifact plus post-demo client cleanup remain final-
   regression evidence.
+- Structural tests cover neutral `Chatmenu` dialogue capture; the fresh cycle
+  must confirm the live staircase prompt/options use the pinned widget shape.
+  Any mismatch remains fail-closed and is not permission to restore text
+  classification in the sensor.
