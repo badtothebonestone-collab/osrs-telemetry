@@ -400,6 +400,34 @@ class WoodcutBankTask:
             observation.plane != work_area.anchor.plane
             or observation.location.distance_to(work_area.anchor) > work_area.radius
         ):
+            bank = self.definition.bank
+            inventory_empty = bool(
+                observation.inventory.known
+                and observation.inventory.occupied_slots == 0
+                and not observation.inventory.items
+            )
+            if (
+                inventory_empty
+                and observation.widgets.bank_known
+                and observation.widgets.bank_open
+                and observation.plane == bank.anchor.plane
+                and observation.location.distance_to(bank.anchor)
+                <= bank.interaction_radius
+            ):
+                self.progress.target_key = None
+                self.progress.pending = None
+                self.progress.phase = TaskPhase.CLOSE_BANK
+                self.progress.route_index = 0
+                self._restart_reconciled_without_cycle_credit = True
+                self._movement_verified = False
+                self._route_settle_location = None
+                self._route_settle_since_tick = None
+                self._reset_camera_recovery()
+                return self._wait(
+                    observation,
+                    "reobserved empty inventory with an open bank at the "
+                    "validated bank interaction area",
+                )
             resume_index = self._return_route_resume_index(observation)
             if resume_index is not None:
                 self.progress.target_key = None

@@ -120,8 +120,9 @@ runtime logic.
   safe receipt whose ledger contains preactivation commands exclusively; the
   task suppresses that exact resource key for one fresh selection. A second
   consecutive invalidation blocks. Fresh restart reconciliation is separately
-  limited to an exact return-route anchor with structurally empty inventory and
-  never grants cycle credit for the historical return.
+  limited to an exact return-route anchor, or the configured bank
+  anchor/interaction radius with a currently open bank, and structurally empty
+  inventory; it never grants cycle credit for the historical return.
 
 - **D024 — Object aim points stay inside API shapes:** object activation uses
   the first present RuneLite shape in clickbox -> convex hull -> canvas tile
@@ -130,8 +131,10 @@ runtime logic.
 - **D025 — Live restart and resource recovery remain task-specific:** one
   verified resource no-yield may discard the old tree and reselect once; a
   second no-yield blocks. Fresh full/empty inventory may reconcile only to the
-  furthest exact outbound/return route anchor, with no restored verification or
-  historical cycle credit.
+  furthest exact outbound/return route anchor. Structurally empty inventory may
+  also resume within the configured bank anchor/interaction radius only while
+  the current bank state is known open, so it can close the interface before
+  the return route. No lane restores verification or historical cycle credit.
 - **D026 — Cursor truth is observed, never remembered:** every cursor and
   point-owner sample establishes per-monitor-v2 device pixels on its current
   thread. A fresh cursor inside the RuneLite outer envelope may enter through a

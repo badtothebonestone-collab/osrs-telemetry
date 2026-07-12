@@ -436,9 +436,17 @@ samples, old screen coordinates/clickboxes, session-bound targets, or armed
 input state. Reobserve the game, validate a fresh profile/definition binding,
 and reconcile the FSM before any new action.
 
-The sole narrow reconciliation derives new state from current evidence rather
-than restoring it: a structurally empty inventory outside the work area may
-resume only the furthest matching anchor/radius on the exact built-in return
-route, with matching plane. Partial, off-route, or wrong-plane states still
-block. Completing that historical return grants no cycle credit; the active
-process must perform a new full cycle.
+The narrow reconciliations derive new state from current evidence rather than
+restoring it. A full inventory may resume only the furthest matching
+anchor/radius on the exact outbound route. A structurally empty inventory
+outside the work area may resume only the furthest matching anchor/radius on the
+exact return route, or the configured bank anchor on the matching plane within
+its interaction radius while the current bank state is known open; that last
+lane closes the interface before starting the return route. Partial, off-route,
+wrong-plane, or closed-bank states receive no restart-reconciliation shortcut;
+ordinary FSM and safety checks then apply without historical cycle credit.
+Because that bank lane can only close, bank contents need not be readable; an
+open PIN blocks before input, and exact widget or keyboard-close support is
+still required.
+Completing any historical return grants no cycle credit; the active process
+must perform a new full cycle.

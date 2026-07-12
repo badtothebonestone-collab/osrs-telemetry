@@ -715,6 +715,172 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(0, task.progress.cycles_completed)
         self.assertEqual(0, task.progress.route_index)
 
+    def test_fresh_task_reconciles_empty_inventory_with_open_bank_in_radius(self) -> None:
+        task = WoodcutBankTask()
+        bank_area = WorldPoint(
+            BANK_ANCHOR.x,
+            BANK_ANCHOR.y - 1,
+            BANK_ANCHOR.plane,
+        )
+        bank_open = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            keyboard_close_possible=True,
+        )
+
+        resumed = task.decide(
+            observation(
+                location=bank_area,
+                inv=inventory(),
+                widgets=bank_open,
+            )
+        )
+
+        self.assertEqual(ActionKind.WAIT, resumed.action.kind)
+        self.assertEqual(TaskPhase.CLOSE_BANK, task.progress.phase)
+        self.assertTrue(task._restart_reconciled_without_cycle_credit)
+        self.assertEqual(
+            "reobserved empty inventory with an open bank at the validated "
+            "bank interaction area",
+            resumed.reason,
+        )
+
+        close = task.decide(
+            observation(
+                location=bank_area,
+                inv=inventory(),
+                widgets=bank_open,
+                tick=11,
+            )
+        )
+
+        self.assertEqual(ActionKind.PRESS_KEY, close.action.kind)
+        self.assertEqual("escape", close.action.key)
+        self.assertEqual(VerificationKind.INTERFACE_CLOSED, task.progress.pending.kind)
+
+        task.apply_verification(
+            verification_pass(OutcomeKind.INTERFACE_CLOSED, tick=12)
+        )
+        task.progress.route_index = len(ROUTE_TO_TREES)
+        completed_resume = task.decide(
+            observation(location=TREE_AREA, inv=inventory(), tick=13)
+        )
+
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertEqual(0, task.progress.cycles_completed)
+        self.assertFalse(task._restart_reconciled_without_cycle_credit)
+
+    def test_open_bank_anchor_restart_near_misses_remain_fail_closed(self) -> None:
+        bank_open = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            keyboard_close_possible=True,
+        )
+        cases = (
+            ("unknown inventory", BANK_ANCHOR, inventory(known=False), bank_open),
+            ("occupied inventory", BANK_ANCHOR, inventory(logs=1), bank_open),
+            (
+                "bank unknown",
+                BANK_ANCHOR,
+                inventory(),
+                replace(bank_open, bank_known=False),
+            ),
+            (
+                "bank closed",
+                BANK_ANCHOR,
+                inventory(),
+                replace(bank_open, bank_open=False),
+            ),
+            (
+                "wrong plane",
+                WorldPoint(BANK_ANCHOR.x, BANK_ANCHOR.y, BANK_ANCHOR.plane - 1),
+                inventory(),
+                bank_open,
+            ),
+            (
+                "outside bank radius",
+                WorldPoint(
+                    BANK_ANCHOR.x + DEFINITION.bank.interaction_radius + 1,
+                    BANK_ANCHOR.y,
+                    BANK_ANCHOR.plane,
+                ),
+                inventory(),
+                bank_open,
+            ),
+        )
+
+        for label, location, inv, widgets in cases:
+            with self.subTest(label=label):
+                task = WoodcutBankTask()
+
+                decision = task.decide(
+                    observation(
+                        location=location,
+                        inv=inv,
+                        widgets=widgets,
+                    )
+                )
+
+                self.assertIsNot(TaskPhase.CLOSE_BANK, task.progress.phase)
+                self.assertFalse(task._restart_reconciled_without_cycle_credit)
+                self.assertIsNot(ActionKind.PRESS_KEY, decision.action.kind)
+                self.assertIsNot(ActionKind.CLICK_WIDGET, decision.action.kind)
+
+    def test_open_bank_anchor_restart_rejects_pin_before_input(self) -> None:
+        task = WoodcutBankTask()
+        bank_pin = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_pin_open=True,
+            bank_readable=True,
+            keyboard_close_possible=True,
+        )
+
+        resumed = task.decide(
+            observation(location=BANK_ANCHOR, inv=inventory(), widgets=bank_pin)
+        )
+        blocked = task.decide(
+            observation(
+                location=BANK_ANCHOR,
+                inv=inventory(),
+                widgets=bank_pin,
+                tick=11,
+            )
+        )
+
+        self.assertEqual(ActionKind.WAIT, resumed.action.kind)
+        self.assertEqual(ActionKind.WAIT, blocked.action.kind)
+        self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
+        self.assertEqual("bank PIN handling is out of scope", blocked.reason)
+
+    def test_unreadable_open_bank_at_anchor_may_only_close(self) -> None:
+        task = WoodcutBankTask()
+        unreadable = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=False,
+            keyboard_close_possible=True,
+        )
+
+        resumed = task.decide(
+            observation(location=BANK_ANCHOR, inv=inventory(), widgets=unreadable)
+        )
+        close = task.decide(
+            observation(
+                location=BANK_ANCHOR,
+                inv=inventory(),
+                widgets=unreadable,
+                tick=11,
+            )
+        )
+
+        self.assertEqual(ActionKind.WAIT, resumed.action.kind)
+        self.assertEqual(ActionKind.PRESS_KEY, close.action.kind)
+        self.assertEqual("escape", close.action.key)
+        self.assertEqual(VerificationKind.INTERFACE_CLOSED, task.progress.pending.kind)
+
     def test_return_route_reconciliation_uses_furthest_matching_step(self) -> None:
         task = WoodcutBankTask()
         location = WorldPoint(3206, 3227, 2)
