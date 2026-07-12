@@ -611,6 +611,40 @@ class OwnedMouseTransitionTests(unittest.TestCase):
         self.assertIs(True, result["activityClear"])
         self.assertEqual(2, settle.call_count)
 
+    def test_owned_release_may_settle_after_old_hundred_millisecond_boundary(
+        self,
+    ) -> None:
+        self.assertEqual(
+            0.50,
+            arduino_module._OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS,
+        )
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={
+                0x01: [0x8000] * 30 + [0x0000, 0x0000]
+            }
+        )
+        now = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def settle(seconds: float) -> None:
+            now[0] += seconds
+
+        with (
+            patch.object(arduino_module.time, "monotonic", monotonic),
+            patch.object(arduino_module.time, "sleep", settle),
+        ):
+            result = self._consume(user32)
+
+        self.assertIs(True, result["buttonsUp"])
+        self.assertIs(True, result["activityClear"])
+        self.assertGreater(now[0], 0.10)
+        self.assertLessEqual(
+            now[0],
+            arduino_module._OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS,
+        )
+
     def test_delayed_owned_high_resets_clear_streak(self) -> None:
         user32 = _FakeWindowHandoffUser32(
             button_state_sequences={
@@ -625,21 +659,67 @@ class OwnedMouseTransitionTests(unittest.TestCase):
         self.assertIs(True, result["activityClear"])
         self.assertEqual(3, settle.call_count)
 
-    def test_persistent_owned_high_bit_times_out(self) -> None:
-        user32 = _FakeWindowHandoffUser32(button_states={0x01: 0x8000})
+    def test_late_owned_high_resets_one_clear_sample_in_extended_window(
+        self,
+    ) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={
+                0x01: [0x8000] * 25
+                + [0x0000, 0x8000, 0x0000, 0x0000]
+            }
+        )
+        now = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def settle(seconds: float) -> None:
+            now[0] += seconds
 
         with (
-            patch.object(
-                arduino_module.time,
-                "monotonic",
-                side_effect=(0.0, 0.0, 0.10),
-            ),
-            patch.object(arduino_module.time, "sleep") as settle,
+            patch.object(arduino_module.time, "monotonic", monotonic),
+            patch.object(arduino_module.time, "sleep", settle),
+        ):
+            result = self._consume(user32)
+
+        self.assertIs(True, result["buttonsUp"])
+        self.assertIs(True, result["activityClear"])
+        self.assertGreater(now[0], 0.25)
+        self.assertLess(
+            now[0],
+            arduino_module._OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS,
+        )
+
+    def test_persistent_owned_high_bit_times_out(self) -> None:
+        user32 = _FakeWindowHandoffUser32(button_states={0x01: 0x8000})
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def monotonic() -> float:
+            return now[0]
+
+        def settle(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        with (
+            patch.object(arduino_module.time, "monotonic", monotonic),
+            patch.object(arduino_module.time, "sleep", settle),
             self.assertRaisesRegex(ArduinoHIDError, "did not settle before deadline"),
         ):
             self._consume(user32)
 
-        settle.assert_called_once()
+        self.assertGreaterEqual(len(sleeps), 49)
+        self.assertLessEqual(len(sleeps), 51)
+        self.assertTrue(all(
+            0.0 < delay <= arduino_module._OWNED_MOUSE_TRANSITION_SETTLE_SECONDS
+            for delay in sleeps
+        ))
+        self.assertAlmostEqual(
+            arduino_module._OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS,
+            now[0],
+            places=6,
+        )
 
     def test_other_button_low_and_high_bits_are_rejected(self) -> None:
         cases = (
@@ -684,6 +764,39 @@ class OwnedMouseTransitionTests(unittest.TestCase):
                 self._consume(user32)
 
         settle.assert_called_once()
+
+    def test_late_other_button_transition_rejects_before_extended_deadline(
+        self,
+    ) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={
+                0x01: [0x8000] * 40,
+                0x02: [0x0000] * 25 + [0x0001],
+            }
+        )
+        now = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def settle(seconds: float) -> None:
+            now[0] += seconds
+
+        with (
+            patch.object(arduino_module.time, "monotonic", monotonic),
+            patch.object(arduino_module.time, "sleep", settle),
+            self.assertRaisesRegex(
+                ArduinoHIDError,
+                "unowned physical mouse activity",
+            ),
+        ):
+            self._consume(user32)
+
+        self.assertGreater(now[0], 0.10)
+        self.assertLess(
+            now[0],
+            arduino_module._OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS,
+        )
 
     def test_transport_owned_transition_delegates_without_serial_input(self) -> None:
         serial = _FakeSerial()

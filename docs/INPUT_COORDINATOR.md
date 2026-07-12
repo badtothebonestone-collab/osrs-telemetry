@@ -207,15 +207,19 @@ verified transit and activation bounds before and after that validation, the
 physical mouse must remain quiet, and `WindowFromPoint` must still resolve to
 the exact pinned root HWND/PID. The validator must still prove the exact
 hover/default action or open-menu row at that actual point. After each
-acknowledged Arduino `MOUSE_UP`, one bounded reader attributes and consumes only
-that owned button's possibly delayed Windows transition. It permits that owned
-button's high/low state to settle for at most 100 ms, requires two consecutive
+acknowledged Arduino `MOUSE_UP`, one bounded reader runs attribution for that
+button's possibly delayed Windows transition. It permits that owned
+button's high/low state to settle for at most 500 ms, requires two consecutive
 all-clear samples, and rejects any other-button or persistent owned-button
 activity. Windows exposes aggregate, source-blind button state, so attribution
-of a coincident human transition on the same button is necessarily best effort;
-the bounded window and final all-clear proof prevent that ambiguity from leaking
-into a context row or the next transaction. Context-menu failures attempt an
-acknowledged Escape before normal cleanup.
+of same-button human input anywhere in the 500 ms window is necessarily best
+effort. The host-side reader sends no firmware command and does not renew the
+watchdog; existing STATUS/rearm/revalidation gates remain mandatory before any
+later movement or activation. The bounded window and final all-clear proof
+prevent residual held or queued button state from contaminating a context row
+or the next transaction; they cannot distinguish or undo an independent human
+same-button activation.
+Context-menu failures attempt an acknowledged Escape before normal cleanup.
 
 RuneLite exposes its menu mouse position as integer source-canvas pixels. At
 the retained scaled layout, mapping that value back to PMv2 device pixels has a

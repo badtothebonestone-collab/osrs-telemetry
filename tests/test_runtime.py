@@ -120,6 +120,28 @@ def _blocked_execution(action: Action, tick: int, reason: str) -> ExecutionResul
     )
 
 
+def _post_activation_error_execution(
+    action: Action,
+    tick: int,
+    reason: str,
+) -> ExecutionResult:
+    receipt = replace(
+        _successful_receipt(),
+        status="ERROR",
+        reason=reason,
+        errors=(reason,),
+    )
+    return ExecutionResult(
+        action=action,
+        pre_move_tick=tick,
+        local_status="ERROR",
+        local_reason=reason,
+        post_move_tick=tick + 1,
+        receipt=receipt,
+        activation_attempted=True,
+    )
+
+
 def _safe_unsent_execution(
     action: Action,
     tick: int,
@@ -686,6 +708,47 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(interface.calls))
         self.assertIsNone(result.engine_frame.pending_verification)
         self.assertIs(result.engine_frame.last_verification.status, VerificationStatus.FAIL)
+
+    def test_post_activation_proof_failure_blocks_without_unsent_claim_or_retry(
+        self,
+    ) -> None:
+        decision, _ = _executable(10)
+        reason = "owned_mouse_transition_unproved_after_activation"
+        task = _Task([decision])
+        execution = _post_activation_error_execution(
+            decision.action,
+            10,
+            reason,
+        )
+        interface = _ActionInterface(execution)
+        runtime = TaskRuntime(
+            _Client(_observation(10)),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("action activation was attempted", result.reason)
+        self.assertNotIn("action was not sent", result.reason)
+        self.assertEqual(1, len(interface.calls))
+        self.assertEqual([], task.discarded)
+        self.assertEqual(1, len(task.applied))
+        self.assertEqual(
+            "post-activation execution proof failed: error: " + reason,
+            task.applied[0].reason,
+        )
+        self.assertTrue(result.execution.activation_attempted)
+        self.assertTrue(result.to_dict()["execution"]["activationAttempted"])
+        self.assertTrue(result.engine_frame.last_execution_activation_attempted)
+        self.assertTrue(
+            result.to_dict()["engineFrame"]["lastExecution"][
+                "activationAttempted"
+            ]
+        )
 
     def test_safe_pre_activation_hover_mismatch_reobserves_once(self) -> None:
         first, _ = _executable(10)

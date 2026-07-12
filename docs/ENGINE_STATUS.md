@@ -4,14 +4,19 @@
 
 **Phase 8 is complete - external-cursor final regression is active.**
 
-The host/input stack through `ae8b9f8` passes its current offline gates. The
+The host/input stack through the current delayed-transition candidate passes
+its offline gates. The
 stitched displaced-login component proof and current displaced-gameplay
 handoff/reobserve subcriterion are **PASS** at the retained fixed-client 175%
-layout. A complete current-checkpoint bank-and-return cycle is **NOT YET
-EVALUATED**. The user-performed demonstration, artifact inspection, and
-post-demo cleanup are **NOT YET EVALUATED**.
+layout. The `f3dce8d` uninterrupted attempt was **BLOCKED** after reaching the
+fresh outbound route at step `10/19`; a complete cycle on the current candidate
+is **NOT YET EVALUATED**. The user-performed demonstration, artifact
+inspection, and post-demo cleanup are **NOT YET EVALUATED**.
 
-Current hardening checkpoint: `ae8b9f8 input: lease window handoff across processes`
+Current restart checkpoint: `f3dce8d task: resume known bank return start`
+
+Current input candidate: a source-blind 500 ms owned-button settlement bound,
+conservative post-activation classification, and persisted EngineFrame truth.
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -114,15 +119,26 @@ Regression command:
 - Every pointer transaction consumes only historical released-button bits at a
   pre-serial baseline, then requires two quiet physical-button samples. New or
   held activity blocks again around motion and activation. After Arduino
-  `MOUSE_UP`, a bounded settle attributes only that owned possibly delayed
-  Windows transition so a context row or next action does not mistake the
-  engine's own click for manual takeover. Final activation also requires the
-  exact pinned root HWND/PID from `WindowFromPoint`.
+  `MOUSE_UP`, a source-blind reader allows at most 500 ms for that button to
+  reach two consecutive all-clear samples. Other-button or persistent activity
+  blocks. The host reader sends no firmware command and does not renew the
+  one-second watchdog; existing STATUS/rearm/revalidation gates still apply.
+  Same-button human activity inside that window is inherently
+  source-indistinguishable. The final clear proof prevents residual held or
+  queued state from contaminating later input; it cannot undo a separate human
+  activation. Final activation also requires the exact pinned root HWND/PID
+  from `WindowFromPoint`.
 - Object aim points lie inside the viewport and the first present RuneLite API
   shape in clickbox -> convex hull -> canvas tile order. `canvasLocation` alone
   is not activation proof, and a present stronger shape cannot fall through.
 - `CoordinatedActionInterface` preserves exact post-move hover/menu/widget
   checks, context-row revalidation, and the verified bank-close Escape path.
+- If wire evidence shows that a semantic widget click, key, direct object click,
+  or final context row may have been written before an unsuccessful receipt,
+  `activation_attempted` blocks runtime retry and verification credit. A
+  preparatory right-click context opener alone is not the semantic action. The
+  conservative boolean is retained in the terminal EngineFrame/application
+  artifact alongside the unsuccessful receipt.
 - The deterministic pointer policy produces only bounded relative motion inside
   the verified canvas, with velocity/acceleration caps and target-aware braking.
 - The policy retains one exact target, while the coordinator binds activation to
@@ -359,6 +375,21 @@ the geometry condition and recovery behavior rather than source attribution.
   from the server" dialog. The cause is unproven; it prevented that run from
   producing a terminal gameplay receipt and is not evidence of an input-engine
   failure.
+- The unattended `f3dce8d` run lasted from `05:01:03Z` to `05:12:32Z`, made 71
+  action attempts and 1,939 observations, and reached the fresh outbound bank
+  route at `south_corridor_bridge`, step `10/19`. Transaction 71 attempted the
+  preparatory right-click context-menu opener: all 33 commands, including its
+  single `MOUSE_DOWN`/`MOUSE_UP`, were acknowledged, but Windows did not settle
+  the owned button inside the old 100 ms deadline. Whether the menu visibly
+  opened was not reobserved before failure. The semantic `Walk here` row
+  click was never sent. The acknowledged Escape cancellation and final `STOP_ALL`,
+  `DISARM`, safe zero-held `STATUS`, zero unresolved commands, and closed
+  ledger/backend all passed.
+- The user was asleep during that unattended failure, so the evidence does not
+  support manual interference as its cause. Windows button state remains
+  source-blind, and the artifact does not retain raw `GetAsyncKeyState` samples
+  or elapsed settle latency. It proves only that 100 ms was insufficient once;
+  the 500 ms candidate is covered offline but is not yet live-proven.
 - The current client log also contains unrelated/nonfatal startup and plugin
   noise: a reflective-access exception, repeated NpcAggroArea null-player
   subscriber exceptions during login-state transitions, World Hopper ping/DNS
@@ -429,6 +460,15 @@ the geometry condition and recovery behavior rather than source attribution.
   came from the configured external Gradle build directory. Focused tests also
   prove that cross-process lease contention cannot reach `SetWindowPos`, serial
   open, or input.
+- Current delayed-transition offline gate: 544 Python tests passed, including a
+  focused 148-test action/runtime/EngineFrame/application/Arduino suite; golden
+  replay passed 2/2; `python -m compileall`, `git diff --check`, `run.cmd test`,
+  catalog, profile-schema, and default-profile validation passed. A forced Java
+  rerun executed 76 tests across 8 suites with zero failures, errors, or skips
+  from the configured external Gradle build directory. Tests cover >100 ms
+  delayed owned state, 500 ms timeout, late other-button rejection, clear-streak
+  reset, source-blind same-button limits, and written/ambiguous/rejected/failed
+  widget and key activation evidence.
 - Current live handoff evidence: displaced saved-session login and displaced
   gameplay recovery subcriteria are PASS at the retained layout. Login is the
   stitched `31e1391` direct handoff plus current prompt/loaded and lease-test
@@ -439,6 +479,11 @@ the geometry condition and recovery behavior rather than source attribution.
   Its top-level BLOCKED status records only the deliberately short runtime
   expiring during the tenth attempt's verification; a complete cycle was not
   evaluated.
+- Latest live attempt at `f3dce8d`: the 11.5-minute run reached outbound step
+  `10/19` and then ended BLOCKED on the old 100 ms owned-button settlement
+  boundary before the semantic context-row click. Cleanup was fully safe. Its
+  SHA-256 is
+  `8F1DB084865262C58B322F6B52D0C439BE59611DAD7A0C5FFA70F40400242960`.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -454,11 +499,11 @@ the geometry condition and recovery behavior rather than source attribution.
 
 ## Remaining limitations and next work
 
-- A complete `ae8b9f8` default bank-and-return cycle is **NOT YET EVALUATED**.
-  The current short run proves external-cursor recovery and continued Tree
-  interactions, but does not reach banking, return, terminal `COMPLETE`, or the
-  live `Chatmenu` staircase prompt/option structure. Any mismatch remains
-  fail-closed.
+- A complete default bank-and-return cycle on the current delayed-transition
+  candidate is **NOT YET EVALUATED**. The `f3dce8d` attempt reached fresh
+  outbound step `10/19` but not terminal `COMPLETE`. The 500 ms bound must be
+  exercised once live; if the equivalent failure repeats, the next change is
+  elapsed/sample diagnostics rather than another blind deadline extension.
 - An async window-position request that misses its 750 ms convergence deadline
   cannot be canceled and may complete later. That attempt is terminal and sends
   no input; every later attempt rechecks exact geometry. Cross-monitor

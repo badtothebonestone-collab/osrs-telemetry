@@ -173,6 +173,7 @@ class EngineFrameTests(unittest.TestCase):
             last_verification=verification,
             last_execution_status="SENT",
             last_execution_reason="action_sent",
+            last_execution_activation_attempted=True,
             last_execution_receipt=_receipt(),
         )
 
@@ -192,10 +193,19 @@ class EngineFrameTests(unittest.TestCase):
         self.assertIn("keyHoldMillis", payload["decision"]["action"])
         self.assertEqual(1511, payload["pendingVerification"]["itemId"])
         self.assertEqual(0, payload["pendingVerification"]["beforeQuantity"])
+        self.assertTrue(payload["lastExecution"]["activationAttempted"])
         self.assertTrue(payload["cleanup"]["safe"])
         with self.assertRaises(FrozenInstanceError):
             frame.stage = EngineStage.TERMINAL  # type: ignore[misc]
         self.assertFalse(hasattr(frame, "__dict__"))
+
+    def test_activation_attempted_requires_a_boolean(self) -> None:
+        with self.assertRaises(TypeError):
+            EngineFramePublisher().publish(
+                stage=EngineStage.EXECUTED,
+                task=TaskSnapshot("probe", TaskStatus.RUNNING, "ready"),
+                last_execution_activation_attempted=1,  # type: ignore[arg-type]
+            )
 
     def test_typed_verification_failure_is_serialized(self) -> None:
         failure = VerificationResult(

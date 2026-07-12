@@ -78,10 +78,12 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   Gameplay may reconcile only a one-device-pixel AWT/native outer-origin
   quantization when outer size is exact and the native client still contains
   the exact canvas; login outer/client geometry remains exact.
-  Windows button state is aggregate and source-blind. Correlate and consume only
-  the bounded transition immediately following the coordinator's acknowledged
-  click; coincident same-button human input remains best effort, while other,
-  new, or persistent manual activity blocks.
+  Windows button state is aggregate and source-blind. Run a bounded post-ACK
+  attribution window after the coordinator's acknowledged click; same-button
+  human input anywhere in that window is
+  source-indistinguishable and best effort. Other-button or persistent activity
+  blocks there; the ordinary quiet proofs still block fresh activity outside
+  that window.
 - A firmware MOVE acknowledgement proves command handling, not Windows cursor
   arrival. An unchanged ordinary sample receives one additional poll and then
   the existing plan-settle sample before any new MOVE. Never stack another MOVE

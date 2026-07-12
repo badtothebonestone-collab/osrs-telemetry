@@ -194,6 +194,14 @@ runtime logic.
   `SetWindowPos`, without opening or arming hardware, and remains held through
   backend close. Contention yields a safely-unsent empty-ledger receipt and
   cannot mutate RuneLite while another process owns an input transaction.
+- **D034 - Owned Windows button release may lag its firmware ACK:** after an
+  acknowledged `MOUSE_UP`, the source-blind Windows button reader may wait up to
+  500 ms for the owned button to reach two consecutive all-clear samples. The
+  reader sends no firmware command and does not renew the one-second watchdog;
+  existing STATUS/rearm/revalidation gates remain mandatory before later input.
+  It rejects any other button immediately and still blocks a persistent owned
+  state. Same-button human input anywhere in the window remains inherently
+  source-indistinguishable and best effort.
 
 ## Phases and acceptance
 
@@ -554,7 +562,7 @@ runtime logic.
   and does not invalidate the cycle, but the manual demonstration then required
   a fresh client.
 
-### Current external-cursor proof at `ae8b9f8`
+### Current external-cursor proof line
 
 - Checkpoints `9e29487` through `ae8b9f8` make a quiet cursor takeover a
   freshly observed state instead of remembered coordinates. They add the
@@ -598,7 +606,7 @@ runtime logic.
   continued-gameplay subcriterion above, but a complete current-checkpoint
   bank-and-return cycle remains **NOT YET EVALUATED**. An earlier post-fix
   long-run attempt was also interrupted by a real server disconnect.
-- Current offline gate: 527 Python tests, golden replay 2/2, compile/diff,
+- Historical `ae8b9f8` offline gate: 527 Python tests, golden replay 2/2, compile/diff,
   facade catalog/schema/profile validation, and `run.cmd test` pass. A forced
   Java rerun executed 76/76 tests across 8 suites with zero failures, errors,
   or skips from the configured external build directory.
@@ -606,6 +614,33 @@ runtime logic.
   evidence-backed host fixes, and explicitly authorized wrapper execution are
   allowed without weakening Arduino-only input, loaded-scene, identity,
   geometry, fail-closed, or cleanup invariants.
+- Checkpoints through `f3dce8d` added delayed-cursor settlement/replan handling
+  and exact known bank-area restart reconciliation without historical cycle
+  credit. The unattended `f3dce8d` run then made 71 action attempts and 1,939
+  observations over 11.5 minutes, reached the fresh outbound bank route at
+  `south_corridor_bridge` (`10/19`), and exposed one new boundary: the
+  preparatory right-click's acknowledged Windows transition did not settle
+  inside the old 100 ms window. The semantic `Walk here` row click was never
+  sent; Escape cancellation and final firmware/ledger cleanup were fully safe.
+  The user was asleep, so the evidence does not support manual interference.
+- D034 extends only that source-blind owned-button window to 500 ms, retains two
+  final all-clear samples, rejects other-button and persistent activity, sends
+  no firmware command while waiting, and cannot renew the one-second watchdog.
+  It does not claim to distinguish same-button human input. If the live failure
+  repeats, diagnostics must retain elapsed/sample evidence before any further
+  timing change.
+- Unsuccessful execution now separately records whether the semantic click/key
+  may have been written. Runtime blocks attempted activation without retry,
+  safely-unsent discard, verifier credit, or an unsent semantic claim. A
+  context opener alone does not cross that boundary. The boolean is persisted
+  in EngineFrame/application JSON for one diagnostic truth.
+- Current offline gate: 544 Python tests, focused boundary suite 148/148, golden
+  replay 2/2, compile/diff, facade catalog/schema/profile validation, and
+  `run.cmd test` pass. A forced Java rerun executed 76/76 tests across 8 suites
+  from the configured external build directory.
+- A complete cycle on this current candidate remains **NOT YET EVALUATED**. The
+  next live action is one bounded Arduino-only retry from fresh loaded-scene
+  evidence, followed by explicit cleanup proof.
 
 ## Prohibited during this mission
 
@@ -624,9 +659,9 @@ runtime logic.
 - The original baseline corpus is stitched and lacks complete raw observations,
   command/ACK receipts, and immutable source provenance. The 2026-07-11 PID
   `11440` proof is a separate uninterrupted pre-audit cycle with its terminal
-  JSON and final receipt preserved in ignored local evidence. Current
-  `ae8b9f8` evidence proves displaced login and gameplay recovery, but not a
-  complete bank-and-return cycle.
+  JSON and final receipt preserved in ignored local evidence. Current evidence
+  proves displaced login/gameplay recovery and progress to outbound step
+  `10/19`, but not a complete current-candidate bank-and-return cycle.
 - Each new source tick can still force a world-model refresh behind a 250 ms
   provider wait. The final pre/post observations were fresh, coherent, and
   warning-free, but this remains a latency cost rather than a second cache.

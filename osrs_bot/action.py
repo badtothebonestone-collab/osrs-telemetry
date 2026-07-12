@@ -14,6 +14,7 @@ from .input_coordinator import (
     InputReceipt,
     InputValidation,
     MouseButton,
+    PointerActivation,
     PointerActivationDecision,
 )
 from .model import (
@@ -75,6 +76,7 @@ class ExecutionResult:
     receipt: InputReceipt | None = None
     safety_checks: tuple[SafetyCheck, ...] = ()
     unsent_disposition: UnsentActionDisposition = UnsentActionDisposition.NONE
+    activation_attempted: bool = False
 
     def __post_init__(self) -> None:
         if self.local_status not in {"BLOCKED", "ERROR", "NO_ACTION"}:
@@ -90,6 +92,15 @@ class ExecutionResult:
         if not isinstance(self.unsent_disposition, UnsentActionDisposition):
             raise TypeError(
                 "unsent_disposition must be an UnsentActionDisposition"
+            )
+        if not isinstance(self.activation_attempted, bool):
+            raise TypeError("activation_attempted must be bool")
+        if (
+            self.activation_attempted
+            and self.unsent_disposition is not UnsentActionDisposition.NONE
+        ):
+            raise ValueError(
+                "an attempted activation cannot have an unsent disposition"
             )
 
     @property
@@ -200,9 +211,14 @@ class CoordinatedActionInterface:
 
         last_observation: list[Observation | None] = [None]
         unsent_disposition = UnsentActionDisposition.NONE
+        activation_attempted = False
         try:
             if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
-                receipt, unsent_disposition = self._execute_adaptive_target(
+                (
+                    receipt,
+                    unsent_disposition,
+                    activation_attempted,
+                ) = self._execute_adaptive_target(
                     action,
                     observation,
                     last_observation,
@@ -215,12 +231,20 @@ class CoordinatedActionInterface:
                     last_observation,
                     safety_checks,
                 )
+                activation_attempted = self._command_may_have_taken_effect(
+                    receipt,
+                    "MOUSE_DOWN",
+                )
             elif action.kind is ActionKind.PRESS_KEY:
                 receipt = self._execute_key(
                     action,
                     observation,
                     last_observation,
                     safety_checks,
+                )
+                activation_attempted = self._command_may_have_taken_effect(
+                    receipt,
+                    "KEY_PRESS",
                 )
             else:
                 raise ValueError(f"unsupported live action: {action.kind.value}")
@@ -240,7 +264,11 @@ class CoordinatedActionInterface:
                 safety_checks=tuple(safety_checks),
             )
 
-        if receipt.failure_kind is InputFailureKind.CURSOR_STATE_INVALIDATED:
+        if (
+            not activation_attempted
+            and receipt.failure_kind
+            is InputFailureKind.CURSOR_STATE_INVALIDATED
+        ):
             unsent_disposition = (
                 UnsentActionDisposition.CURSOR_STATE_INVALIDATED
             )
@@ -258,6 +286,7 @@ class CoordinatedActionInterface:
             receipt=receipt,
             safety_checks=tuple(safety_checks),
             unsent_disposition=unsent_disposition,
+            activation_attempted=activation_attempted,
         )
 
     def _execute_direct_pointer(
@@ -294,12 +323,13 @@ class CoordinatedActionInterface:
         observation: Observation,
         last_observation: list[Observation | None],
         safety_checks: list[SafetyCheck],
-    ) -> tuple[InputReceipt, UnsentActionDisposition]:
+    ) -> tuple[InputReceipt, UnsentActionDisposition, bool]:
         intent = self._pointer_intent(action, observation)
         canvas = self._required_canvas(observation)
         context_minimum_tick: list[int | None] = [None]
         row_minimum_tick: list[int | None] = [None]
         validated_action: list[Action | None] = [None]
+        selected_activation: list[PointerActivation | None] = [None]
         target_evidence_invalidated = [False]
 
         def decide_activation(
@@ -319,11 +349,13 @@ class CoordinatedActionInterface:
             )
             last_observation[0] = post
             if hover.allowed:
+                selected_activation[0] = PointerActivation.DIRECT_LEFT
                 return PointerActivationDecision.direct(hover.reason)
             if context.allowed:
                 if post.menu_client_tick is None:
                     return PointerActivationDecision.deny("menu_sample_missing")
                 context_minimum_tick[0] = post.menu_client_tick
+                selected_activation[0] = PointerActivation.CONTEXT_MENU
                 return PointerActivationDecision.context(context.reason)
             if hover.reason in TARGET_EVIDENCE_INVALIDATION_REASONS:
                 target_evidence_invalidated[0] = True
@@ -397,7 +429,38 @@ class CoordinatedActionInterface:
             if target_evidence_invalidated[0] and receipt.status == "BLOCKED"
             else UnsentActionDisposition.NONE
         )
-        return receipt, disposition
+        required_mouse_downs = (
+            1
+            if selected_activation[0] is PointerActivation.DIRECT_LEFT
+            else (
+                2
+                if selected_activation[0] is PointerActivation.CONTEXT_MENU
+                else 0
+            )
+        )
+        activation_attempted = bool(
+            required_mouse_downs
+            and self._command_write_count(receipt, "MOUSE_DOWN")
+            >= required_mouse_downs
+        )
+        return receipt, disposition, activation_attempted
+
+    @staticmethod
+    def _command_write_count(receipt: InputReceipt, command: str) -> int:
+        return sum(
+            evidence.command == command
+            and evidence.write_ok
+            and evidence.status != "REJECTED"
+            for evidence in receipt.commands
+        )
+
+    @classmethod
+    def _command_may_have_taken_effect(
+        cls,
+        receipt: InputReceipt,
+        command: str,
+    ) -> bool:
+        return cls._command_write_count(receipt, command) > 0
 
     def _execute_key(
         self,

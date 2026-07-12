@@ -279,8 +279,12 @@ class EngineApplicationTests(unittest.TestCase):
         _wait_for_lifecycle(application, LifecycleState.PAUSED)
         runtime = factory.runtimes[0]
         original = runtime._frame_publisher
-        first = original.latest()
-        self.assertIsNotNone(first)
+        published = original.latest()
+        self.assertIsNotNone(published)
+        first = replace(
+            published,
+            last_execution_activation_attempted=True,
+        )
         second = replace(first, sequence=first.sequence + 1, blocker="later blocker")
 
         class AlternatingPublisher:
@@ -299,6 +303,11 @@ class EngineApplicationTests(unittest.TestCase):
             runtime._frame_publisher = original
 
         self.assertIs(first, snapshot.engine_frame)
+        self.assertTrue(
+            snapshot.to_dict()["engineFrame"]["lastExecution"][
+                "activationAttempted"
+            ]
+        )
         self.assertEqual((), snapshot.blockers)
         self.assertEqual(1, publisher.calls)
         application.request_safe_stop(run_id)

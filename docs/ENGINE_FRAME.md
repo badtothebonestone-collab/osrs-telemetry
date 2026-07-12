@@ -28,7 +28,8 @@ the FSM advances.
 - the last immutable `InputReceipt`, including its exact reason, typed
   `failureKind` (such as `cursor_state_invalidated`), complete command/ACK
   ledger, `safelyUnsent` pre-serial proof when applicable, and final firmware
-  status; and
+  status; the adjacent `activationAttempted` boolean preserves the conservative
+  may-have-activated classification even when that receipt is unsuccessful; and
 - cleanup evidence derived from command/ACK counts and final firmware state,
   plus the current blocker.
 

@@ -249,6 +249,58 @@ def input_receipt(
     )
 
 
+def input_receipt_with_command_outcome(
+    *,
+    mode: str,
+    commands: tuple[str, ...],
+    command: str,
+    command_status: str,
+    write_ok: bool,
+) -> InputReceipt:
+    """Build one unsuccessful receipt with exact uncertain/rejected wire proof."""
+
+    evidence = [
+        command_evidence(index, name)
+        for index, name in enumerate(commands, start=1)
+    ]
+    target_index = next(
+        index for index, item in enumerate(evidence) if item.command == command
+    )
+    acknowledged = command_status == "REJECTED"
+    evidence[target_index] = replace(
+        evidence[target_index],
+        status=command_status,
+        write_ok=write_ok,
+        ack_received=acknowledged,
+        accepted=False,
+        response_token="ERR" if acknowledged else None,
+        payload_token="REJECTED" if acknowledged else None,
+        error=f"forced_{command_status.lower()}",
+    )
+    reason = f"forced_{command.lower()}_{command_status.lower()}"
+    return InputReceipt(
+        transaction_id="input-00000001",
+        mode=mode,
+        intent_ids=("gameplay",),
+        status="ERROR",
+        reason=reason,
+        connected=True,
+        arm_acknowledged=True,
+        stop_all_acknowledged=True,
+        disarm_acknowledged=True,
+        firmware_status_acknowledged=True,
+        firmware_status=FirmwareSafetyStatus(False, 0, 0),
+        commands=tuple(evidence),
+        unresolved_command_count=0,
+        failed_command_count=1,
+        ack_missing_count=0 if acknowledged else 1,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+        errors=(reason,),
+    )
+
+
 class FakeCoordinator:
     def __init__(
         self,
@@ -1126,6 +1178,94 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertFalse(result.cleanup_confirmed)
         self.assertIs(forced, result.receipt)
 
+    def test_post_activation_error_is_not_misclassified_as_unsent(self) -> None:
+        reason = "owned_mouse_transition_unproved_after_activation"
+        direct_error = input_receipt(
+            mode="adaptive_pointer",
+            status="ERROR",
+            reason=reason,
+        )
+
+        direct = self.interface(
+            FakeCoordinator(forced_receipt=direct_error),
+            self.hover,
+        ).execute(tree_action(), self.pre)
+
+        self.assertEqual("ERROR", direct.status)
+        self.assertFalse(direct.sent)
+        self.assertTrue(direct.activation_attempted)
+        self.assertIs(
+            UnsentActionDisposition.NONE,
+            direct.unsent_disposition,
+        )
+
+        generic = MenuEntry(
+            "Chop",
+            "Tree",
+            "GAME_OBJECT_FIRST_OPTION",
+            1276,
+            49,
+            52,
+        )
+        exact = MenuEntry(
+            "Chop down",
+            "Tree",
+            "GAME_OBJECT_SECOND_OPTION",
+            1276,
+            49,
+            52,
+        )
+        context_candidate = observation(menus=(generic, exact), tick=11)
+        opener_error = input_receipt(
+            mode="adaptive_pointer",
+            status="ERROR",
+            reason=reason,
+            commands=(
+                "ARM",
+                "MOVE",
+                "MOUSE_DOWN",
+                "MOUSE_UP",
+                "KEY_PRESS",
+                "STOP_ALL",
+                "DISARM",
+                "STATUS",
+            ),
+        )
+
+        opener = self.interface(
+            FakeCoordinator(forced_receipt=opener_error),
+            context_candidate,
+        ).execute(tree_action(), self.pre)
+
+        self.assertEqual("ERROR", opener.status)
+        self.assertFalse(opener.sent)
+        self.assertFalse(opener.activation_attempted)
+
+        row_error = input_receipt(
+            mode="adaptive_pointer",
+            status="ERROR",
+            reason=reason,
+            commands=(
+                "ARM",
+                "MOVE",
+                "MOUSE_DOWN",
+                "MOUSE_UP",
+                "MOVE",
+                "MOUSE_DOWN",
+                "MOUSE_UP",
+                "STOP_ALL",
+                "DISARM",
+                "STATUS",
+            ),
+        )
+        row = self.interface(
+            FakeCoordinator(forced_receipt=row_error),
+            context_candidate,
+        ).execute(tree_action(), self.pre)
+
+        self.assertFalse(row.sent)
+        self.assertTrue(row.activation_attempted)
+
     def test_preflight_block_and_wait_never_submit_input(self) -> None:
         coordinator = FakeCoordinator()
         stale = replace(self.pre, fresh=False)
@@ -1188,6 +1328,99 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(InputPurpose.GAMEPLAY_KEY, intent.purpose)
         self.assertEqual("1", intent.key)
         self.assertEqual(501, fresh.widgets.dialogue_client_tick)
+
+    def test_unsuccessful_key_receipt_classifies_written_activation_only(self) -> None:
+        widgets = WidgetObservation(
+            bank_known=True,
+            dialogue_active=True,
+            dialogue_type="options",
+            dialogue_prompt="Climb up or down the stairs?",
+            dialogue_options=(DialogueOption(1, "1", "Climb up the stairs."),),
+            dialogue_number_keys=True,
+            dialogue_client_tick=500,
+        )
+        pre = replace(self.pre, widgets=widgets)
+        fresh = replace(
+            self.hover,
+            widgets=replace(widgets, dialogue_client_tick=501),
+        )
+        action = Action(
+            ActionKind.PRESS_KEY,
+            "Choose climb up",
+            10,
+            option="Climb up the stairs.",
+            target_key="dialogue:1",
+            target_name="Climb up the stairs.",
+            target_id=1,
+            key="1",
+            source_session_id="session-1",
+            source_dialogue_client_tick=500,
+            task_constraints=TaskConstraints(
+                dialogue=DialogueOptionConstraint(
+                    "climb", "Climb up the stairs.", 1, "1"
+                )
+            ),
+        )
+        commands = ("ARM", "KEY_PRESS", "STOP_ALL", "DISARM", "STATUS")
+        cases = (
+            (
+                "accepted_then_later_error",
+                input_receipt(
+                    mode="key",
+                    status="ERROR",
+                    reason="later_execution_proof_failed",
+                    commands=commands,
+                ),
+                True,
+            ),
+            (
+                "ack_timeout_after_write",
+                input_receipt_with_command_outcome(
+                    mode="key",
+                    commands=commands,
+                    command="KEY_PRESS",
+                    command_status="ACK_TIMEOUT_OR_READ_FAIL",
+                    write_ok=True,
+                ),
+                True,
+            ),
+            (
+                "firmware_rejected",
+                input_receipt_with_command_outcome(
+                    mode="key",
+                    commands=commands,
+                    command="KEY_PRESS",
+                    command_status="REJECTED",
+                    write_ok=True,
+                ),
+                False,
+            ),
+            (
+                "write_failed",
+                input_receipt_with_command_outcome(
+                    mode="key",
+                    commands=commands,
+                    command="KEY_PRESS",
+                    command_status="WRITE_FAIL",
+                    write_ok=False,
+                ),
+                False,
+            ),
+        )
+
+        for name, receipt, expected in cases:
+            with self.subTest(name=name):
+                result = self.interface(
+                    FakeCoordinator(forced_receipt=receipt),
+                    fresh,
+                ).execute(action, pre)
+                self.assertEqual("ERROR", result.status)
+                self.assertFalse(result.sent)
+                self.assertIs(expected, result.activation_attempted)
+                self.assertIs(
+                    UnsentActionDisposition.NONE,
+                    result.unsent_disposition,
+                )
 
     def test_camera_key_rechecks_pose_and_submits_bounded_hold(self) -> None:
         source = WorldPoint(3195, 3248, 0)
@@ -1386,6 +1619,116 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(InputPurpose.GAMEPLAY_WIDGET, intent.purpose)
         self.assertEqual(ScreenBounds(107, 107, 7, 7), intent.target_bounds)
         self.assertEqual(outer, intent.reacquisition_bounds)
+
+    def test_unsuccessful_widget_receipt_classifies_written_activation_only(self) -> None:
+        close = WidgetTarget(
+            "Close bank",
+            True,
+            POINT,
+            ScreenBounds(100, 100, 30, 30),
+        )
+        widgets = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            close_bank=close,
+        )
+        location = WorldPoint(3208, 3220, 2)
+        pre = replace(
+            observation(menus=(), widgets=widgets, location=location),
+            client_window_bounds=ScreenBounds(40, 40, 520, 430),
+        )
+        fresh = observation(
+            menus=(),
+            tick=11,
+            widgets=widgets,
+            location=location,
+        )
+        action = Action(
+            ActionKind.CLICK_WIDGET,
+            "Close bank",
+            10,
+            option="Close bank",
+            target_key=CLOSE_BANK_WIDGET_KEY,
+            target_name="Close bank",
+            target_id=0,
+            screen_point=POINT,
+            source_menu_client_tick=1010,
+            source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint(
+                    "bank", 2, True, require_readable=True
+                )
+            ),
+        )
+        commands = (
+            "ARM",
+            "MOVE",
+            "MOUSE_DOWN",
+            "MOUSE_UP",
+            "STOP_ALL",
+            "DISARM",
+            "STATUS",
+        )
+        cases = (
+            (
+                "accepted_then_later_error",
+                input_receipt(
+                    mode="pointer",
+                    status="ERROR",
+                    reason="later_execution_proof_failed",
+                    commands=commands,
+                ),
+                True,
+            ),
+            (
+                "ack_timeout_after_write",
+                input_receipt_with_command_outcome(
+                    mode="pointer",
+                    commands=commands,
+                    command="MOUSE_DOWN",
+                    command_status="ACK_TIMEOUT_OR_READ_FAIL",
+                    write_ok=True,
+                ),
+                True,
+            ),
+            (
+                "firmware_rejected",
+                input_receipt_with_command_outcome(
+                    mode="pointer",
+                    commands=commands,
+                    command="MOUSE_DOWN",
+                    command_status="REJECTED",
+                    write_ok=True,
+                ),
+                False,
+            ),
+            (
+                "write_failed",
+                input_receipt_with_command_outcome(
+                    mode="pointer",
+                    commands=commands,
+                    command="MOUSE_DOWN",
+                    command_status="WRITE_FAIL",
+                    write_ok=False,
+                ),
+                False,
+            ),
+        )
+
+        for name, receipt, expected in cases:
+            with self.subTest(name=name):
+                result = self.interface(
+                    FakeCoordinator(forced_receipt=receipt),
+                    fresh,
+                ).execute(action, pre)
+                self.assertEqual("ERROR", result.status)
+                self.assertFalse(result.sent)
+                self.assertIs(expected, result.activation_attempted)
+                self.assertIs(
+                    UnsentActionDisposition.NONE,
+                    result.unsent_disposition,
+                )
 
     def test_typed_cursor_state_failure_maps_without_reason_inference(self) -> None:
         reason = "cursor_changed_after_pointer_validation"

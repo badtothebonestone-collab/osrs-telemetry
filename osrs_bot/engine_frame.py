@@ -192,6 +192,7 @@ class EngineFrame:
     last_verification: VerificationResult | None = None
     last_execution_status: str | None = None
     last_execution_reason: str | None = None
+    last_execution_activation_attempted: bool = False
     last_execution_receipt: InputReceipt | None = None
     cleanup: CleanupEvidence = CleanupEvidence(
         False, False, False, False, False, False, False, False, False, False
@@ -229,6 +230,8 @@ class EngineFrame:
             self.last_execution_receipt, InputReceipt
         ):
             raise TypeError("last_execution_receipt must be InputReceipt or None")
+        if not isinstance(self.last_execution_activation_attempted, bool):
+            raise TypeError("last_execution_activation_attempted must be bool")
         if not isinstance(self.cleanup, CleanupEvidence):
             raise TypeError("cleanup must be CleanupEvidence")
         for name in ("last_execution_status", "last_execution_reason", "blocker"):
@@ -306,6 +309,7 @@ class EngineFrame:
             "lastExecution": {
                 "status": self.last_execution_status,
                 "reason": self.last_execution_reason,
+                "activationAttempted": self.last_execution_activation_attempted,
                 "receipt": (
                     self.last_execution_receipt.to_dict()
                     if self.last_execution_receipt is not None
@@ -337,6 +341,7 @@ class EngineFramePublisher:
         last_verification: VerificationResult | None = None,
         last_execution_status: str | None = None,
         last_execution_reason: str | None = None,
+        last_execution_activation_attempted: bool = False,
         last_execution_receipt: InputReceipt | None = None,
         blocker: str | None = None,
     ) -> EngineFrame:
@@ -354,6 +359,9 @@ class EngineFramePublisher:
                 last_verification=last_verification,
                 last_execution_status=last_execution_status,
                 last_execution_reason=last_execution_reason,
+                last_execution_activation_attempted=(
+                    last_execution_activation_attempted
+                ),
                 last_execution_receipt=last_execution_receipt,
                 cleanup=CleanupEvidence.from_receipt(last_execution_receipt),
                 blocker=blocker,

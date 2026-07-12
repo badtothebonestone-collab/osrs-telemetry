@@ -211,7 +211,13 @@ shared safety constants.
 
 Each public safety evaluation records its actual ordered subchecks. The action
 layer carries those values, including bounded retry attempts, in
-`ExecutionResult`; diagnostics do not rerun SafetyGate.
+`ExecutionResult`; diagnostics do not rerun SafetyGate. If a semantic click or
+key may have been written before the coordinator proof fails, the result marks
+`activation_attempted`. Runtime blocks that post-activation proof failure
+without retry or verification credit. The unsuccessful receipt keeps
+`ExecutionResult.sent` false, while the separate activation flag prevents the
+runtime's terminal reason or unsent disposition from claiming the semantic
+action was safely unsent. The same flag is retained in EngineFrame diagnostics.
 
 `CoordinatedActionInterface` and the saved-session login helper submit typed
 approved intents to the sole `InputCoordinator`. The coordinator then:
@@ -258,7 +264,9 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    derives that row from RuneLite menu geometry, moves to it, revalidates the
    fresh open-menu sample and pointer, and clicks it once;
 12. otherwise clicks the exact default entry or submits the one approved key,
-    then consumes only its own acknowledged Windows button transition;
+    then uses a bounded source-blind attribution window and two all-clear
+    samples for the acknowledged Windows button transition; same-button human
+    input during that window remains inherently best effort;
 13. records each command and firmware acknowledgement without truncation; and
 14. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
    wire `STATUS` proving disarmed with zero held inputs before closing.

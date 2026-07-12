@@ -41,6 +41,17 @@ replans also pin PID/session identity and require a newer gameplay tick;
 repetition blocks rather than silently following manual cursor motion or stale
 target evidence.
 
+If wire evidence shows that the semantic click or key may already have been
+written but the coordinator receipt is unsuccessful, `ExecutionResult` marks
+that activation attempt. Runtime blocks it as a post-activation proof failure:
+it never calls the safely-unsent discard seam, never retries, never grants
+verification progress, and its terminal reason/disposition never claims that
+the semantic action was safely unsent. `ExecutionResult.sent` remains false
+because the coordinator receipt was not fully successful; the separate
+`activation_attempted` truth prevents that value from authorizing a retry. A
+preparatory context-menu opener alone is not the semantic action; only the final
+row click counts for this classification.
+
 ## Safety ownership
 
 `SafetyGate` evaluates two deliberately separate layers:

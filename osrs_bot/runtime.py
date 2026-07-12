@@ -46,6 +46,7 @@ def _may_replan_unsent_action(
     receipt = execution.receipt
     return bool(
         consecutive_replans < MAX_CONSECUTIVE_UNSENT_REPLANS
+        and not execution.activation_attempted
         and execution.status == "BLOCKED"
         and receipt is not None
         and (
@@ -301,6 +302,7 @@ class RuntimeResult:
                 "status": self.execution.status,
                 "reason": self.execution.reason,
                 "unsentDisposition": self.execution.unsent_disposition.value,
+                "activationAttempted": self.execution.activation_attempted,
                 "preMoveTick": self.execution.pre_move_tick,
                 "postMoveTick": self.execution.post_move_tick,
                 "stopAllConfirmed": self.execution.stop_all_confirmed,
@@ -651,6 +653,34 @@ class TaskRuntime:
                     execution.post_move_tick,
                 )
                 self._frame_pending = verification
+            elif execution.activation_attempted:
+                self._publish_frame(
+                    EngineStage.EXECUTED,
+                    task_snapshot=task_snapshot,
+                )
+                failure_reason = (
+                    "post-activation execution proof failed: "
+                    f"{execution.status.lower()}: {execution.reason}"
+                )
+                transition_error = self._apply_failure(failure_reason)
+                reason = (
+                    "action activation was attempted but execution proof "
+                    f"failed: {execution.reason}"
+                )
+                if transition_error is not None:
+                    reason += (
+                        "; task failure transition failed: "
+                        f"{transition_error}"
+                    )
+                return self._result(
+                    "BLOCKED",
+                    reason,
+                    observations,
+                    actions,
+                    last_tick,
+                    decision,
+                    execution,
+                )
             elif _may_replan_unsent_action(
                 execution,
                 consecutive_unsent_replans,
@@ -994,6 +1024,11 @@ class TaskRuntime:
                 ),
                 last_execution_reason=(
                     execution.reason if execution is not None else None
+                ),
+                last_execution_activation_attempted=(
+                    execution.activation_attempted
+                    if execution is not None
+                    else False
                 ),
                 last_execution_receipt=receipt,
                 blocker=blocker if blocker is not None else snapshot.blocker,
