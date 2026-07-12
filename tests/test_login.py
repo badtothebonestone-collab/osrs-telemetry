@@ -503,12 +503,32 @@ class LoginDetectionTests(unittest.TestCase):
             )
             >= len(anchors) - 1
         }
+        expected_anchor_candidate_count = sum(
+            sum(
+                bool(mask[(origin_y + anchor_y) * width + origin_x + anchor_x])
+                for anchor_x, anchor_y in anchors
+            )
+            >= len(anchors) - 1
+            for origin_y in range(origin_height)
+            for origin_x in range(origin_width)
+        )
+        expected_first_candidate_count = sum(
+            bool(
+                mask[
+                    (origin_y + anchors[0][1]) * width
+                    + origin_x
+                    + anchors[0][0]
+                ]
+            )
+            for origin_y in range(origin_height)
+            for origin_x in range(origin_width)
+        )
 
         (
             candidate_origins,
-            anchor_scores,
-            _candidate_count,
-            _first_candidate_count,
+            _anchor_scores,
+            candidate_count,
+            first_candidate_count,
         ) = (
             login_module._anchor_candidate_origins(
                 image,
@@ -517,14 +537,15 @@ class LoginDetectionTests(unittest.TestCase):
                 origin_height=origin_height,
             )
         )
-        actual = {
-            (origin_x, origin_y)
-            for origin_x, origin_y in candidate_origins
-            if anchor_scores[origin_y * origin_width + origin_x]
-            >= len(anchors) - 1
-        }
+        actual = set(candidate_origins)
 
         self.assertEqual(expected, actual)
+        self.assertEqual(expected_anchor_candidate_count, candidate_count)
+        self.assertEqual(expected_first_candidate_count, first_candidate_count)
+        self.assertEqual(
+            tuple(sorted(candidate_origins, key=lambda point: (point[1], point[0]))),
+            candidate_origins,
+        )
         self.assertNotIn(first_dark_origin, candidate_origins)
         self.assertIn(accepted_origin, candidate_origins)
 
@@ -543,6 +564,23 @@ class LoginDetectionTests(unittest.TestCase):
                 origin_width=width - 2,
                 origin_height=height - 2,
             )
+
+    def test_nonbinary_first_anchor_is_not_admitted_or_counted(self) -> None:
+        anchors = tuple((x, y) for y in range(3) for x in range(3))
+        image = Image.frombytes("L", (3, 3), bytes((2, *([1] * 7), 0)))
+
+        origins, _scores, candidate_count, first_candidate_count = (
+            login_module._anchor_candidate_origins(
+                image,
+                anchors,
+                origin_width=1,
+                origin_height=1,
+            )
+        )
+
+        self.assertEqual((), origins)
+        self.assertEqual(1, candidate_count)
+        self.assertEqual(0, first_candidate_count)
 
     def test_first_anchor_candidate_density_fails_closed_before_set_growth(self) -> None:
         width, height = 360, 120
@@ -842,10 +880,17 @@ class LoginDetectionTests(unittest.TestCase):
             bright_calls += 1
             return original_bright(pixel)
 
-        with patch.object(login_module, "_bright", side_effect=counting_bright):
+        original_bright_mask = login_module._bright_mask
+        with (
+            patch.object(login_module, "_bright", side_effect=counting_bright),
+            patch.object(
+                login_module,
+                "_bright_mask",
+                wraps=original_bright_mask,
+            ) as bright_mask,
+        ):
             match = login_module._best_template_match(screenshot, template, zone)
 
-        zone_pixels = (zone[2] - zone[0]) * (zone[3] - zone[1])
         scaled_template_work = sum(
             needle.width * needle.height
             + len(range(0, needle.height, max(1, needle.height // 20)))
@@ -853,7 +898,27 @@ class LoginDetectionTests(unittest.TestCase):
             for needle in login_module._scaled_templates(template)
         )
         self.assertIsNone(match)
-        self.assertEqual(zone_pixels + scaled_template_work, bright_calls)
+        bright_mask.assert_called_once()
+        self.assertEqual(scaled_template_work, bright_calls)
+
+    def test_pillow_bright_mask_matches_scalar_predicate_exactly(self) -> None:
+        values = (0, 114, 115, 144, 145, 164, 165, 190, 255)
+        pixels = [
+            (red, green, blue)
+            for red in values
+            for green in values
+            for blue in values
+        ]
+        image = Image.new("RGB", (len(pixels), 1))
+        image.putdata(pixels)
+
+        mask = login_module._bright_mask(image)
+
+        self.assertEqual("L", mask.mode)
+        self.assertEqual(
+            [int(login_module._bright(pixel)) for pixel in pixels],
+            list(mask.get_flattened_data()),
+        )
 
     def test_oversized_template_search_zone_fails_closed(self) -> None:
         screenshot = Image.new("RGB", (3000, 2000), (20, 20, 20))

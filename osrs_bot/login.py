@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from PIL import Image, ImageChops, ImageGrab, ImageStat
+from PIL import Image, ImageChops, ImageGrab, ImageMath, ImageStat
 
 from .input_coordinator import (
     ApprovedPointerIntent,
@@ -133,6 +133,25 @@ def _bright(pixel: tuple[int, int, int]) -> bool:
     return red >= 165 and green >= 145 and blue >= 115 and (red + green + blue) >= 500
 
 
+def _bright_mask(image: Image.Image) -> Image.Image:
+    """Return the scalar bright predicate as a bounded 0/1 Pillow mask."""
+
+    red, green, blue = (
+        band.convert("I") for band in image.convert("RGB").split()
+    )
+    return ImageMath.lambda_eval(
+        lambda bands: (
+            (bands["red"] >= 165)
+            & (bands["green"] >= 145)
+            & (bands["blue"] >= 115)
+            & ((bands["red"] + bands["green"] + bands["blue"]) >= 500)
+        ),
+        red=red,
+        green=green,
+        blue=blue,
+    ).convert("L")
+
+
 def _even_samples(points: list[tuple[int, int]], limit: int) -> tuple[tuple[int, int], ...]:
     if len(points) <= limit:
         return tuple(points)
@@ -158,8 +177,8 @@ def _anchor_candidate_origins(
     origin_y: int = 0,
     candidate_limit: int = MAX_TEMPLATE_ANCHOR_CANDIDATES,
     first_candidate_limit: int = MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE,
-) -> tuple[set[tuple[int, int]], bytes, int, int]:
-    """Return the original first-anchor superset plus its fast hit scores."""
+) -> tuple[tuple[tuple[int, int], ...], bytes, int, int]:
+    """Return the bounded first-anchor/hit-gate intersection plus scores."""
 
     if (
         bright_mask.mode != "L"
@@ -207,14 +226,18 @@ def _anchor_candidate_origins(
         raise LoginCandidateLimitError(
             "login template first-anchor candidates exceed the bounded limit"
         )
-    origins: set[tuple[int, int]] = set()
-    score_index = first_anchor_bytes.find(b"\x01")
-    while score_index >= 0:
-        local_y, local_x = divmod(score_index, origin_width)
-        origins.add((origin_x + local_x, origin_y + local_y))
-        score_index = first_anchor_bytes.find(b"\x01", score_index + 1)
+    origins: list[tuple[int, int]] = []
+    for anchor_hits in range(len(anchors) - 1, len(anchors) + 1):
+        encoded_hits = bytes((anchor_hits,))
+        score_index = score_bytes.find(encoded_hits)
+        while score_index >= 0:
+            if first_anchor_bytes[score_index] == 1:
+                local_y, local_x = divmod(score_index, origin_width)
+                origins.append((origin_x + local_x, origin_y + local_y))
+            score_index = score_bytes.find(encoded_hits, score_index + 1)
+    origins.sort(key=lambda point: (point[1], point[0]))
     return (
-        origins,
+        tuple(origins),
         score_bytes,
         anchor_candidate_count,
         first_anchor_candidate_count,
@@ -235,7 +258,6 @@ def _best_template_match(
     """Locate the white OSRS label shape without trusting background animation."""
 
     haystack = image.convert("RGB")
-    hay_pixels = haystack.load()
     left, top, right, bottom = zone
     best: tuple[int, int, int, int, float] | None = None
     if (
@@ -256,16 +278,8 @@ def _best_template_match(
     # the firmware lease without narrowing the full ambiguity scan.
     zone_width = right - left
     zone_height = bottom - top
-    bright_mask = bytearray((right - left) * (bottom - top))
-    for screen_y in range(top, bottom):
-        mask_row_offset = (screen_y - top) * zone_width
-        for screen_x in range(left, right):
-            if _bright(hay_pixels[screen_x, screen_y]):
-                mask_index = mask_row_offset + screen_x - left
-                bright_mask[mask_index] = 1
-    bright_mask_image = Image.frombytes(
-        "L", (zone_width, zone_height), bytes(bright_mask)
-    )
+    bright_mask_image = _bright_mask(haystack.crop(zone))
+    bright_mask = bytearray(bright_mask_image.tobytes())
     remaining_anchor_candidates = anchor_candidate_limit
     remaining_first_anchor_candidates = first_anchor_candidate_limit
 
