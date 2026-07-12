@@ -54,7 +54,6 @@ _CURSOR_WINDOW_HANDOFF_RECT_TIMEOUT_SECONDS = 0.75
 _CURSOR_WINDOW_HANDOFF_RECT_POLL_SECONDS = 0.01
 _OWNED_MOUSE_TRANSITION_SETTLE_SECONDS = 0.01
 _OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS = 0.10
-_OWNED_MOUSE_TRANSITION_MIN_SAMPLES = 3
 _PHYSICAL_MOUSE_QUIET_DWELL_SECONDS = 0.01
 _PHYSICAL_MOUSE_QUIET_CLEAR_SAMPLES = 2
 _COMMAND_TERMINAL_STATUSES = {
@@ -639,28 +638,29 @@ def _consume_owned_mouse_transition(
         deadline = time.monotonic() + _OWNED_MOUSE_TRANSITION_TIMEOUT_SECONDS
         states = _physical_mouse_button_states(user32)
         owned_transition_consumed = False
-        sample_count = 0
+        consecutive_clear_samples = 0
         while True:
-            sample_count += 1
-            if any(state & 0x8000 for state in states.values()):
-                raise ArduinoHIDError(
-                    "physical mouse button held during owned transition consumption"
-                )
             if any(
-                vk != owned_vk and state & 0x0001
+                vk != owned_vk and state & 0x8001
                 for vk, state in states.items()
             ):
                 raise ArduinoHIDError(
                     "unowned physical mouse activity during owned transition consumption"
                 )
-            expected_transition = bool(states[owned_vk] & 0x0001)
+            owned_state = states[owned_vk]
+            expected_transition = bool(owned_state & 0x0001)
             owned_transition_consumed = (
                 owned_transition_consumed or expected_transition
             )
-            if (
-                sample_count >= _OWNED_MOUSE_TRANSITION_MIN_SAMPLES
-                and not expected_transition
-            ):
+            if owned_state & 0x8001:
+                consecutive_clear_samples = 0
+            else:
+                consecutive_clear_samples += 1
+            if consecutive_clear_samples >= 2:
+                if time.monotonic() > deadline:
+                    raise ArduinoHIDError(
+                        "owned physical mouse transition did not settle before deadline"
+                    )
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:

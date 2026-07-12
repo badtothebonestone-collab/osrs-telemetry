@@ -172,10 +172,14 @@ physical mouse must remain quiet, and `WindowFromPoint` must still resolve to
 the exact pinned root HWND/PID. The validator must still prove the exact
 hover/default action or open-menu row at that actual point. After each
 acknowledged Arduino `MOUSE_UP`, one bounded reader attributes and consumes only
-that owned button's possibly delayed Windows transition, rejects other/held/new
-activity, and leaves an all-clear baseline for a context row or the next
-transaction. Context-menu failures attempt an acknowledged Escape before normal
-cleanup.
+that owned button's possibly delayed Windows transition. It permits that owned
+button's high/low state to settle for at most 100 ms, requires two consecutive
+all-clear samples, and rejects any other-button or persistent owned-button
+activity. Windows exposes aggregate, source-blind button state, so attribution
+of a coincident human transition on the same button is necessarily best effort;
+the bounded window and final all-clear proof prevent that ambiguity from leaking
+into a context row or the next transaction. Context-menu failures attempt an
+acknowledged Escape before normal cleanup.
 
 The coordinator treats the firmware watchdog as a short activation lease. It
 checks or explicitly refreshes that lease before each lane-specific validator,

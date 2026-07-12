@@ -582,13 +582,63 @@ class OwnedMouseTransitionTests(unittest.TestCase):
         self.assertIs(False, result["ownedTransitionConsumed"])
         self.assertIs(True, result["activityClear"])
 
-    def test_owned_high_bit_is_rejected(self) -> None:
+    def test_transient_owned_high_then_low_then_two_clear_samples_passes(self) -> None:
         user32 = _FakeWindowHandoffUser32(
-            button_state_sequences={0x01: [0x8000]}
+            button_state_sequences={
+                0x01: [0x8000, 0x0001, 0x0000, 0x0000]
+            }
         )
 
-        with self.assertRaisesRegex(ArduinoHIDError, "button held"):
+        with patch.object(arduino_module.time, "sleep") as settle:
+            result = self._consume(user32)
+
+        self.assertIs(True, result["ownedTransitionConsumed"])
+        self.assertIs(True, result["buttonsUp"])
+        self.assertIs(True, result["activityClear"])
+        self.assertEqual(3, settle.call_count)
+
+    def test_transient_owned_high_without_visible_low_bit_can_settle(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={0x01: [0x8000, 0x0000, 0x0000]}
+        )
+
+        with patch.object(arduino_module.time, "sleep") as settle:
+            result = self._consume(user32)
+
+        self.assertIs(False, result["ownedTransitionConsumed"])
+        self.assertIs(True, result["buttonsUp"])
+        self.assertIs(True, result["activityClear"])
+        self.assertEqual(2, settle.call_count)
+
+    def test_delayed_owned_high_resets_clear_streak(self) -> None:
+        user32 = _FakeWindowHandoffUser32(
+            button_state_sequences={
+                0x01: [0x0000, 0x8000, 0x0000, 0x0000]
+            }
+        )
+
+        with patch.object(arduino_module.time, "sleep") as settle:
+            result = self._consume(user32)
+
+        self.assertIs(False, result["ownedTransitionConsumed"])
+        self.assertIs(True, result["activityClear"])
+        self.assertEqual(3, settle.call_count)
+
+    def test_persistent_owned_high_bit_times_out(self) -> None:
+        user32 = _FakeWindowHandoffUser32(button_states={0x01: 0x8000})
+
+        with (
+            patch.object(
+                arduino_module.time,
+                "monotonic",
+                side_effect=(0.0, 0.0, 0.10),
+            ),
+            patch.object(arduino_module.time, "sleep") as settle,
+            self.assertRaisesRegex(ArduinoHIDError, "did not settle before deadline"),
+        ):
             self._consume(user32)
+
+        settle.assert_called_once()
 
     def test_other_button_low_and_high_bits_are_rejected(self) -> None:
         cases = (
@@ -602,7 +652,7 @@ class OwnedMouseTransitionTests(unittest.TestCase):
                 _FakeWindowHandoffUser32(
                     button_state_sequences={0x04: [0x8000]}
                 ),
-                "button held",
+                "unowned physical mouse activity",
             ),
         )
         for user32, reason in cases:
@@ -619,7 +669,7 @@ class OwnedMouseTransitionTests(unittest.TestCase):
             result = self._consume(user32)
 
         self.assertIs(True, result["ownedTransitionConsumed"])
-        self.assertEqual(2, settle.call_count)
+        self.assertEqual(3, settle.call_count)
 
     def test_delayed_other_button_transition_is_rejected(self) -> None:
         user32 = _FakeWindowHandoffUser32(
