@@ -6,13 +6,11 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.ToIntFunction;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
@@ -33,7 +31,6 @@ import net.runelite.api.Perspective;
 import net.runelite.api.Player;
 import net.runelite.api.Point;
 import net.runelite.api.Scene;
-import net.runelite.api.Skill;
 import net.runelite.api.Tile;
 import net.runelite.api.TileItem;
 import net.runelite.api.TileObject;
@@ -108,22 +105,13 @@ class WorldModelCache
 					payloads.put(need, summaryPayload(snapshot));
 					break;
 				case "scene_object_census":
-					payloads.put(need, objectCensusPayload(snapshot, options, ObjectFilter.SCENE));
+					payloads.put(need, objectCensusPayload(snapshot, options));
 					break;
 				case "actor_census":
 					payloads.put(need, actorCensusPayload(snapshot, options));
 					break;
 				case "collision_window":
 					payloads.put(need, collisionWindowPayload(snapshot, options, true));
-					break;
-				case "route_object_census":
-					payloads.put(need, objectCensusPayload(snapshot, options, ObjectFilter.ROUTE));
-					break;
-				case "resource_object_census":
-					payloads.put(need, objectCensusPayload(snapshot, options, ObjectFilter.RESOURCE));
-					break;
-				case "service_object_census":
-					payloads.put(need, objectCensusPayload(snapshot, options, ObjectFilter.SERVICE));
 					break;
 				case "pathing_frontier":
 					payloads.put(need, pathingFrontierPayload(snapshot, options));
@@ -133,9 +121,6 @@ class WorldModelCache
 					break;
 				case "minimap_projection":
 					payloads.put(need, minimapProjectionPayload(snapshot, options));
-					break;
-				case "view_quality_inputs":
-					payloads.put(need, viewQualityInputsPayload(snapshot, options));
 					break;
 				case "full_world_model_debug":
 					payloads.put(need, fullDebugPayload(snapshot, options));
@@ -395,7 +380,6 @@ class WorldModelCache
 					snapshot.playerSceneY = local.getSceneY();
 				}
 			}
-			snapshot.woodcuttingLevel = safeSkillLevel(client, Skill.WOODCUTTING);
 			captureInventory(client, snapshot);
 			captureScene(client, snapshot, options);
 			captureActors(client, snapshot, options);
@@ -646,65 +630,7 @@ class WorldModelCache
 		record.put("localX", local == null ? null : local.getX());
 		record.put("localY", local == null ? null : local.getY());
 		record.put("distanceToPlayer", distanceToPlayer(snapshot, worldX, worldY, plane));
-		classifyObject(record, snapshot);
 		return record;
-	}
-
-	private void classifyObject(Map<String, Object> record, Snapshot snapshot)
-	{
-		String name = lower(record.get("name"));
-		List<String> actions = stringList(record.get("actions"));
-		String actionText = String.join("|", actions).toLowerCase(Locale.ROOT);
-		boolean hasChop = actionText.contains("chop");
-		boolean isTreeNamed = name.contains("tree");
-		boolean isOak = name.contains("oak");
-		boolean isDeadTree = name.contains("dead tree");
-		boolean isBasicTree = isTreeNamed && !isOak && !name.contains("willow") && !name.contains("maple") && !name.contains("yew") && !name.contains("magic");
-		boolean resource = hasChop || isTreeNamed;
-		boolean service = name.contains("bank") || name.contains("deposit") || actionText.contains("bank") || actionText.contains("deposit");
-		boolean route = name.contains("stair") || name.contains("ladder") || name.contains("door") || name.contains("gate") || name.contains("trapdoor")
-				|| actionText.contains("climb") || actionText.contains("open") || actionText.contains("close");
-		record.put("resourceCandidate", resource);
-		record.put("serviceObjectCandidate", service);
-		record.put("routeObjectCandidate", route || service);
-		record.put("resourceType", resource ? (isOak ? "oak" : (isDeadTree ? "dead_tree" : (isBasicTree ? "basic_tree" : "tree"))) : null);
-		record.put("routeObjectKind", service ? "service_object" : (route ? "route_transition" : null));
-		record.put("serviceObjectType", serviceObjectType(name, actionText));
-		if (resource)
-		{
-			int requiredLevel = isOak ? 15 : 1;
-			boolean known = snapshot.woodcuttingLevel != null;
-			boolean met = requiredLevel <= 1 || (known && snapshot.woodcuttingLevel >= requiredLevel);
-			record.put("requiredSkill", "WOODCUTTING");
-			record.put("requiredLevel", requiredLevel);
-			record.put("playerLevelKnown", known);
-			record.put("playerLevel", snapshot.woodcuttingLevel);
-			record.put("levelRequirementMet", met);
-			record.put("visibleButNotExecutable", !met);
-			record.put("targetTemporarilyLockedReason", met ? null : "insufficient_woodcutting_level");
-			record.put("futureEligibleWhenLevelMet", !met);
-		}
-	}
-
-	private String serviceObjectType(String name, String actions)
-	{
-		if (name.contains("deposit") || actions.contains("deposit"))
-		{
-			return "deposit_box";
-		}
-		if (name.contains("banker"))
-		{
-			return "banker_npc";
-		}
-		if (name.contains("chest"))
-		{
-			return "bank_chest";
-		}
-		if (name.contains("bank") || actions.contains("bank"))
-		{
-			return "bank_booth";
-		}
-		return null;
 	}
 
 	private void addGroundItems(Client client, Snapshot snapshot, Tile tile, int maxGroundItems)
@@ -1051,12 +977,12 @@ class WorldModelCache
 		return payload;
 	}
 
-	private Map<String, Object> objectCensusPayload(Snapshot snapshot, QueryOptions options, ObjectFilter filter)
+	private Map<String, Object> objectCensusPayload(Snapshot snapshot, QueryOptions options)
 	{
 		List<Map<String, Object>> filtered = new ArrayList<>();
 		for (Map<String, Object> object : snapshot.objects)
 		{
-			if (!filter.accept(object) || !matchesQueryFilters(object, options))
+			if (!matchesQueryFilters(object, options))
 			{
 				continue;
 			}
@@ -1069,14 +995,14 @@ class WorldModelCache
 		List<Map<String, Object>> items = new ArrayList<>();
 		for (Map<String, Object> item : filtered.subList(0, limit))
 		{
-			items.add(compactObject(item, options, filter != ObjectFilter.SCENE));
+			items.add(compactObject(item, options));
 		}
 		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("schema", filter.schema);
+		payload.put("schema", "scene_object_census.v1");
 		payload.put("sourceSchema", SCHEMA);
 		payload.put("tick", snapshot.sourceTick);
 		payload.put("clientTick", snapshot.clientTick);
-		payload.put("filter", filter.name().toLowerCase(Locale.ROOT));
+		payload.put("filter", "scene");
 		payload.put("count", filtered.size());
 		payload.put("returned", items.size());
 		payload.put("capHit", filtered.size() > items.size());
@@ -1158,26 +1084,16 @@ class WorldModelCache
 
 	private Map<String, Object> compactObject(Map<String, Object> source, QueryOptions options)
 	{
-		return compactObject(source, options, true);
-	}
-
-	private Map<String, Object> compactObject(
-			Map<String, Object> source,
-			QueryOptions options,
-			boolean includeSemanticFacts)
-	{
 		return compactObjectRow(
 				source,
 				options.includeProjection
 						|| options.fullDebug
-						|| source.get("projection") instanceof Map,
-				includeSemanticFacts);
+						|| source.get("projection") instanceof Map);
 	}
 
 	static Map<String, Object> compactObjectRow(
 			Map<String, Object> source,
-			boolean includeProjection,
-			boolean includeSemanticFacts)
+			boolean includeProjection)
 	{
 		Map<String, Object> object = new LinkedHashMap<>();
 		for (String key : List.of(
@@ -1201,30 +1117,6 @@ class WorldModelCache
 			if (source.containsKey(key))
 			{
 				object.put(key, source.get(key));
-			}
-		}
-		if (includeSemanticFacts)
-		{
-			for (String key : List.of(
-				"resourceCandidate",
-				"resourceType",
-				"routeObjectCandidate",
-				"routeObjectKind",
-				"serviceObjectCandidate",
-				"serviceObjectType",
-				"requiredSkill",
-				"requiredLevel",
-				"playerLevelKnown",
-				"playerLevel",
-				"levelRequirementMet",
-				"targetTemporarilyLockedReason",
-				"visibleButNotExecutable",
-				"futureEligibleWhenLevelMet"))
-			{
-				if (source.containsKey(key))
-				{
-					object.put(key, source.get(key));
-				}
 			}
 		}
 		if (includeProjection)
@@ -1466,59 +1358,6 @@ class WorldModelCache
 		return payload;
 	}
 
-	private Map<String, Object> viewQualityInputsPayload(Snapshot snapshot, QueryOptions options)
-	{
-		List<Map<String, Object>> resources = filterObjects(snapshot.objects, ObjectFilter.RESOURCE, options);
-		List<Map<String, Object>> services = filterObjects(snapshot.objects, ObjectFilter.SERVICE, options);
-		List<Map<String, Object>> routes = filterObjects(snapshot.objects, ObjectFilter.ROUTE, options);
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("schema", "view_quality_inputs.v1");
-		payload.put("cameraYaw", snapshot.cameraYaw);
-		payload.put("cameraPitch", snapshot.cameraPitch);
-		payload.put("viewport", viewportPayload(snapshot));
-		payload.put("resource", viewLaneSummary(resources));
-		payload.put("service", viewLaneSummary(services));
-		payload.put("route", viewLaneSummary(routes));
-		payload.put("projectionAudit", projectionAuditPayload(snapshot));
-		return payload;
-	}
-
-	private Map<String, Object> viewLaneSummary(List<Map<String, Object>> objects)
-	{
-		int visible = 0;
-		int actionable = 0;
-		int edge = 0;
-		int locked = 0;
-		for (Map<String, Object> object : objects)
-		{
-			Map<String, Object> projection = mapValue(object.get("projection"));
-			if (booleanValue(projection.get("visible")) || booleanValue(projection.get("onScreen")))
-			{
-				visible++;
-			}
-			if (booleanValue(projection.get("actionableByCanvas")))
-			{
-				actionable++;
-			}
-			if (doubleValue(projection.get("edgeDistancePx"), 999999.0) < 12.0)
-			{
-				edge++;
-			}
-			if (booleanValue(object.get("visibleButNotExecutable")))
-			{
-				locked++;
-			}
-		}
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("candidateCount", objects.size());
-		payload.put("visibleCount", visible);
-		payload.put("actionableCount", actionable);
-		payload.put("edgeClippedCount", edge);
-		payload.put("visibleButNotExecutableCount", locked);
-		payload.put("topObjects", compactObjects(objects, 12));
-		return payload;
-	}
-
 	private Map<String, Object> fullDebugPayload(Snapshot snapshot, QueryOptions options)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
@@ -1598,32 +1437,14 @@ class WorldModelCache
 	private Map<String, Object> objectSummaryPayload(Snapshot snapshot)
 	{
 		Map<String, Integer> byKind = new LinkedHashMap<>();
-		int resource = 0;
-		int service = 0;
-		int route = 0;
 		for (Map<String, Object> object : snapshot.objects)
 		{
 			String kind = stringValue(object.get("kind"));
 			byKind.put(kind, byKind.getOrDefault(kind, 0) + 1);
-			if (booleanValue(object.get("resourceCandidate")))
-			{
-				resource++;
-			}
-			if (booleanValue(object.get("serviceObjectCandidate")))
-			{
-				service++;
-			}
-			if (booleanValue(object.get("routeObjectCandidate")))
-			{
-				route++;
-			}
 		}
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("total", snapshot.objects.size());
 		payload.put("byKind", byKind);
-		payload.put("resourceCandidateCount", resource);
-		payload.put("serviceObjectCandidateCount", service);
-		payload.put("routeObjectCandidateCount", route);
 		payload.put("objectCensusCapHit", snapshot.objectCensusCapHit);
 		payload.put("groundItemCount", snapshot.groundItems.size());
 		payload.put("groundItemCapHit", snapshot.groundItemCapHit);
@@ -1666,38 +1487,9 @@ class WorldModelCache
 		return viewport;
 	}
 
-	private List<Map<String, Object>> filterObjects(List<Map<String, Object>> objects, ObjectFilter filter, QueryOptions options)
-	{
-		List<Map<String, Object>> filtered = new ArrayList<>();
-		for (Map<String, Object> object : objects)
-		{
-			if (filter.accept(object) && matchesQueryFilters(object, options))
-			{
-				filtered.add(object);
-			}
-		}
-		return filtered;
-	}
-
 	private boolean matchesQueryFilters(Map<String, Object> object, QueryOptions options)
 	{
 		if (options.plane != null && intValue(object.get("plane"), -1) != options.plane)
-		{
-			return false;
-		}
-		if (!options.nameContains.isBlank() && !lower(object.get("name")).contains(options.nameContains))
-		{
-			return false;
-		}
-		if (!options.actionContains.isBlank())
-		{
-			String actions = String.join("|", stringList(object.get("actions"))).toLowerCase(Locale.ROOT);
-			if (!actions.contains(options.actionContains))
-			{
-				return false;
-			}
-		}
-		if (!options.objectKinds.isEmpty() && !options.objectKinds.contains(lower(object.get("kind"))))
 		{
 			return false;
 		}
@@ -1804,18 +1596,6 @@ class WorldModelCache
 			ItemComposition definition = client.getItemDefinition(id);
 			String name = definition == null ? null : definition.getName();
 			return name == null || name.isBlank() || "null".equalsIgnoreCase(name) ? null : name;
-		}
-		catch (RuntimeException e)
-		{
-			return null;
-		}
-	}
-
-	private Integer safeSkillLevel(Client client, Skill skill)
-	{
-		try
-		{
-			return client.getRealSkillLevel(skill);
 		}
 		catch (RuntimeException e)
 		{
@@ -2185,56 +1965,6 @@ class WorldModelCache
 		return Math.max(0L, (System.nanoTime() - startNanos) / 1_000_000L);
 	}
 
-	private enum ObjectFilter
-	{
-		SCENE("scene_object_census.v1")
-		{
-			@Override
-			boolean accept(Map<String, Object> object)
-			{
-				return true;
-			}
-		},
-		ROUTE("route_object_census.v1")
-		{
-			@Override
-			boolean accept(Map<String, Object> object)
-			{
-				return booleanValueStatic(object.get("routeObjectCandidate"));
-			}
-		},
-		RESOURCE("resource_object_census.v1")
-		{
-			@Override
-			boolean accept(Map<String, Object> object)
-			{
-				return booleanValueStatic(object.get("resourceCandidate"));
-			}
-		},
-		SERVICE("service_object_census.v1")
-		{
-			@Override
-			boolean accept(Map<String, Object> object)
-			{
-				return booleanValueStatic(object.get("serviceObjectCandidate"));
-			}
-		};
-
-		private final String schema;
-
-		ObjectFilter(String schema)
-		{
-			this.schema = schema;
-		}
-
-		abstract boolean accept(Map<String, Object> object);
-
-		private static boolean booleanValueStatic(Object value)
-		{
-			return value instanceof Boolean && (Boolean) value;
-		}
-	}
-
 	private static class ProjectionBudget
 	{
 		private final int max;
@@ -2294,7 +2024,6 @@ class WorldModelCache
 		private Integer viewportYOffset;
 		private Integer canvasWidth;
 		private Integer canvasHeight;
-		private Integer woodcuttingLevel;
 		private int sceneMinX;
 		private int sceneMaxX;
 		private int sceneMinY;
@@ -2369,9 +2098,6 @@ class WorldModelCache
 		private Integer plane;
 		private WorldTile center;
 		private WorldTile destination;
-		private String nameContains = "";
-		private String actionContains = "";
-		private final Set<String> objectKinds = new HashSet<>();
 		private boolean includeProjection;
 		private boolean includeCollision;
 		private boolean includeActors;
@@ -2391,15 +2117,6 @@ class WorldModelCache
 			options.plane = integerValue(first(worldModel.get("plane"), requestValue(request, "plane")));
 			options.center = tileFrom(first(worldModel.get("centerWorldLocation"), requestValue(request, "centerWorldLocation")));
 			options.destination = tileFrom(first(worldModel.get("destinationWorldLocation"), requestValue(request, "destinationWorldLocation")));
-			options.nameContains = stringValueStatic(first(worldModel.get("nameContains"), requestValue(request, "nameContains"))).toLowerCase(Locale.ROOT);
-			options.actionContains = stringValueStatic(first(worldModel.get("actionContains"), requestValue(request, "actionContains"))).toLowerCase(Locale.ROOT);
-			for (Object item : listFrom(worldModel.get("objectKinds")))
-			{
-				if (item != null)
-				{
-					options.objectKinds.add(String.valueOf(item).trim().toLowerCase(Locale.ROOT));
-				}
-			}
 			options.includeProjection = booleanValueStatic(first(worldModel.get("includeProjection"), requestValue(request, "includeProjection")));
 			options.includeCollision = booleanValueStatic(first(worldModel.get("includeCollision"), requestValue(request, "includeCollision")))
 					|| (needs != null && needs.contains("collision_window"));
@@ -2407,7 +2124,7 @@ class WorldModelCache
 					|| (needs != null && needs.contains("actor_census"));
 			options.forceRefresh = booleanValueStatic(worldModel.get("forceRefresh"));
 			options.fullDebug = needs != null && needs.contains("full_world_model_debug");
-			options.needsProjectionAudit = needs != null && (needs.contains("projection_audit") || needs.contains("view_quality_inputs"));
+			options.needsProjectionAudit = needs != null && needs.contains("projection_audit");
 			if (options.fullDebug)
 			{
 				options.includeProjection = true;
@@ -2458,12 +2175,6 @@ class WorldModelCache
 		private static Map<String, Object> mapFrom(Object value)
 		{
 			return value instanceof Map ? (Map<String, Object>) value : Map.of();
-		}
-
-		@SuppressWarnings("unchecked")
-		private static List<Object> listFrom(Object value)
-		{
-			return value instanceof List ? (List<Object>) value : List.of();
 		}
 
 		private static Object requestValue(Map<String, Object> request, String key)
@@ -2520,9 +2231,5 @@ class WorldModelCache
 			return value instanceof Boolean && (Boolean) value;
 		}
 
-		private static String stringValueStatic(Object value)
-		{
-			return value == null ? "" : String.valueOf(value);
-		}
 	}
 }

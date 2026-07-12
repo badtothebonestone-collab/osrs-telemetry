@@ -1,4 +1,4 @@
-"""Minimal OSRS woodcut-and-bank vertical slice."""
+"""Small modular OSRS automation engine."""
 
 from .model import Observation
 

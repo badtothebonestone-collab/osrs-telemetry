@@ -19,11 +19,11 @@
     "availableFacts": ["baseline", "inventory", "activity", "bank_ui", "dialogue_state"],
     "unavailableFacts": [],
     "facts": {
-      "baseline": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695000000Z", "available": true, "errors": [], "sizeBytes": 1},
-      "inventory": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695100000Z", "available": true, "errors": [], "sizeBytes": 1},
-      "activity": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695200000Z", "available": true, "errors": [], "sizeBytes": 1},
-      "bank_ui": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695300000Z", "available": true, "errors": [], "sizeBytes": 1},
-      "dialogue_state": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695400000Z", "available": true, "errors": [], "sizeBytes": 1}
+      "baseline": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695000000Z", "available": true, "errors": [], "sizeBytes": 583},
+      "inventory": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695100000Z", "available": true, "errors": [], "sizeBytes": 264},
+      "activity": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695200000Z", "available": true, "errors": [], "sizeBytes": 102},
+      "bank_ui": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695300000Z", "available": true, "errors": [], "sizeBytes": 311},
+      "dialogue_state": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695400000Z", "available": true, "errors": [], "sizeBytes": 59}
     }
   },
   "freshness": {
@@ -135,8 +135,8 @@
       "schema": "client_tick_hot.v1",
       "postMenuSortTail": []
     },
-    "resource_object_census": {
-      "schema": "resource_object_census.v1",
+    "scene_object_census": {
+      "schema": "scene_object_census.v1",
       "sourceTick": 174,
       "capturedAtUtc": "2026-07-10T16:06:57.697000000Z",
       "sessionId": "fixture-session",
@@ -153,7 +153,6 @@
           "worldY": 3244,
           "plane": 0,
           "distanceToPlayer": 1,
-          "resourceCandidate": true,
           "projection": {
             "geometryAvailable": true,
             "onScreen": true,
@@ -175,7 +174,6 @@
           "worldY": 3244,
           "plane": 0,
           "distanceToPlayer": 1,
-          "resourceCandidate": true,
           "projection": {
             "geometryAvailable": true,
             "onScreen": true,
@@ -184,26 +182,7 @@
             "aimPoint": {"canvasX": 100, "canvasY": 50},
             "clickboxBounds": {"x": 80, "y": 30, "w": 40, "h": 60}
           }
-        }
-      ]
-    },
-    "route_object_census": {
-      "schema": "route_object_census.v1",
-      "sourceTick": 174,
-      "capturedAtUtc": "2026-07-10T16:06:57.697100000Z",
-      "sessionId": "fixture-session",
-      "clientProcessId": 1234,
-      "geometryFrameId": "fixture-geometry-174",
-      "objects": []
-    },
-    "service_object_census": {
-      "schema": "service_object_census.v1",
-      "sourceTick": 174,
-      "capturedAtUtc": "2026-07-10T16:06:57.697200000Z",
-      "sessionId": "fixture-session",
-      "clientProcessId": 1234,
-      "geometryFrameId": "fixture-geometry-174",
-      "objects": [
+        },
         {
           "objectKey": "bank:3208:3220:6943",
           "id": 6943,
@@ -214,7 +193,6 @@
           "worldY": 3220,
           "plane": 2,
           "distanceToPlayer": 1000000,
-          "serviceObjectCandidate": true,
           "projection": {
             "geometryAvailable": false,
             "onScreen": false,

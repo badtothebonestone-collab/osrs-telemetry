@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from .application import EngineApplication, LifecycleState
+from .application import EngineApplication, LifecycleState, SUPPORTED_TASK_ID
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .profile import DEFAULT_PROFILE
 
@@ -18,7 +18,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("catalog")
     schema = commands.add_parser("profile-schema")
-    schema.add_argument("--task-id", default="woodcut_bank")
+    schema.add_argument("--task-id", default=SUPPORTED_TASK_ID)
     schema.add_argument("--definition-id", default=DEFAULT_PROFILE.definition_id)
     validate = commands.add_parser("validate-profile")
     run = commands.add_parser("run")

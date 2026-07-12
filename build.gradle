@@ -49,6 +49,13 @@ tasks.register('run', JavaExec) {
 	args "--developer-mode", "--debug"
 }
 
+tasks.register('generateJavaSnapshotFixture', JavaExec) {
+	dependsOn tasks.named('testClasses')
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.osrstelemetry.JavaSnapshotFixture'
+	args file('tests/fixtures/java_snapshot_endpoint.json').absolutePath
+}
+
 tasks.register('shadowJar', Jar) {
 	dependsOn configurations.testRuntimeClasspath
 	manifest {

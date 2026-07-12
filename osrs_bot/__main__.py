@@ -16,7 +16,7 @@ from .verification import Verifier
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m osrs_bot",
-        description="Read the RuneLite sensor or run the one supported Lumbridge task.",
+        description="Read the RuneLite sensor or run the selected OSRS task binding.",
     )
     subparsers = parser.add_subparsers(dest="command")
     for name in ("observe", "task"):

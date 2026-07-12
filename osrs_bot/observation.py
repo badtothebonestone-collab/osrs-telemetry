@@ -415,12 +415,7 @@ def _menu_state(
 def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | None,
                     player_location: WorldPoint | None, requested_tiles: Mapping[str, WorldPoint]) -> tuple[NearbyObject, ...]:
     objects: dict[str, NearbyObject] = {}
-    for census_name in (
-        "scene_object_census",
-        "resource_object_census",
-        "route_object_census",
-        "service_object_census",
-    ):
+    for census_name in ("scene_object_census",):
         census = _payload(payloads, census_name)
         values = census.get("objects", []) if census else []
         if not isinstance(values, list):
@@ -446,10 +441,7 @@ def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | N
                                      name=name, kind=kind, actions=actions, location=location, distance=distance,
                                      geometry=_target_geometry(raw, transform),
                                      scene_x=_integer(raw.get("sceneX"), "object.sceneX", optional=True),
-                                     scene_y=_integer(raw.get("sceneY"), "object.sceneY", optional=True),
-                                     resource_candidate=_boolean(raw.get("resourceCandidate"), "object.resourceCandidate"),
-                                     route_candidate=_boolean(raw.get("routeObjectCandidate"), "object.routeObjectCandidate"),
-                                     service_candidate=_boolean(raw.get("serviceObjectCandidate"), "object.serviceObjectCandidate"))
+                                     scene_y=_integer(raw.get("sceneY"), "object.sceneY", optional=True))
             objects[key] = _merge_object(objects.get(key), candidate)
 
     tile_payload = _payload(payloads, "tile_projection")
@@ -481,8 +473,7 @@ def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | N
                                       distance=player_location.distance_to(location) if player_location else None,
                                       geometry=geometry,
                                       scene_x=_integer(raw.get("sceneX"), "tile.sceneX", optional=True),
-                                      scene_y=_integer(raw.get("sceneY"), "tile.sceneY", optional=True),
-                                      route_candidate=True)
+                                      scene_y=_integer(raw.get("sceneY"), "tile.sceneY", optional=True))
     return tuple(objects.values())
 
 def _merge_object(current: NearbyObject | None, new: NearbyObject) -> NearbyObject:
@@ -494,10 +485,7 @@ def _merge_object(current: NearbyObject | None, new: NearbyObject) -> NearbyObje
                         actions=tuple(dict.fromkeys((*current.actions, *new.actions))),
                         location=current.location or new.location, distance=min(distances) if distances else None,
                         geometry=geometry, scene_x=current.scene_x if current.scene_x is not None else new.scene_x,
-                        scene_y=current.scene_y if current.scene_y is not None else new.scene_y,
-                        resource_candidate=current.resource_candidate or new.resource_candidate,
-                        route_candidate=current.route_candidate or new.route_candidate,
-                        service_candidate=current.service_candidate or new.service_candidate)
+                        scene_y=current.scene_y if current.scene_y is not None else new.scene_y)
 
 def _widget_target(name: str, visible: bool, raw: Any, transform: _CanvasTransform | None) -> WidgetTarget | None:
     widget = _mapping(raw, f"bank_ui.{name}", optional=True)
@@ -688,9 +676,6 @@ def _dynamic_sources_coherent(
         "scene_object_census",
         "actor_census",
         "collision_window",
-        "resource_object_census",
-        "route_object_census",
-        "service_object_census",
         "tile_projection",
     ):
         payload = _payload(payloads, name)

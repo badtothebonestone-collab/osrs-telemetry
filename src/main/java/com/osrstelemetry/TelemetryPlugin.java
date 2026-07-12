@@ -18,6 +18,8 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -1304,6 +1306,34 @@ public class TelemetryPlugin extends Plugin
 
 	private void captureDialogueState(TickSnapshot snapshot)
 	{
+		snapshot.dialogueState = dialogueStateFromWidgets(
+				client.getWidget(InterfaceID.Chatmenu.UNIVERSE),
+				client.getWidget(InterfaceID.Chatmenu.OPTIONS),
+				new DialogueContinueSurface[] {
+						new DialogueContinueSurface(
+								client.getWidget(InterfaceID.ChatLeft.TEXT),
+								client.getWidget(InterfaceID.ChatLeft.CONTINUE)),
+						new DialogueContinueSurface(
+								client.getWidget(InterfaceID.ChatRight.TEXT),
+								client.getWidget(InterfaceID.ChatRight.CONTINUE)),
+						new DialogueContinueSurface(
+								client.getWidget(InterfaceID.ChatBoth.TEXT),
+								client.getWidget(InterfaceID.ChatBoth.CONTINUE)),
+						new DialogueContinueSurface(
+								client.getWidget(InterfaceID.Messagebox.TEXT),
+								client.getWidget(InterfaceID.Messagebox.CONTINUE))
+				},
+				clientTickId,
+				System.currentTimeMillis());
+	}
+
+	TickSnapshot.DialogueStateSnapshot dialogueStateFromWidgets(
+			Widget optionUniverse,
+			Widget optionContainer,
+			DialogueContinueSurface[] continueSurfaces,
+			long latestClientTick,
+			long wallTimeMillis)
+	{
 		TickSnapshot.DialogueStateSnapshot dialogue = new TickSnapshot.DialogueStateSnapshot();
 		dialogue.schema = "dialogue_state.v1";
 		dialogue.active = false;
@@ -1312,143 +1342,190 @@ public class TelemetryPlugin extends Plugin
 		dialogue.options = new TickSnapshot.DialogueOptionSnapshot[0];
 		dialogue.canUseNumberKeys = null;
 		dialogue.canUseSpaceContinue = null;
-		dialogue.source = "widget_root_scan";
-		dialogue.latestClientTick = clientTickId;
-		dialogue.wallTimeMillis = System.currentTimeMillis();
+		dialogue.source = "runelite_dialogue_widget_ids";
+		dialogue.latestClientTick = latestClientTick;
+		dialogue.wallTimeMillis = wallTimeMillis;
 
-		Widget[] roots = client.getWidgetRoots();
-		if (roots == null || roots.length == 0)
-		{
-			dialogue.widgetRootIds = new Integer[0];
-			snapshot.dialogueState = dialogue;
-			return;
-		}
-
-		List<Widget> visibleTextWidgets = new ArrayList<>();
 		List<Integer> rootIds = new ArrayList<>();
-		int[] visited = new int[] {0};
-		for (Widget root : roots)
+		addVisibleWidgetGroup(rootIds, optionUniverse);
+		if (continueSurfaces != null)
 		{
-			if (root == null)
+			for (DialogueContinueSurface surface : continueSurfaces)
 			{
-				continue;
-			}
-			if (widgetVisible(root))
-			{
-				int rootId = root.getId() >>> 16;
-				if (!rootIds.contains(rootId))
+				if (surface != null)
 				{
-					rootIds.add(rootId);
+					addVisibleWidgetGroup(rootIds, surface.textWidget);
+					addVisibleWidgetGroup(rootIds, surface.continueWidget);
 				}
-			}
-			collectVisibleTextWidgets(root, visibleTextWidgets, visited);
-			if (visited[0] >= DIALOGUE_WIDGET_SCAN_LIMIT)
-			{
-				break;
 			}
 		}
 		dialogue.widgetRootIds = rootIds.toArray(new Integer[0]);
 
-		String prompt = "";
-		List<TickSnapshot.DialogueOptionSnapshot> options = new ArrayList<>();
-		boolean clickToContinue = false;
-		for (Widget widget : visibleTextWidgets)
+		if (widgetVisible(optionUniverse) && widgetVisible(optionContainer))
 		{
-			String text = cleanWidgetText(widget.getText());
-			if (text.isEmpty())
+			List<Widget> optionRows = dialogueOptionRows(optionContainer);
+			if (!optionRows.isEmpty())
 			{
-				text = cleanWidgetText(widget.getName());
-			}
-			if (text.isEmpty())
-			{
-				continue;
-			}
-			String lower = text.toLowerCase(Locale.ROOT);
-			if (lower.contains("click here to continue"))
-			{
-				clickToContinue = true;
-			}
-			if (prompt.isEmpty() && isDialoguePromptText(lower))
-			{
-				prompt = text;
-			}
-			if (isDialogueOptionText(lower))
-			{
-				options.add(dialogueOptionSnapshot(options.size() + 1, widget, text));
+				List<TickSnapshot.DialogueOptionSnapshot> options = new ArrayList<>();
+				Set<String> optionKeys = new HashSet<>();
+				boolean numberKeysUnambiguous = optionRows.size() <= 9;
+				for (Widget optionRow : optionRows)
+				{
+					String text = widgetText(optionRow);
+					TickSnapshot.DialogueOptionSnapshot option = dialogueOptionSnapshot(
+							options.size() + 1,
+							optionRow,
+							text);
+					options.add(option);
+					if (option.key == null || !optionKeys.add(option.key))
+					{
+						numberKeysUnambiguous = false;
+					}
+				}
+				dialogue.active = true;
+				dialogue.type = "options";
+				dialogue.promptText = dialoguePromptText(
+						optionUniverse,
+						optionRows);
+				dialogue.options = options.toArray(new TickSnapshot.DialogueOptionSnapshot[0]);
+				dialogue.canUseNumberKeys = numberKeysUnambiguous;
+				dialogue.canUseSpaceContinue = false;
+				return dialogue;
 			}
 		}
 
-		if (!options.isEmpty())
+		DialogueContinueSurface observedContinue = null;
+		if (continueSurfaces != null)
 		{
-			dialogue.active = true;
-			dialogue.type = "options";
-			dialogue.promptText = prompt;
-			dialogue.options = options.toArray(new TickSnapshot.DialogueOptionSnapshot[0]);
-			dialogue.canUseNumberKeys = true;
-			dialogue.canUseSpaceContinue = false;
+			for (DialogueContinueSurface surface : continueSurfaces)
+			{
+				if (surface == null
+						|| !widgetVisible(surface.textWidget)
+						|| !widgetVisible(surface.continueWidget)
+						|| widgetText(surface.textWidget).isEmpty())
+				{
+					continue;
+				}
+				if (observedContinue != null)
+				{
+					return dialogue;
+				}
+				observedContinue = surface;
+			}
 		}
-		else if (clickToContinue)
+		if (observedContinue != null)
 		{
 			dialogue.active = true;
 			dialogue.type = "click_to_continue";
-			dialogue.promptText = prompt.isEmpty() ? "Click here to continue" : prompt;
+			dialogue.promptText = widgetText(observedContinue.textWidget);
 			dialogue.options = new TickSnapshot.DialogueOptionSnapshot[0];
 			dialogue.canUseNumberKeys = false;
 			dialogue.canUseSpaceContinue = true;
 		}
-
-		snapshot.dialogueState = dialogue;
+		return dialogue;
 	}
 
-	private void collectVisibleTextWidgets(Widget widget, List<Widget> output, int[] visited)
+	private void addVisibleWidgetGroup(List<Integer> rootIds, Widget widget)
 	{
-		if (widget == null || visited[0] >= DIALOGUE_WIDGET_SCAN_LIMIT)
+		if (!widgetVisible(widget))
 		{
 			return;
 		}
-		visited[0]++;
-		if (widgetVisible(widget))
+		int groupId = widget.getId() >>> 16;
+		if (!rootIds.contains(groupId))
 		{
-			String text = cleanWidgetText(widget.getText());
-			String name = cleanWidgetText(widget.getName());
-			if (!text.isEmpty() || !name.isEmpty())
+			rootIds.add(groupId);
+		}
+	}
+
+	private List<Widget> dialogueOptionRows(Widget optionContainer)
+	{
+		Widget[] children = optionContainer == null ? null : optionContainer.getChildren();
+		if (children == null
+				|| children.length == 0
+				|| children.length > DIALOGUE_WIDGET_SCAN_LIMIT)
+		{
+			return List.of();
+		}
+		List<Widget> rows = new ArrayList<>();
+		for (Widget child : children)
+		{
+			if (widgetVisible(child) && !widgetText(child).isEmpty())
 			{
-				output.add(widget);
+				rows.add(child);
 			}
-			Widget[] children = widget.getChildren();
-			if (children != null)
+		}
+		return rows;
+	}
+
+	private String dialoguePromptText(
+			Widget optionUniverse,
+			List<Widget> optionRows)
+	{
+		Set<Widget> excluded = Collections.newSetFromMap(new IdentityHashMap<>());
+		excluded.addAll(optionRows);
+		Set<Widget> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		List<String> promptParts = new ArrayList<>();
+		collectDialoguePromptText(
+				optionUniverse,
+				optionUniverse,
+				excluded,
+				visited,
+				promptParts);
+		return String.join(" | ", promptParts);
+	}
+
+	private void collectDialoguePromptText(
+			Widget widget,
+			Widget optionUniverse,
+			Set<Widget> excluded,
+			Set<Widget> visited,
+			List<String> output)
+	{
+		if (widget == null
+				|| visited.size() >= DIALOGUE_WIDGET_SCAN_LIMIT
+				|| !visited.add(widget)
+				|| excluded.contains(widget)
+				|| !widgetVisible(widget))
+		{
+			return;
+		}
+		if (widget != optionUniverse)
+		{
+			String text = widgetText(widget);
+			if (!text.isEmpty() && !output.contains(text))
 			{
-				for (Widget child : children)
-				{
-					collectVisibleTextWidgets(child, output, visited);
-					if (visited[0] >= DIALOGUE_WIDGET_SCAN_LIMIT)
-					{
-						break;
-					}
-				}
+				output.add(text);
+			}
+		}
+		Widget[] children = widget.getChildren();
+		if (children == null)
+		{
+			return;
+		}
+		for (Widget child : children)
+		{
+			collectDialoguePromptText(
+					child,
+					optionUniverse,
+					excluded,
+					visited,
+					output);
+			if (visited.size() >= DIALOGUE_WIDGET_SCAN_LIMIT)
+			{
+				return;
 			}
 		}
 	}
 
-	private boolean isDialoguePromptText(String lower)
+	private String widgetText(Widget widget)
 	{
-		return lower.contains("climb up or down")
-				|| lower.contains("up or down the stairs")
-				|| lower.contains("choose an option");
-	}
-
-	private boolean isDialogueOptionText(String lower)
-	{
-		if (lower.contains(" or down") && lower.contains("?"))
+		if (widget == null)
 		{
-			return false;
+			return "";
 		}
-		return lower.startsWith("climb up")
-				|| lower.startsWith("climb down")
-				|| lower.startsWith("1. climb up")
-				|| lower.startsWith("2. climb down")
-				|| lower.startsWith("1 climb up")
-				|| lower.startsWith("2 climb down");
+		String text = cleanWidgetText(widget.getText());
+		return text.isEmpty() ? cleanWidgetText(widget.getName()) : text;
 	}
 
 	private TickSnapshot.DialogueOptionSnapshot dialogueOptionSnapshot(int index, Widget widget, String text)
@@ -1467,13 +1544,12 @@ public class TelemetryPlugin extends Plugin
 	private String inferredDialogueOptionKey(int index, String text)
 	{
 		String value = cleanWidgetText(text);
-		if (value.startsWith("1.") || value.startsWith("1 "))
+		if (value.length() >= 2
+				&& value.charAt(0) >= '1'
+				&& value.charAt(0) <= '9'
+				&& (value.charAt(1) == '.' || Character.isWhitespace(value.charAt(1))))
 		{
-			return "1";
-		}
-		if (value.startsWith("2.") || value.startsWith("2 "))
-		{
-			return "2";
+			return Character.toString(value.charAt(0));
 		}
 		if (index >= 1 && index <= 9)
 		{
@@ -2800,6 +2876,18 @@ public class TelemetryPlugin extends Plugin
 					depositInventoryWidgetSlots, "deposit_inventory_widget");
 		}
 		return null;
+	}
+
+	static final class DialogueContinueSurface
+	{
+		private final Widget textWidget;
+		private final Widget continueWidget;
+
+		DialogueContinueSurface(Widget textWidget, Widget continueWidget)
+		{
+			this.textWidget = textWidget;
+			this.continueWidget = continueWidget;
+		}
 	}
 
 	static boolean shouldRefreshOpenMenu(Boolean menuOpen)

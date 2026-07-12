@@ -42,9 +42,7 @@ public class PluginSnapshotEndpointTest
 		Map<String, Object> schema = endpoint(new PluginLiveCache(gson)).schemaPayload();
 		assertEquals(
 				List.of("baseline", "inventory", "activity", "bank_ui", "dialogue_state", "interaction_hot",
-						"client_tick_tail", "scene_object_census", "actor_census", "collision_window",
-						"route_object_census", "resource_object_census",
-						"service_object_census"),
+						"client_tick_tail", "scene_object_census", "actor_census", "collision_window"),
 				schema.get("supportedNeeds"));
 		assertEquals(List.of("GET /health", "GET /schema", "POST /snapshot"), schema.get("endpoints"));
 		assertEquals(List.of("hot"), schema.get("snapshotTiers"));
@@ -52,6 +50,27 @@ public class PluginSnapshotEndpointTest
 		assertTrue(((List<?>) schema.get("requestControls")).contains("maxClickedSamples"));
 		assertTrue(((List<?>) schema.get("worldModelQueryControls")).contains("worldModel.maxActors"));
 		assertTrue(String.valueOf(schema.get("readOnlyStatement")).contains("no configuration"));
+	}
+
+	@Test
+	public void retiredSemanticCensusNeedsFailExplicitly()
+	{
+		List<String> retired = List.of(
+				"resource_object_census",
+				"route_object_census",
+				"service_object_census");
+		Map<String, Object> response = endpoint(canonicalCache()).snapshotPayload(
+				request(retired.toArray(new String[0])));
+
+		assertEquals("FAIL", response.get("status"));
+		assertTrue(jsonObject(response.get("payloads")).keySet().isEmpty());
+		assertEquals(retired, response.get("missingCapabilities"));
+		assertEquals(
+				List.of(
+						"unsupported need: resource_object_census",
+						"unsupported need: route_object_census",
+						"unsupported need: service_object_census"),
+				response.get("warnings"));
 	}
 
 	@Test
@@ -86,6 +105,37 @@ public class PluginSnapshotEndpointTest
 		assertTrue(freshness.get("sourceCaptureFresh").getAsBoolean());
 		assertTrue(freshness.get("frameCoherent").getAsBoolean());
 		assertTrue(freshness.get("fresh").getAsBoolean());
+	}
+
+	@Test
+	public void newlyAssembledResponseRejectsAnOldSourceFrame()
+	{
+		String staleCapturedAtUtc = Instant.now().minusSeconds(60L).toString();
+		SensorFrame staleFrame = completeFrame(
+				"fixture-stale-frame",
+				SOURCE_TICK,
+				SESSION_ID,
+				CLIENT_PROCESS_ID,
+				GEOMETRY_FRAME_ID,
+				Map.of(
+						"gameState", "LOGGED_IN",
+						"player", Map.of(),
+						"inputGeometry", Map.of(
+								"geometryAvailable", true,
+								"clientProcessId", CLIENT_PROCESS_ID)),
+				staleCapturedAtUtc);
+
+		Map<String, Object> response = endpoint(cacheWithFrame(staleFrame)).snapshotPayload(
+				request("baseline", "inventory", "activity", "bank_ui", "dialogue_state"));
+
+		assertEquals("WARN", response.get("status"));
+		assertTrue(Instant.parse(String.valueOf(response.get("assembledAtUtc")))
+				.isAfter(Instant.parse(staleCapturedAtUtc)));
+		JsonObject freshness = jsonObject(response.get("freshness"));
+		assertFalse(freshness.get("sourceCaptureFresh").getAsBoolean());
+		assertFalse(freshness.get("cacheWallClockFresh").getAsBoolean());
+		assertFalse(freshness.get("fresh").getAsBoolean());
+		assertTrue(((List<?>) response.get("warnings")).contains("sensor_frame_source_stale"));
 	}
 
 	@Test
@@ -199,28 +249,20 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
-	public void worldModelProviderServesNeutralAndFilteredObjectCensusesWithFrameProvenance()
+	public void worldModelProviderServesNeutralObjectCensusWithFrameProvenance()
 	{
 		Map<String, Object> censuses = Map.of(
-				"scene_object_census", Map.of("objects", List.of()),
-				"resource_object_census", Map.of("objects", List.of()),
-				"route_object_census", Map.of("objects", List.of()),
-				"service_object_census", Map.of("objects", List.of()));
+				"scene_object_census", Map.of("objects", List.of()));
 		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
 				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
 				new ClientTickHotState(4), null,
 				(needs, request) -> worldModelResponse(SOURCE_TICK, GEOMETRY_FRAME_ID, censuses));
 
-		Map<String, Object> response = endpoint.snapshotPayload(request(
-				"scene_object_census", "resource_object_census", "route_object_census",
-				"service_object_census"));
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
 		JsonObject payloads = jsonObject(response.get("payloads"));
 
 		assertEquals("PASS", response.get("status"));
 		assertTrue(payloads.has("scene_object_census"));
-		assertTrue(payloads.has("resource_object_census"));
-		assertTrue(payloads.has("route_object_census"));
-		assertTrue(payloads.has("service_object_census"));
 		JsonObject sceneCensus = payloads.getAsJsonObject("scene_object_census");
 		assertEquals(SOURCE_TICK, sceneCensus.get("sourceTick").getAsLong());
 		assertEquals(SESSION_ID, sceneCensus.get("sessionId").getAsString());
@@ -346,15 +388,15 @@ public class PluginSnapshotEndpointTest
 								SOURCE_TICK,
 								GEOMETRY_FRAME_ID,
 								"2026-05-11T00:00:00Z"),
-						"payloads", Map.of("route_object_census", Map.of("objects", List.of())),
+						"payloads", Map.of("scene_object_census", Map.of("objects", List.of())),
 						"quality", Map.of("worldModelAvailable", true),
 						"warnings", List.of(),
 						"sizing", Map.of()));
 
-		Map<String, Object> response = endpoint.snapshotPayload(request("route_object_census"));
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
 
 		assertEquals("FAIL", response.get("status"));
-		assertFalse(jsonObject(response.get("payloads")).has("route_object_census"));
+		assertFalse(jsonObject(response.get("payloads")).has("scene_object_census"));
 		assertTrue(((List<?>) response.get("warnings")).contains("world_model_provenance_mismatch"));
 	}
 
@@ -458,7 +500,25 @@ public class PluginSnapshotEndpointTest
 			String geometryFrameId,
 			Map<String, Object> baseline)
 	{
-		String capturedAtUtc = Instant.now().toString();
+		return completeFrame(
+				frameId,
+				sourceTick,
+				sessionId,
+				clientProcessId,
+				geometryFrameId,
+				baseline,
+				Instant.now().toString());
+	}
+
+	private SensorFrame completeFrame(
+			String frameId,
+			long sourceTick,
+			String sessionId,
+			long clientProcessId,
+			String geometryFrameId,
+			Map<String, Object> baseline,
+			String capturedAtUtc)
+	{
 		return frameBuilder(
 				frameId,
 				sourceTick,

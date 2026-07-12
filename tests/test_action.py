@@ -91,7 +91,6 @@ def observation(
         ),
         scene_x=49,
         scene_y=52,
-        resource_candidate=False,
     )
     return Observation(
         player=PlayerObservation(),
@@ -166,7 +165,6 @@ def route_target() -> NearbyObject:
         ),
         scene_x=49,
         scene_y=52,
-        route_candidate=True,
     )
 
 
@@ -1205,7 +1203,6 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             geometry=TargetGeometry(),
             scene_x=56,
             scene_y=38,
-            route_candidate=True,
         )
         verification = VerificationSpec(
             VerificationKind.CAMERA_POSE_CHANGED,

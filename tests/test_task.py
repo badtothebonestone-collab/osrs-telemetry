@@ -155,9 +155,6 @@ def scene_object(
     location: WorldPoint,
     *,
     geometry: TargetGeometry = GEOMETRY,
-    resource: bool = False,
-    route: bool = False,
-    service: bool = False,
 ) -> NearbyObject:
     return NearbyObject(
         key=key,
@@ -170,9 +167,6 @@ def scene_object(
         geometry=geometry,
         scene_x=49,
         scene_y=52,
-        resource_candidate=resource,
-        route_candidate=route,
-        service_candidate=service,
     )
 
 
@@ -184,7 +178,6 @@ def tree(**overrides: object) -> NearbyObject:
         "action": DEFINITION.resource.selector.action,
         "location": WorldPoint(3195, 3248, 0),
         "geometry": GEOMETRY,
-        "resource": False,
     }
     values.update(overrides)
     return scene_object(**values)
@@ -202,7 +195,6 @@ def route_tile(step, *, geometry: TargetGeometry = GEOMETRY) -> NearbyObject:
         geometry=geometry,
         scene_x=49,
         scene_y=52,
-        route_candidate=False,
     )
 
 
@@ -213,7 +205,6 @@ def route_object(step, **overrides: object) -> NearbyObject:
         "name": step.object_name,
         "action": step.action,
         "location": step.location,
-        "route": False,
     }
     values.update(overrides)
     return scene_object(**values)
@@ -226,8 +217,6 @@ def bank_object(**overrides: object) -> NearbyObject:
         "name": DEFINITION.bank.selector.name,
         "action": DEFINITION.bank.selector.action,
         "location": BANK_ANCHOR,
-        "route": False,
-        "service": False,
     }
     values.update(overrides)
     return scene_object(**values)
@@ -305,7 +294,6 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.CHOP, task.progress.phase)
         self.assertEqual(ActionKind.WAIT, decision.action.kind)
         self.assertEqual(tree().key, task.progress.target_key)
-        self.assertFalse(tree().resource_candidate)
 
     def test_tree_rejection_codes_are_stable_and_geometry_is_exact(self) -> None:
         bad = tree(
@@ -1211,7 +1199,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
             observation(
                 location=BANK_ANCHOR,
                 inv=inventory(logs=28, full=True),
-                objects=(bank_object(route=False),),
+                objects=(bank_object(),),
             )
         )
         self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)

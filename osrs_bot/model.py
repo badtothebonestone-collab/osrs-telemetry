@@ -109,9 +109,6 @@ class NearbyObject:
     geometry: TargetGeometry
     scene_x: int | None = None
     scene_y: int | None = None
-    resource_candidate: bool = False
-    route_candidate: bool = False
-    service_candidate: bool = False
 
     def supports(self, option: str) -> bool:
         return option in self.actions

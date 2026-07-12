@@ -27,7 +27,11 @@ from .runtime import (
     TaskRuntime,
     build_runtime,
 )
-from .task import WOODCUT_BANK_TASK_ID, WoodcutBankTask
+from .task import (
+    WOODCUT_BANK_TASK_DISPLAY_NAME,
+    WOODCUT_BANK_TASK_ID,
+    WoodcutBankTask,
+)
 
 
 APPLICATION_SCHEMA = "engine_application.v1"
@@ -114,7 +118,7 @@ class DemonstrationReference:
 
 TASK_DESCRIPTOR = TaskDescriptor(
     SUPPORTED_TASK_ID,
-    "Woodcut ordinary Trees and bank one inventory",
+    WOODCUT_BANK_TASK_DISPLAY_NAME,
     (LUMBRIDGE_WEST_TREES_V1.definition_id,),
 )
 DEFINITION_DESCRIPTOR = DefinitionDescriptor(

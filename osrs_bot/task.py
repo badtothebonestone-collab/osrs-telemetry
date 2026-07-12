@@ -44,6 +44,7 @@ from .verification import (
 
 
 WOODCUT_BANK_TASK_ID = "woodcut_bank"
+WOODCUT_BANK_TASK_DISPLAY_NAME = "Woodcut ordinary Trees and bank one inventory"
 CAMERA_RECOVERY_MAX_ATTEMPTS = 8
 CAMERA_RECOVERY_HOLD_MILLIS = 250
 RESOURCE_NO_YIELD_MAX_RETRIES = 1

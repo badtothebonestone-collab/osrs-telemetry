@@ -214,70 +214,38 @@ public class WorldModelCacheTest
 		source.put("sceneY", 50);
 		source.put("distanceToPlayer", 3);
 		source.put("projection", Map.of("geometryAvailable", true));
-		source.put("resourceCandidate", true);
-		source.put("resourceType", "basic_tree");
-		source.put("routeObjectCandidate", false);
-		source.put("routeObjectKind", "route_transition");
-		source.put("serviceObjectCandidate", false);
-		source.put("serviceObjectType", "bank_booth");
-		source.put("requiredSkill", "WOODCUTTING");
-		source.put("requiredLevel", 1);
-		source.put("playerLevelKnown", true);
-		source.put("playerLevel", 99);
-		source.put("levelRequirementMet", true);
-		source.put("targetTemporarilyLockedReason", "task_hint");
-		source.put("visibleButNotExecutable", false);
-		source.put("futureEligibleWhenLevelMet", false);
 
-		Map<String, Object> scene = WorldModelCache.compactObjectRow(source, true, false);
+		Map<String, Object> scene = WorldModelCache.compactObjectRow(source, true);
 
 		assertEquals(1276, scene.get("id"));
 		assertEquals("Tree", scene.get("name"));
 		assertEquals(List.of("Chop down"), scene.get("actions"));
 		assertEquals(3196, scene.get("worldX"));
 		assertTrue(scene.containsKey("projection"));
-		for (String semanticKey : List.of(
-				"resourceCandidate",
-				"resourceType",
-				"routeObjectCandidate",
-				"routeObjectKind",
-				"serviceObjectCandidate",
-				"serviceObjectType",
-				"requiredSkill",
-				"requiredLevel",
-				"playerLevelKnown",
-				"playerLevel",
-				"levelRequirementMet",
-				"targetTemporarilyLockedReason",
-				"visibleButNotExecutable",
-				"futureEligibleWhenLevelMet"))
-		{
-			assertFalse(semanticKey, scene.containsKey(semanticKey));
-		}
-
-		Map<String, Object> legacyFiltered = WorldModelCache.compactObjectRow(source, true, true);
-		assertTrue(legacyFiltered.containsKey("resourceCandidate"));
-		assertTrue(legacyFiltered.containsKey("requiredSkill"));
+		assertEquals(
+				List.of(
+						"objectKey", "kind", "source", "id", "name", "objectName",
+						"actions", "worldX", "worldY", "plane", "sceneX", "sceneY",
+						"distanceToPlayer", "projection", "projectionStatus"),
+				new ArrayList<>(scene.keySet()));
 	}
 
 	@Test
-	public void projectionOrderingAndEligibilityNeverUseCandidateHints()
+	public void projectionOrderingUsesOnlyDistanceAndStableIdentity()
 	{
-		Map<String, Object> farResource = Map.of(
-				"objectKey", "far-resource",
-				"distanceToPlayer", 10,
-				"resourceCandidate", true);
-		Map<String, Object> nearNeutral = Map.of(
-				"objectKey", "near-neutral",
-				"distanceToPlayer", 1,
-				"resourceCandidate", false);
+		Map<String, Object> far = Map.of(
+				"objectKey", "far",
+				"distanceToPlayer", 10);
+		Map<String, Object> near = Map.of(
+				"objectKey", "near",
+				"distanceToPlayer", 1);
 
-		List<Map<String, Object>> ordered = new ArrayList<>(List.of(farResource, nearNeutral));
+		List<Map<String, Object>> ordered = new ArrayList<>(List.of(far, near));
 		WorldModelCache.sortProjectionCandidates(
 				ordered,
 				32,
 				object -> ((Number) object.get("distanceToPlayer")).intValue());
-		assertEquals("near-neutral", ordered.get(0).get("objectKey"));
+		assertEquals("near", ordered.get(0).get("objectKey"));
 		assertFalse(WorldModelCache.shouldProjectRecord(false));
 		assertTrue(WorldModelCache.shouldProjectRecord(true));
 

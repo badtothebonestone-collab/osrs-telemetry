@@ -78,27 +78,62 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual(frame_match.group(1), load_fixture()["sensorFrame"]["schema"])
         self.assertTrue(parse_observation(load_fixture()).source_coherent)
 
-    def test_neutral_scene_census_produces_entity_facts(self) -> None:
-        payload = load_fixture()
-        payloads = payload["payloads"]
-        scene = copy.deepcopy(payloads["resource_object_census"])
-        scene["schema"] = "scene_object_census.v1"
-        scene["objects"] = [
-            *scene["objects"],
-            *payloads["service_object_census"]["objects"],
-        ]
-        payloads["scene_object_census"] = scene
-        for name in (
+    def test_java_sensor_sources_do_not_assign_task_meaning(self) -> None:
+        root = Path(__file__).parents[1]
+        sources = "\n".join(
+            (root / relative).read_text(encoding="utf-8")
+            for relative in (
+                "src/main/java/com/osrstelemetry/PluginSnapshotEndpoint.java",
+                "src/main/java/com/osrstelemetry/TelemetryPlugin.java",
+                "src/main/java/com/osrstelemetry/WorldModelCache.java",
+            )
+        )
+        forbidden = (
+            "resourceCandidate",
+            "routeObjectCandidate",
+            "serviceObjectCandidate",
             "resource_object_census",
             "route_object_census",
             "service_object_census",
-        ):
-            del payloads[name]
+            "profileHint",
+            "taskHint",
+            "classHint",
+            "desiredClasses",
+            "nameContains",
+            "actionContains",
+            "objectKinds",
+            "Skill.WOODCUTTING",
+            "isDialoguePromptText",
+            "isDialogueOptionText",
+        )
 
-        observation = parse_observation(payload)
+        for token in forbidden:
+            with self.subTest(token=token):
+                self.assertNotIn(token, sources)
+
+    def test_neutral_scene_census_produces_entity_facts(self) -> None:
+        observation = parse_observation(load_fixture())
 
         self.assertIsNotNone(observation.object_by_key("tree:3193:3244:1276"))
         self.assertIsNotNone(observation.object_by_key("bank:3208:3220:6943"))
+        self.assertTrue(observation.source_coherent)
+
+    def test_legacy_semantic_censuses_cannot_supply_objects(self) -> None:
+        payload = load_fixture()
+        scene = payload["payloads"].pop("scene_object_census")
+        for name, schema in (
+            ("resource_object_census", "resource_object_census.v1"),
+            ("route_object_census", "route_object_census.v1"),
+            ("service_object_census", "service_object_census.v1"),
+        ):
+            payload["payloads"][name] = {
+                **copy.deepcopy(scene),
+                "schema": schema,
+            }
+
+        observation = parse_observation(payload)
+
+        self.assertEqual((), observation.nearby_objects)
         self.assertTrue(observation.source_coherent)
 
     def test_always_hot_login_baseline_exposes_exact_client_without_a_scene(self) -> None:
@@ -209,7 +244,7 @@ class ObservationParsingTests(unittest.TestCase):
 
     def test_dynamic_geometry_from_another_frame_fails_closed(self) -> None:
         payload = load_fixture()
-        payload["payloads"]["resource_object_census"]["geometryFrameId"] = "old-camera"
+        payload["payloads"]["scene_object_census"]["geometryFrameId"] = "old-camera"
 
         observation = parse_observation(payload)
 
@@ -218,7 +253,7 @@ class ObservationParsingTests(unittest.TestCase):
 
     def test_dynamic_capture_before_frame_completion_fails_closed(self) -> None:
         payload = load_fixture()
-        payload["payloads"]["route_object_census"]["capturedAtUtc"] = (
+        payload["payloads"]["scene_object_census"]["capturedAtUtc"] = (
             "2026-07-10T16:06:57.695000000Z"
         )
 
@@ -229,7 +264,7 @@ class ObservationParsingTests(unittest.TestCase):
 
     def test_demonstration_dynamic_evidence_must_match_atomic_frame(self) -> None:
         payload = load_fixture()
-        provenance = payload["payloads"]["resource_object_census"]
+        provenance = payload["payloads"]["scene_object_census"]
         common = {
             "sourceTick": provenance["sourceTick"],
             "capturedAtUtc": provenance["capturedAtUtc"],
@@ -267,7 +302,7 @@ class ObservationParsingTests(unittest.TestCase):
         tree = observation.object_by_key("tree:3193:3244:1276")
         self.assertIsNotNone(tree)
         self.assertEqual(("Chop down", "Examine"), tree.actions)
-        self.assertTrue(tree.resource_candidate)
+        self.assertFalse(hasattr(tree, "resource_candidate"))
         self.assertTrue(tree.geometry.actionable)
         self.assertEqual(ScreenPoint(100, 50), tree.geometry.canvas_point)
         self.assertEqual(ScreenPoint(1200, 2100), tree.geometry.screen_point)
@@ -293,9 +328,9 @@ class ObservationParsingTests(unittest.TestCase):
 
     def test_unnamed_census_object_is_omitted_without_losing_named_objects(self) -> None:
         payload = load_fixture()
-        unnamed = dict(payload["payloads"]["resource_object_census"]["objects"][0])
+        unnamed = dict(payload["payloads"]["scene_object_census"]["objects"][0])
         unnamed.update({"objectKey": "unnamed:27270", "id": 27270, "name": ""})
-        payload["payloads"]["route_object_census"]["objects"].append(unnamed)
+        payload["payloads"]["scene_object_census"]["objects"].append(unnamed)
 
         observation = parse_observation(payload)
 
@@ -334,10 +369,10 @@ class ObservationParsingTests(unittest.TestCase):
 
     def test_out_of_canvas_aim_point_fails_closed(self) -> None:
         payload = load_fixture()
-        tree = payload["payloads"]["resource_object_census"]["objects"][0]
+        tree = payload["payloads"]["scene_object_census"]["objects"][0]
         tree["projection"]["aimPoint"] = {"canvasX": 999, "canvasY": 50}
         tree["projection"]["canvasLocation"] = {"x": 999, "y": 50}
-        payload["payloads"]["resource_object_census"]["objects"] = [tree]
+        payload["payloads"]["scene_object_census"]["objects"] = [tree]
 
         geometry = parse_observation(payload).object_by_key(tree["objectKey"]).geometry
         self.assertFalse(geometry.actionable)
@@ -355,14 +390,14 @@ class ObservationParsingTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 payload = load_fixture()
-                tree = payload["payloads"]["resource_object_census"]["objects"][0]
+                tree = payload["payloads"]["scene_object_census"]["objects"][0]
                 projection = tree["projection"]
                 for key in (
                     "geometryAvailable", "onScreen", "visible", "actionableByCanvas"
                 ):
                     projection.pop(key, None)
                 projection.update(flags)
-                payload["payloads"]["resource_object_census"]["objects"] = [tree]
+                payload["payloads"]["scene_object_census"]["objects"] = [tree]
 
                 geometry = parse_observation(payload).object_by_key(tree["objectKey"]).geometry
 
@@ -554,7 +589,6 @@ class ObservationClientTests(unittest.TestCase):
         self.assertEqual(("Walk here",), route.actions)
         self.assertEqual(point, route.location)
         self.assertEqual((60, 45), (route.scene_x, route.scene_y))
-        self.assertTrue(route.route_candidate)
         self.assertTrue(route.geometry.actionable)
         self.assertEqual(ScreenPoint(1400, 2200), route.geometry.screen_point)
 
@@ -567,7 +601,7 @@ class ObservationClientTests(unittest.TestCase):
     @patch("osrs_bot.observation.urlopen")
     def test_demonstration_fetch_reuses_endpoint_with_bounded_read_only_evidence(self, mocked_open) -> None:
         payload = copy.deepcopy(load_fixture())
-        provenance = payload["payloads"]["resource_object_census"]
+        provenance = payload["payloads"]["scene_object_census"]
         payload["payloads"]["client_tick_tail"] = {
             "schema": "client_tick_hot.v1",
             "sessionId": "fixture-session",

@@ -50,17 +50,11 @@ public class PluginSnapshotEndpoint implements Closeable
 			"client_tick_tail",
 			"scene_object_census",
 			"actor_census",
-			"collision_window",
-			"route_object_census",
-			"resource_object_census",
-			"service_object_census");
+			"collision_window");
 	private static final List<String> WORLD_MODEL_NEEDS = Arrays.asList(
 			"scene_object_census",
 			"actor_census",
-			"collision_window",
-			"route_object_census",
-			"resource_object_census",
-			"service_object_census");
+			"collision_window");
 	private static final Map<String, String> NEED_TO_PACKET_TYPE = createNeedMap();
 
 	private final PluginLiveCache liveCache;
@@ -76,6 +70,7 @@ public class PluginSnapshotEndpoint implements Closeable
 	private final ClientTickHotState clientTickHotState;
 	private final TileProjectionProvider tileProjectionProvider;
 	private final WorldModelQueryProvider worldModelQueryProvider;
+	private final Supplier<Instant> nowSupplier;
 	private HttpServer server;
 	private ExecutorService executor;
 	private int boundPort;
@@ -245,6 +240,39 @@ public class PluginSnapshotEndpoint implements Closeable
 			TileProjectionProvider tileProjectionProvider,
 			WorldModelQueryProvider worldModelQueryProvider)
 	{
+		this(
+				liveCache,
+				gson,
+				host,
+				port,
+				authToken,
+				maxProjectionRefs,
+				maxResponseBytes,
+				allowNonLocalHost,
+				hoverMenuSupplier,
+				lastMenuOptionClickedSupplier,
+				clientTickHotState,
+				tileProjectionProvider,
+				worldModelQueryProvider,
+				Instant::now);
+	}
+
+	PluginSnapshotEndpoint(
+			PluginLiveCache liveCache,
+			Gson gson,
+			String host,
+			int port,
+			String authToken,
+			int maxProjectionRefs,
+			int maxResponseBytes,
+			boolean allowNonLocalHost,
+			Supplier<Map<String, Object>> hoverMenuSupplier,
+			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier,
+			ClientTickHotState clientTickHotState,
+			TileProjectionProvider tileProjectionProvider,
+			WorldModelQueryProvider worldModelQueryProvider,
+			Supplier<Instant> nowSupplier)
+	{
 		this.liveCache = liveCache;
 		this.gson = gson;
 		this.host = normalizeHost(host);
@@ -258,6 +286,13 @@ public class PluginSnapshotEndpoint implements Closeable
 		this.clientTickHotState = clientTickHotState;
 		this.tileProjectionProvider = tileProjectionProvider;
 		this.worldModelQueryProvider = worldModelQueryProvider;
+		this.nowSupplier = nowSupplier == null ? Instant::now : nowSupplier;
+	}
+
+	private Instant now()
+	{
+		Instant value = nowSupplier.get();
+		return value == null ? Instant.now() : value;
 	}
 
 	public void start() throws IOException
@@ -326,7 +361,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("cacheAgeMillisByType", cacheHealth.get("liveCacheAgeMillisByType"));
 		payload.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
 		payload.put("sourceCaptureFresh", frameFresh);
-		payload.put("sensorFrame", sensorFrameMetadata(frame, Instant.now()));
+		payload.put("sensorFrame", sensorFrameMetadata(frame, now()));
 		payload.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
 		payload.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
 		payload.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
@@ -388,7 +423,7 @@ public class PluginSnapshotEndpoint implements Closeable
 	Map<String, Object> snapshotPayload(JsonObject request)
 	{
 		long startNanos = System.nanoTime();
-		Instant assemblyStartedAt = Instant.now();
+		Instant assemblyStartedAt = now();
 		String requestId = stringValue(request, "requestId", null);
 		int requestedProjectionRefs = intValue(request, "maxProjectionRefs", maxProjectionRefs);
 		int effectiveProjectionRefs = Math.max(0, Math.min(maxProjectionRefs, requestedProjectionRefs));
@@ -406,7 +441,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		String responseMode = normalizeMode(stringValue(request, "responseMode", "compact"));
 		String projectionFieldMode = normalizeMode(stringValue(request, "projectionFieldMode", responseMode));
 		String snapshotTier = normalizeSnapshotTier(stringValue(request, "snapshotTier", "hot"));
-		SnapshotHints snapshotHints = snapshotHints(request);
 		List<String> needs = requestedNeeds(request, includeCollisionWindow, includeWatchValues);
 		List<String> hotNeeds = requestedHotNeeds(request);
 		List<String> worldModelNeeds = requestedWorldModelNeeds(request);
@@ -420,13 +454,18 @@ public class PluginSnapshotEndpoint implements Closeable
 		Map<String, Object> freshness = new LinkedHashMap<>();
 		List<String> missingCapabilities = new ArrayList<>();
 		List<String> warnings = new ArrayList<>();
+		for (String unsupportedNeed : requestedUnsupportedNeeds(request))
+		{
+			missingCapabilities.add(unsupportedNeed);
+			warnings.add("unsupported need: " + unsupportedNeed);
+		}
 		Map<String, Object> responseSizing = new LinkedHashMap<>();
 		long latestTick = frame == null ? -1L : frame.getSourceTick();
 		long sourceAgeMillis = -1L;
 		boolean sourceCaptureFresh = false;
 		boolean frameCoherent = frame != null && frame.isCoherent() && frame.isComplete();
 		boolean stale = false;
-		PriorityContext priorityContext = projectionPriorityContext(snapshotHints, frame);
+		PriorityContext priorityContext = projectionPriorityContext(frame);
 
 		responseSizing.put("maxResponseBytes", maxResponseBytes);
 		responseSizing.put("requestedProjectionRefs", requestedProjectionRefs);
@@ -435,7 +474,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		responseSizing.put("responseMode", responseMode);
 		responseSizing.put("includeGeometry", includeGeometry);
 		responseSizing.put("snapshotTier", snapshotTier);
-		responseSizing.put("snapshotHints", snapshotHints.toMap());
 		responseSizing.put("tileProjectionRequestCount", tileProjectionRequests.size());
 
 		if (frame == null)
@@ -537,7 +575,7 @@ public class PluginSnapshotEndpoint implements Closeable
 			}
 		}
 
-		Instant assembledAt = Instant.now();
+		Instant assembledAt = now();
 		sourceAgeMillis = frame == null
 				? -1L
 				: Duration.between(Instant.parse(frame.getCapturedAtUtc()), assembledAt).toMillis();
@@ -593,11 +631,13 @@ public class PluginSnapshotEndpoint implements Closeable
 		response.put("assemblyStartedAtUtc", assemblyStartedAt.toString());
 		response.put("latestTick", latestTick);
 		response.put("sensorFrame", sensorFrameMetadata(frame, assembledAt));
-		response.put("publication", publication == null
-				? Map.of()
-				: Map.of(
-						"sequence", publication.getSequence(),
-						"publishedAtUtc", publication.getPublishedAtUtc()));
+		Map<String, Object> publicationMetadata = new LinkedHashMap<>();
+		if (publication != null)
+		{
+			publicationMetadata.put("sequence", publication.getSequence());
+			publicationMetadata.put("publishedAtUtc", publication.getPublishedAtUtc());
+		}
+		response.put("publication", publicationMetadata);
 		response.put("snapshotTier", snapshotTier);
 		response.put("status", status);
 		response.put("freshness", freshness);
@@ -810,7 +850,7 @@ public class PluginSnapshotEndpoint implements Closeable
 
 	private Map<String, Object> sensorFrameMetadata(SensorFrame frame, Instant assembledAt)
 	{
-		Instant stamp = assembledAt == null ? Instant.now() : assembledAt;
+		Instant stamp = assembledAt == null ? now() : assembledAt;
 		Map<String, Object> metadata = frame == null
 				? new LinkedHashMap<>()
 				: new LinkedHashMap<>(frame.metadata());
@@ -925,7 +965,7 @@ public class PluginSnapshotEndpoint implements Closeable
 			if (!sourceIdentityMatches(
 					normalized,
 					frame,
-					Instant.now(),
+					now(),
 					maxSourceAgeMillis))
 			{
 				missingCapabilities.add("tile_projection");
@@ -982,7 +1022,7 @@ public class PluginSnapshotEndpoint implements Closeable
 					|| !sourceIdentityMatches(
 							(Map<?, ?>) metadata,
 							frame,
-							Instant.now(),
+							now(),
 							maxSourceAgeMillis))
 			{
 				for (String need : needs)
@@ -1244,13 +1284,9 @@ public class PluginSnapshotEndpoint implements Closeable
 			refs.add(element);
 		}
 		responseSizing.put("projectionPriorityApplied", true);
-		responseSizing.put("projectionPriorityReason", priorityContext != null && priorityContext.hints.hasHints()
-				? "request hints, onScreen scene objects with geometry, stable ids/locations, and player-near refs first"
-				: "onScreen scene objects with geometry and stable ids/locations first");
-		if (priorityContext != null)
-		{
-			responseSizing.put("projectionHintsApplied", priorityContext.hints.toMap());
-		}
+		responseSizing.put(
+				"projectionPriorityReason",
+				"onScreen scene objects with geometry, stable ids/locations, and player-near refs first");
 	}
 
 	private double projectionRefPriority(JsonElement element, PriorityContext priorityContext)
@@ -1262,10 +1298,6 @@ public class PluginSnapshotEndpoint implements Closeable
 
 		JsonObject ref = element.getAsJsonObject();
 		double priority = 0.0;
-		if (priorityContext != null)
-		{
-			priority += hintPriority(ref, priorityContext.hints);
-		}
 		if (!booleanValue(ref, "onScreen", false))
 		{
 			priority += 1_000_000_000.0;
@@ -1284,66 +1316,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		}
 		priority += playerDistancePriority(ref, priorityContext) * 1_000.0;
 		return priority;
-	}
-
-	private double hintPriority(JsonObject ref, SnapshotHints hints)
-	{
-		if (hints == null || !hints.hasHints())
-		{
-			return 0.0;
-		}
-		double priority = 0.0;
-		if (!hints.targetTypeHint.isBlank() && !hints.targetTypeHint.equalsIgnoreCase(stringValue(ref, "targetType", "")))
-		{
-			priority += 20_000_000.0;
-		}
-		if (hints.requireOnScreen && !booleanValue(ref, "onScreen", false))
-		{
-			priority += 10_000_000.0;
-		}
-		if (hints.requireGeometryAvailable && !booleanValue(ref, "geometryAvailable", false))
-		{
-			priority += 5_000_000.0;
-		}
-		if (!hints.desiredClasses.isEmpty() && !matchesAnyDesiredClass(ref, hints.desiredClasses))
-		{
-			priority += 2_500_000.0;
-		}
-		else if (!hints.classHint.isBlank() && !matchesClassHint(ref, hints.classHint))
-		{
-			priority += 2_500_000.0;
-		}
-		return priority;
-	}
-
-	private boolean matchesAnyDesiredClass(JsonObject ref, List<String> classes)
-	{
-		for (String className : classes)
-		{
-			if (matchesClassHint(ref, className))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private boolean matchesClassHint(JsonObject ref, String classHint)
-	{
-		String hint = classHint == null ? "" : classHint.trim().toLowerCase(Locale.ROOT);
-		if (hint.isBlank())
-		{
-			return false;
-		}
-		for (String key : List.of("name", "objectName", "targetName", "objectKey", "kind", "layer", "targetType"))
-		{
-			String value = stringValue(ref, key, "");
-			if (!value.isBlank() && value.toLowerCase(Locale.ROOT).contains(hint))
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private boolean hasStableIdentityAndLocation(JsonObject ref)
@@ -1445,11 +1417,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		copyIfPresent(projection, compactProjection, "sceneProjectionSummary");
 		copyIfPresent(projection, compactProjection, "projectionStateHash");
 		copyIfPresent(projection, compactProjection, "refreshMode");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjects");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectCount");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectCap");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectRadius");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectCapHit");
 
 		JsonArray compactRefs = new JsonArray();
 		JsonArray refs = projectionRefs(projection);
@@ -1595,7 +1562,7 @@ public class PluginSnapshotEndpoint implements Closeable
 	private Map<String, Object> responseTooLargePayload(Map<String, Object> response, int estimatedBytes)
 	{
 		Map<String, Object> tooLarge = errorPayload("response_too_large", "snapshot response exceeded pluginSnapshotMaxResponseBytes");
-		tooLarge.put("assembledAtUtc", Instant.now().toString());
+		tooLarge.put("assembledAtUtc", now().toString());
 		tooLarge.put("status", "FAIL");
 		tooLarge.put("warnings", List.of("responseTooLarge"));
 		tooLarge.put("maxResponseBytes", maxResponseBytes);
@@ -1677,6 +1644,31 @@ public class PluginSnapshotEndpoint implements Closeable
 		return needs;
 	}
 
+	private List<String> requestedUnsupportedNeeds(JsonObject request)
+	{
+		JsonElement needsElement = request == null ? null : request.get("needs");
+		List<String> unsupported = new ArrayList<>();
+		if (needsElement == null || !needsElement.isJsonArray())
+		{
+			return unsupported;
+		}
+		for (JsonElement element : needsElement.getAsJsonArray())
+		{
+			if (!element.isJsonPrimitive())
+			{
+				continue;
+			}
+			String need = normalizeNeed(element.getAsString());
+			if (!need.isEmpty()
+					&& !SUPPORTED_NEEDS.contains(need)
+					&& !unsupported.contains(need))
+			{
+				unsupported.add(need);
+			}
+		}
+		return unsupported;
+	}
+
 	private List<String> requestedWorldModelNeeds(JsonObject request)
 	{
 		JsonElement needsElement = request == null ? null : request.get("needs");
@@ -1715,13 +1707,9 @@ public class PluginSnapshotEndpoint implements Closeable
 				.replace("worldModelSummary", "world_model_summary")
 				.replace("sceneObjectCensus", "scene_object_census")
 				.replace("actorCensus", "actor_census")
-				.replace("routeObjectCensus", "route_object_census")
-				.replace("resourceObjectCensus", "resource_object_census")
-				.replace("serviceObjectCensus", "service_object_census")
 				.replace("pathingFrontier", "pathing_frontier")
 				.replace("projectionAudit", "projection_audit")
 				.replace("minimapProjection", "minimap_projection")
-				.replace("viewQualityInputs", "view_quality_inputs")
 				.replace("fullWorldModelDebug", "full_world_model_debug")
 				.replace("interactionHot", "interaction_hot")
 				.replace("clientTickTail", "client_tick_tail")
@@ -1746,52 +1734,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		return "hot";
 	}
 
-	private SnapshotHints snapshotHints(JsonObject request)
-	{
-		if (request == null)
-		{
-			return SnapshotHints.EMPTY;
-		}
-		String profileHint = stringValue(request, "profileHint", "");
-		String taskHint = stringValue(request, "taskHint", "");
-		String classHint = stringValue(request, "classHint", "");
-		String targetTypeHint = stringValue(request, "targetTypeHint", "");
-		boolean requireOnScreen = booleanValue(request, "requireOnScreen", false);
-		boolean requireGeometryAvailable = booleanValue(request, "requireGeometryAvailable", false);
-		int maxCandidatesHint = intValue(request, "maxCandidatesHint", 0);
-		List<String> desiredClasses = stringListValue(request.get("desiredClasses"));
-		return new SnapshotHints(
-				profileHint,
-				taskHint,
-				classHint,
-				targetTypeHint,
-				requireOnScreen,
-				requireGeometryAvailable,
-				Math.max(0, maxCandidatesHint),
-				desiredClasses);
-	}
-
-	private List<String> stringListValue(JsonElement element)
-	{
-		List<String> values = new ArrayList<>();
-		if (element == null || !element.isJsonArray())
-		{
-			return values;
-		}
-		for (JsonElement child : element.getAsJsonArray())
-		{
-			if (child != null && child.isJsonPrimitive())
-			{
-				String value = child.getAsString();
-				if (value != null && !value.isBlank())
-				{
-					values.add(value.trim());
-				}
-			}
-		}
-		return values;
-	}
-
 	private JsonElement parsePayload(String payloadJson)
 	{
 		if (payloadJson == null || payloadJson.isBlank())
@@ -1802,23 +1744,23 @@ public class PluginSnapshotEndpoint implements Closeable
 		return parsed == null ? JsonNull.INSTANCE : parsed;
 	}
 
-	private PriorityContext projectionPriorityContext(SnapshotHints hints, SensorFrame frame)
+	private PriorityContext projectionPriorityContext(SensorFrame frame)
 	{
 		if (frame == null)
 		{
-			return new PriorityContext(null, null, null, hints);
+			return new PriorityContext(null, null, null);
 		}
 		SensorFrame.Fact baselineFact = frame.getFact(SensorFrame.FACT_BASELINE);
 		if (baselineFact == null || !baselineFact.isAvailable())
 		{
-			return new PriorityContext(null, null, null, hints);
+			return new PriorityContext(null, null, null);
 		}
 		try
 		{
 			JsonElement parsed = parsePayload(baselineFact.getPayloadJson());
 			if (!parsed.isJsonObject())
 			{
-				return new PriorityContext(null, null, null, hints);
+				return new PriorityContext(null, null, null);
 			}
 			JsonObject baseline = parsed.getAsJsonObject();
 			JsonObject player = baseline.has("player") && baseline.get("player").isJsonObject()
@@ -1826,16 +1768,16 @@ public class PluginSnapshotEndpoint implements Closeable
 					: null;
 			if (player == null)
 			{
-				return new PriorityContext(null, null, null, hints);
+				return new PriorityContext(null, null, null);
 			}
 			Double sceneX = doubleValue(player, "sceneX");
 			Double sceneY = doubleValue(player, "sceneY");
 			Integer plane = integerValue(player, "plane");
-			return new PriorityContext(sceneX, sceneY, plane, hints);
+			return new PriorityContext(sceneX, sceneY, plane);
 		}
 		catch (RuntimeException e)
 		{
-			return new PriorityContext(null, null, null, hints);
+			return new PriorityContext(null, null, null);
 		}
 	}
 
@@ -2171,103 +2113,12 @@ public class PluginSnapshotEndpoint implements Closeable
 		private final Double sceneX;
 		private final Double sceneY;
 		private final Integer plane;
-		private final SnapshotHints hints;
 
-		private PriorityContext(Double sceneX, Double sceneY, Integer plane, SnapshotHints hints)
+		private PriorityContext(Double sceneX, Double sceneY, Integer plane)
 		{
 			this.sceneX = sceneX;
 			this.sceneY = sceneY;
 			this.plane = plane;
-			this.hints = hints == null ? SnapshotHints.EMPTY : hints;
-		}
-	}
-
-	private static final class SnapshotHints
-	{
-		private static final SnapshotHints EMPTY = new SnapshotHints("", "", "", "", false, false, 0, List.of());
-
-		private final String profileHint;
-		private final String taskHint;
-		private final String classHint;
-		private final String targetTypeHint;
-		private final boolean requireOnScreen;
-		private final boolean requireGeometryAvailable;
-		private final int maxCandidatesHint;
-		private final List<String> desiredClasses;
-
-		private SnapshotHints(
-				String profileHint,
-				String taskHint,
-				String classHint,
-				String targetTypeHint,
-				boolean requireOnScreen,
-				boolean requireGeometryAvailable,
-				int maxCandidatesHint,
-				List<String> desiredClasses)
-		{
-			this.profileHint = normalize(profileHint);
-			this.taskHint = normalize(taskHint);
-			this.classHint = normalize(classHint);
-			this.targetTypeHint = normalize(targetTypeHint);
-			this.requireOnScreen = requireOnScreen;
-			this.requireGeometryAvailable = requireGeometryAvailable;
-			this.maxCandidatesHint = maxCandidatesHint;
-			this.desiredClasses = desiredClasses == null ? List.of() : List.copyOf(desiredClasses);
-		}
-
-		private boolean hasHints()
-		{
-			return !profileHint.isBlank()
-					|| !taskHint.isBlank()
-					|| !classHint.isBlank()
-					|| !targetTypeHint.isBlank()
-					|| requireOnScreen
-					|| requireGeometryAvailable
-					|| maxCandidatesHint > 0
-					|| !desiredClasses.isEmpty();
-		}
-
-		private Map<String, Object> toMap()
-		{
-			Map<String, Object> map = new LinkedHashMap<>();
-			if (!profileHint.isBlank())
-			{
-				map.put("profileHint", profileHint);
-			}
-			if (!taskHint.isBlank())
-			{
-				map.put("taskHint", taskHint);
-			}
-			if (!classHint.isBlank())
-			{
-				map.put("classHint", classHint);
-			}
-			if (!targetTypeHint.isBlank())
-			{
-				map.put("targetTypeHint", targetTypeHint);
-			}
-			if (!desiredClasses.isEmpty())
-			{
-				map.put("desiredClasses", desiredClasses);
-			}
-			if (requireOnScreen)
-			{
-				map.put("requireOnScreen", true);
-			}
-			if (requireGeometryAvailable)
-			{
-				map.put("requireGeometryAvailable", true);
-			}
-			if (maxCandidatesHint > 0)
-			{
-				map.put("maxCandidatesHint", maxCandidatesHint);
-			}
-			return map;
-		}
-
-		private static String normalize(String value)
-		{
-			return value == null ? "" : value.trim();
 		}
 	}
 

@@ -129,7 +129,6 @@ def _tree(raw: dict[str, Any]) -> NearbyObject:
         geometry=GEOMETRY,
         scene_x=50,
         scene_y=50,
-        resource_candidate=False,
     )
 
 
@@ -148,7 +147,6 @@ def _route_target(raw: dict[str, Any]) -> NearbyObject:
             geometry=GEOMETRY,
             scene_x=50,
             scene_y=50,
-            route_candidate=False,
         )
     return NearbyObject(
         key=f"golden:{raw['id']}",
@@ -161,7 +159,6 @@ def _route_target(raw: dict[str, Any]) -> NearbyObject:
         geometry=GEOMETRY,
         scene_x=50,
         scene_y=50,
-        route_candidate=False,
     )
 
 
@@ -400,8 +397,6 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
             geometry=GEOMETRY,
             scene_x=50,
             scene_y=50,
-            route_candidate=False,
-            service_candidate=False,
         )
         closed = WidgetObservation(bank_known=True)
         self.tick += 1

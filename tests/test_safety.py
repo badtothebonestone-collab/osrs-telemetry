@@ -60,7 +60,6 @@ def tree(geometry: TargetGeometry | None = None) -> NearbyObject:
         ),
         scene_x=49,
         scene_y=52,
-        resource_candidate=True,
     )
 
 
@@ -170,8 +169,6 @@ def walk_target() -> NearbyObject:
         name="route:castle_west_approach",
         kind="NAVIGATION_TILE",
         actions=("Walk here",),
-        resource_candidate=False,
-        route_candidate=True,
     )
 
 
@@ -217,7 +214,6 @@ def camera_target(*, actionable: bool = False) -> NearbyObject:
         ),
         scene_x=56,
         scene_y=38,
-        route_candidate=True,
     )
 
 
