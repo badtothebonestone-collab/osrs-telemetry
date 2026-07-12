@@ -19,7 +19,7 @@ from .engine_frame import (
     ObservationReference,
 )
 from .input_coordinator import InputCoordinator, InputFailureKind
-from .model import Action, ActionKind, Observation, VerificationSpec
+from .model import Action, ActionKind, Observation, ScreenBounds, VerificationSpec
 from .observation import ObservationClient
 from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
 from .verification import (
@@ -407,7 +407,13 @@ class TaskRuntime:
         last_tick: int | None = None
         last_decision: Decision | None = None
         consecutive_unsent_replans = 0
-        cursor_replan_after: tuple[int, str | None, int] | None = None
+        cursor_replan_after: tuple[
+            int,
+            str | None,
+            int,
+            ScreenBounds | None,
+            ScreenBounds | None,
+        ] | None = None
         runtime_deadline = self._clock() + self._max_runtime_seconds
         focus_deadline = self._clock() + LIVE_FOCUS_HANDOFF_SECONDS
 
@@ -501,7 +507,13 @@ class TaskRuntime:
                 # diagnostic evidence only; refetch before task state changes.
                 continue
             if cursor_replan_after is not None:
-                expected_pid, expected_session, minimum_tick = cursor_replan_after
+                (
+                    expected_pid,
+                    expected_session,
+                    minimum_tick,
+                    expected_canvas,
+                    expected_window,
+                ) = cursor_replan_after
                 if (
                     observation.client_process_id != expected_pid
                     or observation.session_id != expected_session
@@ -515,6 +527,29 @@ class TaskRuntime:
                         last_decision,
                     )
                 if observation.tick <= minimum_tick:
+                    self._sleep(self._poll_seconds)
+                    continue
+                if (
+                    observation.canvas_bounds != expected_canvas
+                    or observation.client_window_bounds != expected_window
+                ):
+                    return self._result(
+                        "BLOCKED",
+                        "RuneLite geometry changed after cursor reacquisition",
+                        observations,
+                        actions,
+                        last_tick,
+                        last_decision,
+                    )
+                if not (
+                    observation.fresh
+                    and observation.cache_wall_clock_fresh
+                    and observation.source_coherent
+                ):
+                    # Cursor ingress invalidates the action that was recognized
+                    # before movement. A newer tick is not sufficient evidence
+                    # to rebuild it: recognition may resume only from the same
+                    # freshness/coherence contract used by live safety.
                     self._sleep(self._poll_seconds)
                     continue
                 cursor_replan_after = None
@@ -724,6 +759,8 @@ class TaskRuntime:
                         observation.client_process_id,
                         observation.session_id,
                         observation.tick,
+                        observation.canvas_bounds,
+                        observation.client_window_bounds,
                     )
                 self._frame_pending = None
                 self._publish_frame(EngineStage.EXECUTED)

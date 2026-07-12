@@ -2,23 +2,29 @@
 
 ## Current milestone
 
-**Phase 8 and the external-cursor final regression are complete.**
+**Stationary-RuneLite external-cursor reacquisition is implemented and
+live-proven.**
 
-The host/input stack through delayed-MOVE checkpoint `6eef48c` passes its
-offline and live gates. Displaced login/gameplay recovery, one directly
-observed 78 ms delayed MOVE, a complete current-checkpoint default cycle, a
-user-performed `Walk here` demonstration, public artifact inspection, and
-post-demo cleanup are **PASS** at the retained fixed-client 175% layout.
+Normal production cursor recovery now keeps the exact telemetry-owning
+RuneLite window stationary and moves only the freshly observed PMv2 cursor
+through the existing Arduino-only `InputCoordinator`. The replacement policy,
+focused/full deterministic gates, and exactly one bounded no-click live cursor
+test are **PASS** at the retained fixed-client 175% layout. Historical D031
+window-translation evidence remains below only as retired context.
 
-Current input checkpoint: `6eef48c input: await bounded cursor move feedback`.
+Current input milestone: reacquire an external cursor without moving or
+resizing RuneLite, discard the pre-movement intent, and require fresh normal
+recognition and SafetyGate validation before any later activation.
 
 Current demonstration checkpoints: `c8888bb demonstrations: tolerate bounded
 world model handoff` and `000a886 demonstrations: settle manual movement
 evidence`.
 
-Current input contract: the source-blind 500 ms owned-button bound plus the
-absolute 200 ms MOVE-effect / 240 ms stability contract, conservative
-post-activation classification, and persisted receipt/EngineFrame truth.
+Current input contract: one exact PID/root HWND, invariant outer/client/canvas
+geometry, PMv2 virtual-desktop cursor truth, the existing shared Arduino lease,
+the source-blind 500 ms owned-button bound plus absolute 200 ms MOVE-effect /
+240 ms stability contract, conservative post-activation classification, and
+persisted receipt/EngineFrame truth.
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -87,33 +93,79 @@ Regression command:
   remains strong input/cycle evidence but no longer proves the later `f2007eb`
   production sensor checkpoint.
 - All live gameplay input remains Arduino-only; no software fallback exists.
-- The current displaced-login behavior has a stitched component proof. The
+- Historical D031 displaced-login behavior has a stitched component proof. The
   direct `31e1391` run safely handed off with zero commands, passed the
   disconnect/Play Now/Click here transactions with complete cleanup, and
   reached a loaded scene. At `ae8b9f8`, the three prompt transactions and
   loaded outcome passed again, while focused tests cover lease contention. No
-  single `ae8b9f8` artifact is a direct end-to-end displaced-login run.
-- Current-checkpoint displaced gameplay recovery is proven as a subcriterion at
+  single `ae8b9f8` artifact is a direct end-to-end displaced-login run. This is
+  evidence for the retired window-translation policy, not current production
+  cursor-recovery behavior.
+- Historical D031 displaced gameplay recovery was proven as a subcriterion at
   the retained layout. With the cursor stationary outside RuneLite over foreign
   PID `6120`, the engine moved only the pinned window, reobserved, and sent nine
   Tree interactions; inventory increased from 10 to 19 logs. The
   bounded run ended top-level BLOCKED when its deliberately short runtime
   expired while verifying the final/tenth action attempt (the ninth Tree
-  click), and its final PASS receipt/cleanup is fully safe.
+  click), and its final PASS receipt/cleanup is fully safe. That proof remains
+  historical and does not authorize moving or resizing RuneLite now.
 - Gameplay and saved-session login now submit immutable approved intents to one
   `InputCoordinator`; neither can open an Arduino session or call raw input.
-- Normal gameplay pointer transit remains inside the loaded-scene telemetry
-  canvas. Telemetry `clientWindow*` is the AWT-derived outer reacquisition
-  envelope: native outer size must match exactly, origin quantization is capped
-  at one device pixel per axis for gameplay only, and the exact canvas must also
-  fit the separately sampled actual Win32 client. Login remains exact.
-  A fresh cursor on one outside axis may move inward under the fixed distance,
-  headroom, ownership, and physical-button caps. A quiet stationary cursor
-  beyond the outer window is handled before serial connect by one bounded,
-  non-activating exact-window translation under that cursor--never desktop-wide
-  pointer motion. The stale intent is discarded; login re-finds and re-screens
-  at tick zero, while gameplay requires a newer same-PID/session tick and exact
-  updated outer/client/canvas proof. Post-mutation uncertainty is terminal.
+- Current production cursor recovery keeps RuneLite stationary. The engine
+  binds the telemetry PID and exact foreground root HWND, retains native outer/
+  client plus telemetry-canvas geometry, and never reaches a window-position/
+  size mutation or software cursor API from the recovery path.
+- Gameplay waits for the telemetry-owning RuneLite root to become foreground
+  and blocks if the bounded focus wait expires. Saved-session login may use only a
+  bounded `SetForegroundWindow` focus attempt for the exact visible,
+  non-minimized root and proves PID/HWND plus outer/client geometry unchanged
+  before and after; failure returns manual attention rather than moving RuneLite.
+- A freshly sampled cursor anywhere outside the canvas but inside the proven
+  PMv2 virtual desktop enters through one connected movement-only transaction
+  under the existing cross-process Arduino lease. It moves through the existing
+  coordinator/transport to a neutral inset inside the canvas after protocol-safe
+  ARM proves zero firmware-held keys/buttons. It sends no click or key and
+  continuously preserves foreground, PID/root HWND, virtual bounds,
+  physical-button release, bounded motion, and bit-for-bit outer/client/canvas
+  geometry. Exact point ownership is required after canvas entry.
+- The movement-only receipt retains additive `cursorReacquisition` before/after
+  cursor and geometry evidence plus completion, geometry-unchanged, and no-
+  activation facts. Authoritative cleanup runs on success or failure. Typed
+  invalidation discards the old intent: gameplay needs a strictly newer same-
+  PID/session tick whose source is fresh, wall-clock-fresh, and coherent, plus
+  exact geometry, before recognition/SafetyGate validation; login refetches,
+  re-finds, and re-screens the exact client. Login permits at most two cursor-
+  recovery attempts before an explicit manual-attention result.
+- Exactly one bounded live cursor test on 2026-07-12 pinned PID `12164`, root
+  HWND `7210234`, outer `(397,390,2243,1585)`, native client
+  `(409,390,2219,1573)`, and canvas `(416,437,2151,1519)`. With RuneLite still
+  foreground, the externally placed cursor started at `(3180,1062)`, completely
+  outside the RuneLite outer window, and 82 acknowledged Arduino `MOVE`
+  commands settled it at `(1497,1189)` in neutral canvas bounds
+  `(1483,1188,17,17)`. No click, mouse-button, or key command was present.
+  Before/after receipt geometry matched bit-for-bit. The tick-197 intent was
+  typed `cursor_state_invalidated`; runtime obtained a new decision from tick
+  202 and then stopped at its deliberate one-action cap before activation. An
+  independent post-proof remained loaded/fresh/coherent at tick 309 with the
+  cursor unchanged across two samples. Cleanup ended
+  `STOP_ALL -> DISARM -> STATUS`, final firmware was disarmed with zero held
+  keys/buttons, every command was acknowledged, all command-failure counters
+  were zero, ledger/backend were closed, and the COM6 lease was absent.
+  The exact test client then closed gracefully without force; its Gradle wrapper,
+  ports 8893/8890, live task process, and COM6 lock were all absent in
+  `environment_cleanup.json`.
+  The user prepared the start over a foreign surface, but `pre.json` did not
+  serialize `WindowFromPoint` owner PID/HWND and `(3180,1062)` was not a desktop
+  corner. The machine artifact therefore proves a start outside the entire
+  RuneLite window, not independent foreign-application identity; the live test
+  is not repeated because this milestone permits exactly one.
+- The ignored live bundle is
+  `_run_proofs/cursor_policy/20260712_stationary_runelite_reacquire/`.
+  SHA-256 values for `pre.json`, `live_runtime.json`, and `post.json` are
+  respectively
+  `63A937300774262E762F9A8C0D8CE68A98287E8D9309EC0599872E5BE2521695`,
+  `5723331F2B1C479CC8948D00DE932C05E9675519ABDEDEA7906DB6369D1F96A8`,
+  and `1E7F5A1038D6EED6D2934C91209A59C6FB1E839815B85FADF4CF7543D9F0B59E`.
 - Every cursor and point-owner read independently establishes per-monitor-v2
   device pixels on the calling thread. A failed/ineffective context change or
   `GetCursorPos` failure blocks; the engine never substitutes `(0,0)` or a
@@ -141,8 +193,11 @@ Regression command:
   preparatory right-click context opener alone is not the semantic action. The
   conservative boolean is retained in the terminal EngineFrame/application
   artifact alongside the unsuccessful receipt.
-- The deterministic pointer policy produces only bounded relative motion inside
-  the verified canvas, with velocity/acceleration caps and target-aware braking.
+- The deterministic pointer policy produces only bounded relative motion with
+  velocity/acceleration caps and target-aware braking. Ordinary action transit
+  stays inside the canvas; the distinct movement-only reacquisition lane is
+  bounded by the verified virtual desktop until canvas entry and by the canvas
+  afterward.
 - The policy retains one exact target, while the coordinator binds activation to
   the actual stable device-pixel endpoint. The coordinator executes at most 64
   exact command-waypoint plans/512 MOVE commands across the complete Arduino
@@ -179,14 +234,16 @@ Regression command:
   and the ledger contains preactivation commands exclusively. The task then
   suppresses that exact tree key for one fresh selection; the next equivalent
   failure blocks.
-- Physical cursor-state invalidation is a separate typed safely-unsent lane. It
-  may receive one fresh reobservation with no target suppression only when the
+- Physical cursor-state invalidation is a separate typed unsent lane. It may
+  receive one fresh reobservation with no target suppression only when the
   receipt has the matching failure kind, preactivation-only ledger, and complete
-  cleanup; repetition blocks.
-- Before pointer preflight or any window mutation, the host acquires the same
-  cross-process port lease used by the later Arduino session without opening or
-  arming hardware. Contention leaves an empty closed ledger and cannot reach
-  `SetWindowPos`, serial open, MOVE, or activation.
+  cleanup; repetition blocks. A completed connected reacquisition qualifies
+  only with retained unchanged-geometry/no-activation evidence.
+- Before pointer preflight, the host acquires the same cross-process port lease
+  used by the later Arduino session without opening or arming hardware. It keeps
+  that lease through any connected cursor movement, cleanup, and backend close.
+  Contention leaves an empty closed ledger and cannot open serial, MOVE, activate
+  input, use software cursor APIs, or mutate RuneLite.
 - RuneLite's integer source-canvas menu point has a retained-layout-only
   four-device-pixel correlation bound to the settled Win32 cursor. Actual
   activation and both source/fresh canonical aim checks remain +/-3, exact menu
@@ -201,7 +258,10 @@ Regression command:
   firmware report to prove disarmed with zero held keys/buttons and no missing,
   failed, or unresolved command evidence. Additive `cursorFeedback` retains
   wait/settled counts, maxima, and the last command/points/timings/outcome; every
-  recorded wait must settle for input success.
+  recorded wait must settle for input success. Additive `cursorReacquisition`
+  retains PMv2 virtual/neutral bounds, before/after cursor, exact bound PID/root
+  HWND and outer/client/canvas geometry, completion, unchanged geometry, and
+  no-activation evidence.
 - The Arduino transport and raw operations are private. Recursive static
   boundary tests reject another production importer/caller and reject software
   input modules.
@@ -299,9 +359,11 @@ terminal frame and transaction `input-00000082`, not receipts/history for
 actions 1-81, so it proves the uninterrupted cycle outcome and final cleanup but
 is not a complete raw audit of every intermediate transaction.
 
-The current cursor-handoff bundle is narrower host/input evidence, not a
-completed-cycle claim. Its login conclusion is compositional rather than one
-direct current-checkpoint execution. `login_activation_footprint_current.json`
+The historical D031 cursor-window-handoff bundle is narrower host/input
+evidence, not a completed-cycle claim and not proof of the replacement
+stationary-window production policy. Its login conclusion is compositional
+rather than one direct current-checkpoint execution.
+`login_activation_footprint_current.json`
 proves the displaced login handoff and all three prompt transactions at
 `31e1391`. At
 `ae8b9f8`, `login_after_cross_process_lease.json` records three more PASS prompt
@@ -348,9 +410,9 @@ the geometry condition and recovery behavior rather than source attribution.
   `(1191,472,2219,1573)`, and owned by the visible ChatGPT root window. Both
   login attempts correctly sent no MOVE/click and ended with acknowledged
   `STOP_ALL`, `DISARM`, safe zero-held status, and zero unresolved commands.
-  The defect was therefore policy coverage, not forgotten coordinates. The new
-  pre-serial window handoff directly covers this exact geometry while retaining
-  the no-pointer-motion-outside-RuneLite invariant.
+  The defect was therefore policy coverage, not forgotten coordinates. The
+  then-new pre-serial window handoff covered this exact geometry under the
+  historical D031 policy; that window-translation policy is now retired.
 - An earlier transaction received acknowledged MOVE commands but Windows still
   reported no X movement at the ordinary sample. Cursor, telemetry, foreground,
   and exact HWND ownership agreed, so manual interference was not supported.
@@ -517,8 +579,8 @@ the geometry condition and recovery behavior rather than source attribution.
   external Gradle reports were counted directly. The deterministic Java fixture
   SHA-256 is
   `80AF03C08681D242033D5ED4FBFF56AF6069263C40E0D290CABF5B7DDA549081`.
-- External-cursor handoff gate: 508 Python tests passed and the focused
-  Arduino/coordinator/login/runtime set passed 216/216; golden replay remains
+- Historical external-cursor window-handoff gate: 508 Python tests passed and
+  the focused Arduino/coordinator/login/runtime set passed 216/216; golden replay remains
   2/2; `python -m compileall`, `git diff --check`, catalog, profile-schema, and
   default-profile validation pass. A forced Java rerun executed 76 tests across
   8 suites with zero failures, errors, or skips. Read-only live PMv2 proof on
@@ -526,13 +588,13 @@ the geometry condition and recovery behavior rather than source attribution.
   `(1179,472,2243,1585)`, client `(1191,472,2219,1573)`, and contained canvas
   `(1199,520,2151,1519)`. At that checkpoint, physical login/gameplay execution
   was the next gate.
-- Current `ae8b9f8` gate: 527 Python tests passed; golden replay passed 2/2;
+- Historical `ae8b9f8` gate: 527 Python tests passed; golden replay passed 2/2;
   `python -m compileall`, `git diff --check`, `run.cmd test`, catalog,
   profile-schema, and default-profile validation passed. A forced Java rerun
   executed 76 tests across 8 suites with zero failures, errors, or skips; counts
   came from the configured external Gradle build directory. Focused tests also
-  prove that cross-process lease contention cannot reach `SetWindowPos`, serial
-  open, or input.
+  proved that historical cross-process lease contention could not reach window
+  mutation, serial open, or input.
 - `07de1ef` owned-transition offline gate: 544 Python tests passed, including a
   focused 148-test action/runtime/EngineFrame/application/Arduino suite; golden
   replay passed 2/2; `python -m compileall`, `git diff --check`, `run.cmd test`,
@@ -553,9 +615,9 @@ the geometry condition and recovery behavior rather than source attribution.
   observed after 200 ms, instability at 240 ms, staggered axes, point-owner
   loss, physical-button activity, final drift, clock failure, safe BLOCKED
   cleanup classification, and nonempty EngineFrame serialization.
-- Earlier live handoff evidence: displaced saved-session login and displaced
-  gameplay recovery subcriteria are PASS at the retained layout. Login is the
-  stitched `31e1391` direct handoff plus current prompt/loaded and lease-test
+- Historical D031 live handoff evidence: displaced saved-session login and
+  displaced gameplay recovery subcriteria are PASS at the retained layout.
+  Login is the stitched `31e1391` direct handoff plus then-current prompt/loaded and lease-test
   chain described above, not one direct `ae8b9f8` run. The bounded gameplay run
   executed 10 action attempts, increased inventory from 10 to 19 logs, and
   retained a final PASS transaction with acknowledged `STOP_ALL`, `DISARM`, safe
@@ -596,6 +658,20 @@ the geometry condition and recovery behavior rather than source attribution.
   and `76FA67BCD398388186D0DAD69DE79BA26CAADD0C30E9A843288187DF68A8F1C6`.
   The retained public-inspector proof SHA-256 is
   `CBF2FD726E7FE1B5CAF770E9686CC4EA5063C76F0D07CA2A6B8264583965AA16`.
+- Stationary-RuneLite cursor-reacquisition gate: the focused input/login/runtime
+  set passed 359/359 and the complete Python suite passed 576/576; golden replay
+  remained 2/2; `python -m compileall` and `git diff --check` passed. A forced
+  noncached Java/Gradle rerun executed 76 tests across 8 suites with zero
+  failures, errors, or skips. The exactly-one live test and its cleanup proof
+  are recorded above; no full woodcut/bank cycle or automated login attempt was
+  run for this milestone.
+- Final read-only audit after that single live test found that gameplay's
+  post-reacquisition gate required a newer exact-geometry tick but did not also
+  enforce `fresh`, `cache_wall_clock_fresh`, and `source_coherent` before task
+  recognition. The host-only gate was tightened and a three-shape focused test
+  plus the full suites above passed. The live movement is not repeated under
+  the exactly-one cap; its post-proof independently records a qualifying fresh,
+  wall-clock-fresh, coherent same-session frame at tick 309.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -615,11 +691,16 @@ the geometry condition and recovery behavior rather than source attribution.
   proven. The separate 500 ms owned-button code is live-integrated and its old
   terminal blocker did not recur, but no artifact measures a button transition
   over 100 ms. Windows same-button state remains source-indistinguishable.
-- An async window-position request that misses its 750 ms convergence deadline
-  cannot be canceled and may complete later. That attempt is terminal and sends
-  no input; every later attempt rechecks exact geometry. Cross-monitor
-  mixed-DPI placement is deterministically covered and safely fail-closed but
-  has not been physically exercised on this one-monitor machine.
+- Cross-monitor mixed-DPI virtual-desktop cursor ingress is deterministically
+  covered and safely fail-closed but has not been physically exercised on this
+  one-monitor machine. The retired asynchronous window-position limitation no
+  longer applies to production cursor recovery because that path cannot mutate
+  RuneLite geometry.
+- The single live artifact directly proves stationary-window Arduino cursor
+  ingress and cleanup, but predates the final host-only freshness/coherence
+  replan guard added by audit. That guard is deterministically covered rather
+  than live-repeated; the retained post-frame proves the required fresh state
+  existed later, not that the final guard itself was exercised live.
 - The four-device-pixel menu correlation bound is proven only on the retained
   fixed-client 175% layout. Arbitrary layouts require fresh measurement; the
   activation, canonical-aim, target-bound, and exact-menu gates remain strict.
@@ -634,7 +715,8 @@ the geometry condition and recovery behavior rather than source attribution.
   fresh retry can replace that earlier receipt in terminal run output; bounded
   prior-attempt history remains a future observability decision.
 - Current `input_transaction_receipt.v1` JSON includes additive
-  `cursorFeedback`; older v1 proof artifacts may omit it.
+  `cursorFeedback` and movement-only `cursorReacquisition`; older v1 proof
+  artifacts may omit either field.
 - There is intentionally no external profile loader, second definition, or
   generic navigation/transition framework.
 - The passive overlay has been compared against fresh live EngineFrames; a final

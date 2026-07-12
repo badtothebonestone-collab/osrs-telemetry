@@ -17,11 +17,13 @@ fallback. Static boundary tests reject another production importer or caller.
 
 Every coordinator transaction is non-reentrant. It creates one private backend,
 begins an empty command ledger, and acquires the shared cross-process input
-lease before any serial connection or pointer preflight. Pointer lanes then run
-the no-input cursor/window preflight. A permitted window-under-cursor handoff
-ends there with an empty safely-unsent receipt, closed ledger/backend, and no
-serial input; the caller must rebuild the intent from fresh evidence. Every
-connected input transaction follows this bounded lane:
+lease before any serial connection or pointer preflight. Pointer lanes then
+sample current cursor, focus, virtual-desktop, and exact RuneLite geometry. If
+the cursor is outside the canvas, the same transaction connects and arms the
+existing Arduino transport, performs movement-only reacquisition to a neutral
+canvas region, sends no click or key, cleans up, and returns typed invalidation
+so the caller must rebuild the intent from fresh evidence. Every connected
+input transaction follows this bounded lane:
 
 ```text
 begin command ledger
@@ -54,10 +56,14 @@ click evidence rather than summarized into a mutable backend dictionary.
 `input_transaction_receipt.v1` now adds `cursorFeedback`: bounded wait/settled
 counts, maximum extra polls and elapsed milliseconds, and the last event's
 plan/step, command, before/final points, first/complete effect times, and
-outcome. Every recorded wait must settle for a successful receipt. Older v1
-artifacts may omit this additive field. `EngineFrame` intentionally retains
-only the latest execution receipt, so a later retry can replace an earlier
-transaction's evidence in terminal run output.
+outcome. Movement-only recovery also retains additive `cursorReacquisition`
+(`cursor_reacquisition.v1`): PMv2 coordinate space, virtual-desktop and neutral
+bounds, before/after cursor, exact bound PID/root HWND and outer/client/canvas
+geometry, completion, unchanged-geometry, and no-activation proof. Every
+recorded wait must settle for a successful receipt. Older v1 artifacts may omit
+these additive fields. `EngineFrame` intentionally retains only the latest
+execution receipt, so a later retry can replace an earlier transaction's
+evidence in terminal run output.
 
 ## Pointer policy
 
@@ -94,13 +100,12 @@ thread-context change, or a failed cursor read blocks and never substitutes
 `(0,0)` or the last commanded location.
 
 Every initial pointer intent has a no-input preflight before serial connect.
-Before that preflight can mutate a window, the backend acquires the same
-cross-process port lease that protects the later Arduino session, without
-opening or arming the device. The lease remains held through the transaction or
-handoff receipt until backend close. Contention blocks with an empty closed
-ledger and performs no `SetWindowPos`, serial open, MOVE, or activation; a
-second host process therefore cannot move RuneLite during another process's
-active input transaction.
+The backend first acquires the same cross-process port lease that protects the
+later Arduino session, without opening or arming the device. The lease remains
+held through preflight, any connected cursor movement, authoritative cleanup,
+and backend close. Contention blocks with an empty closed ledger and performs
+no serial open, MOVE, activation, software cursor call, or RuneLite geometry
+mutation.
 The first physical-button sample consumes only historical released-button bits,
 then two bounded all-clear samples must prove no held or new button activity.
 The exact foreground root HWND/PID is pinned, and native PMv2 Win32 geometry is
@@ -112,20 +117,37 @@ quantization. Its exact canvas must still be contained by the current
 and exact client rectangles. A resize, a larger origin difference, or failed
 canvas containment does not qualify.
 
-If the stationary cursor is beyond that verified outer window, the coordinator
-does not move it through the desktop. Instead, while the mouse remains quiet,
-it issues one no-resize/no-z-order/no-activation `SWP_ASYNCWINDOWPOS` for the
-exact non-minimized, non-maximized RuneLite HWND on the cursor's monitor. The
-window must fit the work area and converge within 750 ms so the translated
-strict movement region contains the unchanged cursor with 32 device pixels of
-headroom. Cursor, focus, buttons, final root ownership, and two settled plus one
-final exact window rectangles must all pass. The old intent is then always
-returned as typed safely unsent: login re-finds the window and re-screens the
-whole client even though login tick remains zero; gameplay waits for a newer
-tick from the same PID/session. A post-`SetWindowPos` error or contradictory
-handoff evidence is terminal and cannot consume the retry path. An async request
-that times out cannot be canceled and may move the window later, but no input or
-automatic retry follows it and every future run rechecks exact geometry.
+RuneLite remains stationary. Normal production cursor recovery contains no
+window-position/size mutation and no software cursor operation. Gameplay
+requires the telemetry-owning RuneLite root to be foreground and waits only for
+the existing bounded focus-wait interval before blocking. Saved-session login may
+call `SetForegroundWindow` once for the exact visible, non-minimized root, but
+must sample and prove identical PID/HWND and outer/client geometry before and
+after; it never restores, moves, or resizes the window. Failed focus or a
+minimized window is an actionable manual-attention blocker.
+
+If the freshly sampled cursor is outside the canvas, its start must be inside
+the freshly proven PMv2 virtual desktop. The coordinator derives a central
+neutral canvas region with a safe inset, connects and arms the one Arduino
+transport under the already-held lease, and moves only the cursor toward that
+region. Protocol-safe ARM first proves firmware `keysDown=0` and
+`mouseButtonsDown=0`. Reacquisition sends no click, mouse button, or key. Every movement sample preserves
+the exact PID/root HWND, foreground ownership, virtual-desktop bounds,
+outer/client/canvas geometry, physical-button release, bounded direction/gain,
+and velocity/acceleration limits. Foreign-surface transit is permitted only
+before canvas entry; after entry, every sample must stay inside the canvas and
+belong to the exact pinned root. Completion requires a stable cursor inside the
+neutral region and bit-for-bit identical retained geometry.
+
+Whether reacquisition succeeds or fails, the connected attempt ends with
+`STOP_ALL -> DISARM -> STATUS`, closes its ledger/backend, releases the lease,
+and sends no activation. Success still returns typed cursor-state invalidation:
+the old action or login intent is discarded rather than activated. Gameplay
+waits for a strictly newer tick from the same PID/session whose source is
+fresh, wall-clock-fresh, and coherent, plus exact unchanged geometry, before
+target recognition and normal SafetyGate validation. Login
+re-fetches telemetry, re-finds the exact window, and re-screens the entire
+client at tick zero before prompt recognition and validation.
 
 An unknown axis begins with one HID-count probe. Before every MOVE, all four
 directions on both screen axes must contain an explicit envelope of eight device
@@ -146,7 +168,8 @@ continuing movement, button activity during the dwell, or a late report from a
 prior cleaned transaction becomes typed cursor-state invalidation before any
 new MOVE. This no-input quiescence gate also precedes the one allowed
 lane-specific retry: login re-finds and re-screens the exact current client,
-while gameplay requires a newer tick from the same PID/session.
+while gameplay requires a newer fresh/wall-clock-fresh/coherent tick from the
+same PID/session.
 
 The coordinator starts a monotonic cursor-feedback clock immediately before
 each serial MOVE, so write/ACK latency counts. If either ordinary post-MOVE
@@ -159,10 +182,11 @@ complete cumulative effect on every commanded axis must first be observed by
 and final unchanged cursor sample do not extend command credit or authorize a
 new MOVE.
 
-Every extended sample must retain the pinned foreground HWND/PID and exact
-point owner, stay inside the applicable canvas or outer reacquisition bounds,
-and satisfy cumulative direction, gain, and uncommanded-axis rules. The final
-sample repeats foreground, owner, and bounds proof. A stable stationary manual
+Every extended sample must retain the pinned foreground HWND/PID, current PMv2
+coordinate space, applicable virtual-desktop/canvas bounds, exact unchanged
+outer/client/canvas geometry, and cumulative direction, gain, and uncommanded-
+axis rules. Once inside the canvas it must also retain exact point ownership.
+The final sample repeats foreground, owner, geometry, and bounds proof. A stable stationary manual
 takeover is current truth, so the final stable point may differ from the point
 where the Arduino effect was first observed; the old trajectory is always
 discarded and a fresh correction or zero-step plan is required. Same-direction,
@@ -172,24 +196,22 @@ remain final vetoes rather than retrospective source attribution.
 
 Effect not observed by 200 ms, instability at 240 ms, focus/owner/bounds drift,
 or invalid transfer becomes typed cursor-state invalidation before activation.
-The existing runtime/login lane may reobserve once; repetition blocks. The
-receipt retains success and failure timing, including an effect first observed
+The gameplay runtime may reobserve once; login permits at most two total cursor-
+recovery attempts, including the first, and then returns an explicit manual-
+attention blocker. A separate later user attempt always samples the user's
+current cursor anew. The receipt retains success and failure timing, including
+an effect first observed
 after the deadline, without misclassifying safe firmware cleanup as an input
 error. No path may send another MOVE while the prior effect remains unproved.
 
-Normal gameplay transit is confined to the loaded-scene telemetry canvas in
-Win32 device pixels. The optional telemetry `clientWindow*` bounds are the outer
-window rectangle and form only a movement-only reacquisition region. A freshly
-sampled cursor just outside the canvas may enter when it is still owned by the
-exact pinned RuneLite root HWND/PID, lies outside on exactly one axis, is no more
-than 64 device pixels from the canvas, and has the required cross-axis and
-four-sided transfer headroom.
-At most 72 one-count inward MOVEs may reach a stable eight-pixel inset. Cross-
-axis motion, wrong direction, excess gain, no progress/effect, ownership/focus
-change, multiple outside axes, or insufficient outer-edge headroom blocks before
-activation. Only then does the ordinary canvas planner start from the newly
-observed point. This supports a manual cursor handoff or window resize without
-turning the whole desktop into an input region.
+Normal action transit is confined to the loaded-scene telemetry canvas in Win32
+device pixels. The optional telemetry `clientWindow*` bounds provide expected
+outer-window geometry for PID/HWND binding; they are not movement or activation
+authority. The external-cursor lane is a distinct movement-only transaction
+bounded by the verified virtual desktop until it enters the canvas, then by the
+canvas and its exact root owner. It terminates at the neutral inset and never
+continues into the stale action's target. Only a later fresh intent may use the
+ordinary canvas planner and semantic activation path.
 
 Before a game tick can provide canvas geometry, saved-session login uses the
 same exact visible PID-owned Win32 RuneLite client boundary. A single supported
@@ -207,6 +229,11 @@ zone, more than 20,000 high-anchor-score origins, or excessive first-anchor
 density blocks instead of becoming a no-match or disconnect candidate. These
 are fail-closed work caps; supported live geometry is separately measured
 inside the firmware lease rather than claimed as a universal latency bound.
+Login cursor-state recovery may create at most two automated attempts. After
+the second unsuccessful attempt it returns
+`manual_attention_required_after_two_login_recovery_attempts`; it does not
+retain or fight an older cursor coordinate. Credentials, MFA, text entry, bank
+PINs, minimized windows, and unsupported prompts always require manual handling.
 
 When that normal matcher caps on an otherwise coherent loaded scene, the helper
 may perform one larger but still bounded scan for the two exact retained login
@@ -261,13 +288,14 @@ cancellation path; an explicit button-down rejection does not send Escape.
 
 ## Unsent target invalidation
 
-The adaptive gameplay action layer has two typed, safely unsent dispositions.
+The adaptive gameplay action layer has two typed unsent dispositions.
 `TARGET_EVIDENCE_INVALIDATED` means fresh exact hover proof changed before any
 activation; the resource task may suppress that exact pending key for one fresh
 alternate selection. `CURSOR_STATE_INVALIDATED` means the observed physical
-cursor/ownership/bounds state changed; it permits one fresh reobservation but
-does not suppress the target. Runtime accepts either only when the receipt is
-blocked, the failure kind matches the typed disposition, and either connected
+cursor/ownership/bounds state changed or a no-click reacquisition completed; it
+permits one fresh reobservation but does not suppress the target. Runtime
+accepts either only when the receipt is blocked, the failure kind matches the
+typed disposition, and either connected
 cleanup is authoritative and safe or a pre-serial receipt proves an empty closed
 ledger and closed backend. Any ledger commands must remain preactivation/
 cleanup-only--never mouse activation or a key press. Neither lane is input

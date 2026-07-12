@@ -142,19 +142,22 @@ runtime logic.
   precedence path. No lane restores verification or historical cycle credit.
 - **D026 — Cursor truth is observed, never remembered:** every cursor and
   point-owner sample establishes per-monitor-v2 device pixels on its current
-  thread. A fresh cursor inside the RuneLite outer envelope may enter through a
-  movement-only, exact-owner, one-axis bounded lane; unsupported displacement
-  becomes typed cursor-state invalidation and may receive one safe
-  reobservation without suppressing the target. Before a first MOVE, two
-  timestep-separated identical samples, a fresh physical-button quiet proof,
-  and one final unchanged cursor/foreground sample accept a stationary manual
-  position as current truth and reject continuing motion or a late prior report.
+  thread. A fresh cursor anywhere inside the proven PMv2 virtual desktop may
+  enter the stationary RuneLite canvas through one connected Arduino-only,
+  movement-only lane. Before a first MOVE, two timestep-separated identical
+  samples, a fresh physical-button quiet proof, and one final unchanged
+  cursor/foreground sample accept a stationary manual position as current truth
+  and reject continuing motion or a late prior report. The old action/login
+  intent is always discarded after ingress; gameplay requires a newer same-
+  session tick whose source is fresh, wall-clock-fresh, and coherent, while
+  login re-finds and re-screens the exact window.
 - **D027 — Serial ACK is not Windows cursor proof:** never infer cursor arrival
   from an acknowledged MOVE or a prior command. Observe the current PMv2 cursor,
   never stack a second MOVE on an unproved effect, and turn unresolved cursor
   state into typed invalidation for at most one lane-specific fresh
   reobservation: login re-finds/re-screens the client, while gameplay requires a
-  newer same-identity tick. Repetition remains fail-closed.
+  newer same-identity tick whose source is fresh, wall-clock-fresh, and
+  coherent. Repetition remains fail-closed.
 - **D028 — Loaded-scene login proof is absence-only:** if the normal prompt
   matcher caps on a coherent loaded scene, one larger bounded scan may search
   only the exact retained templates. The broad disconnect heuristic remains a
@@ -170,15 +173,19 @@ runtime logic.
   does not classify resources, routes, services, skills, profiles, tasks, or
   desired classes. Spatial/projection ordering uses only factual geometry,
   identity, and distance; the selected definition/task assigns meaning.
-- **D031 — External cursor recovery moves RuneLite, not the pointer:** after a
-  bounded physical-button quiet dwell, an external stationary cursor may be
-  recovered before serial connect by one exact, non-activating, no-resize
-  translation of the pinned foreground RuneLite window on its containing
-  monitor. Split outer/client/canvas geometry, PID/HWND, cursor stability, and
-  final point ownership must all pass. The old intent is always discarded;
-  login re-finds and re-screens the client, while gameplay requires a newer
-  same-identity sensor tick. Any unproved post-mutation state is terminal, and
-  the pointer never traverses foreign desktop surfaces.
+- **D031 — External cursor recovery keeps RuneLite stationary:** bind the
+  telemetry PID and exact foreground root HWND, retain native outer/client and
+  telemetry-canvas geometry, prove the PMv2 virtual desktop and physical-button
+  quiet, then use the existing Arduino-only `InputCoordinator` to move an
+  external stationary cursor to a neutral region comfortably inside the canvas.
+  The movement sends no click or key, preserves exact geometry throughout, and
+  retains `cursorReacquisition` evidence. Production recovery never calls
+  `SetWindowPos`, `MoveWindow`, an equivalent geometry mutation, or a software
+  cursor API. Gameplay waits or
+  blocks for foreground ownership; login may use only a bounded
+  `SetForegroundWindow` focus attempt with unchanged geometry. The old intent
+  is discarded and normal recognition/safety is rerun from fresh evidence.
+  Login allows at most two cursor-recovery attempts before manual attention.
 - **D032 - Menu coordinates are correlation evidence, not activation
   authority:** RuneLite reports menu mouse position as integer source-canvas
   pixels. At the retained 175%-display fixed-client layout, fresh exact-menu
@@ -186,11 +193,12 @@ runtime logic.
   device pixels. This does not enlarge the +/-3 activation region, API
   shape/canvas containment, canonical aim checks, or exact menu identity; five
   pixels still blocks. A different layout requires fresh measurement.
-- **D033 - Window handoff and Arduino input share one cross-process lease:**
-  the configured port lease is acquired before pointer preflight or any
-  `SetWindowPos`, without opening or arming hardware, and remains held through
-  backend close. Contention yields a safely-unsent empty-ledger receipt and
-  cannot mutate RuneLite while another process owns an input transaction.
+- **D033 - Cursor reacquisition and Arduino input share one cross-process
+  lease:** the configured port lease is acquired before pointer preflight,
+  remains held through connected movement, cleanup, and backend close, and
+  preserves one coordinator/transport owner. Contention yields a safely-unsent
+  empty-ledger receipt and cannot open serial, move the cursor, activate input,
+  or mutate RuneLite while another process owns an input transaction.
 - **D034 - Owned Windows button release may lag its firmware ACK:** after an
   acknowledged `MOUSE_UP`, the source-blind Windows button reader may wait up to
   500 ms for the owned button to reach two consecutive all-clear samples. The
@@ -517,16 +525,16 @@ runtime logic.
   v2 awareness, exactly the display's 1.75 scale. The apparent loss of location
   was coordinate virtualization, while actual manual movement is now handled as
   fresh external cursor state.
-- A later live login attempt reproduced the user's external-cursor failure at
+- Historical pre-replacement evidence: a later live login attempt reproduced
+  the user's external-cursor failure at
   PMv2 point `(3446,1631)`: the engine knew the point exactly, but it was 25
   pixels beyond the RuneLite outer window and therefore rejected it twice with
-  complete safe cleanup. D031 now performs a pre-serial stationary-window
-  handoff, rigidly proves the distinct Win32 outer/client/canvas rectangles,
-  discards the stale intent, and consumes only its own acknowledged mouse
-  transition. Historical button activity receives a quiet dwell; new activity,
-  identity/geometry drift, final point-owner mismatch, or an unproved async
-  window mutation still blocks. Deterministic Python coverage is complete; the
-  fresh physical login/gameplay regression remained pending at that checkpoint.
+  complete safe cleanup. The D031 policy at that checkpoint performed a pre-
+  serial stationary-window handoff, rigidly proved the distinct Win32 outer/
+  client/canvas rectangles, discarded the stale intent, and consumed only its
+  own acknowledged mouse transition. That window-translation behavior and its
+  asynchronous-mutation limitation are retained here only as history; current
+  D031 keeps RuneLite stationary and moves the cursor through Arduino.
 - A fresh process completed login safely but the first qualifying cycle reached
   the old 80-action default at return step `10/15` after 624.9 seconds. It had
   already harvested, banked, deposited to empty, and passed the earlier cursor
@@ -572,15 +580,15 @@ runtime logic.
   and does not invalidate the cycle, but the manual demonstration then required
   a fresh client.
 
-### Current external-cursor proof line
+### Historical D031 external-cursor window-handoff proof line
 
-- Checkpoints `9e29487` through `ae8b9f8` make a quiet cursor takeover a
-  freshly observed state instead of remembered coordinates. They add the
+- Historical checkpoints `9e29487` through `ae8b9f8` made a quiet cursor
+  takeover a freshly observed state instead of remembered coordinates. They add the
   stationary-window handoff, caller reobservation, owned-release settlement,
   login prompt/variant/watchdog hardening, exact one-pixel AWT/native origin
   reconciliation, a cursor-safe login activation footprint, bounded retained-
   layout menu-coordinate correlation, and a cross-process input/handoff lease.
-- **PASS - displaced saved-session login component proof.** At `31e1391`,
+- **HISTORICAL PASS - displaced saved-session login component proof.** At `31e1391`,
   `login_activation_footprint_current.json` returned
   `loaded_scene_verified` in 34.172 seconds. The external handoff was safely
   unsent before serial connect with zero commands; disconnect, Play Now, and
@@ -591,11 +599,12 @@ runtime logic.
   `observe_after_cross_process_lease_login.json` then proved a fresh coherent
   loaded scene, and the no-input confirmation returned `loaded_scene_verified`
   with zero clicks. No single `ae8b9f8` artifact is an end-to-end displaced
-  login run; the current claim composes that direct `31e1391` handoff with the
-  current prompt/loaded results and focused cross-process-lease tests.
-- **PASS - displaced gameplay recovery subcriterion.** The current-checkpoint
-  setup held the cursor exactly at `(606,972)` over foreign PID `6120`, outside
-  foreground RuneLite at x=700. The dry-run first proved an exact Tree `1276`
+  login run; the historical claim composes that direct `31e1391` handoff with
+  the then-current prompt/loaded results and focused cross-process-lease tests.
+- **HISTORICAL PASS - displaced gameplay recovery subcriterion.** The then-
+  current checkpoint setup held the cursor exactly at `(606,972)` over foreign
+  PID `6120`, outside foreground RuneLite at x=700. The dry-run first proved an
+  exact Tree `1276`
   action. The bounded live run then translated RuneLite to x=555 under the
   stationary cursor, reobserved, and continued Arduino gameplay. Its ten action
   attempts comprise the safely-unsent handoff plus nine sent Tree transactions

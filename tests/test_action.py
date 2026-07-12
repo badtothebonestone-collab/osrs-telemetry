@@ -107,6 +107,7 @@ def observation(
         status="PASS",
         fresh=True,
         cache_wall_clock_fresh=True,
+        client_window_bounds=ScreenBounds(40, 40, 520, 430),
         scene_playable=True,
         session_id=session_id,
         menu_client_tick=1000 + tick,
@@ -522,6 +523,18 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             ),
             result.safety_checks[-1],
         )
+
+    def test_pointer_recovery_requires_outer_window_geometry_before_coordinator(self) -> None:
+        coordinator = FakeCoordinator()
+        result = self.interface(coordinator, self.hover).execute(
+            tree_action(),
+            replace(self.pre, client_window_bounds=None),
+        )
+
+        self.assertEqual("ERROR", result.status)
+        self.assertIn("outer window geometry unavailable", result.reason)
+        self.assertEqual([], coordinator.calls)
+        self.assertIsNone(result.receipt)
 
     def test_fresh_hover_mismatch_denies_activation_but_preserves_cleanup_proof(self) -> None:
         coordinator = FakeCoordinator()

@@ -222,33 +222,51 @@ action was safely unsent. The same flag is retained in EngineFrame diagnostics.
 `CoordinatedActionInterface` and the saved-session login helper submit typed
 approved intents to the sole `InputCoordinator`. The coordinator then:
 
-1. creates one private backend and empty in-memory command ledger without
-   opening serial;
-2. proves a bounded physical-button quiet dwell, samples the actual current
-   cursor in the calling thread's PMv2 device-pixel context, pins the exact
-   foreground root HWND/PID, matches the telemetry outer size to
+1. creates one private backend and empty in-memory command ledger, acquires the
+   configured cross-process lease before serial open, and keeps that lease
+   through cleanup and backend close;
+2. requires the exact telemetry PID/root HWND to be foreground. Gameplay waits
+   only for its bounded focus interval and otherwise blocks; saved-session login
+   may use one `SetForegroundWindow`-only attempt for a visible, non-minimized
+   exact root, with identical outer/client geometry before and after;
+3. proves a bounded physical-button quiet dwell, samples the actual current
+   cursor and virtual desktop in the calling thread's PMv2 device-pixel context,
+   pins the exact root HWND/PID, matches the telemetry outer size to
    `GetWindowRect`, bounds gameplay-only AWT/native origin quantization to one
-   device pixel, and proves the exact canvas inside the actual Win32 client;
-3. when the stationary cursor is beyond that outer window, performs one
-   bounded non-activating window translation under the cursor, closes with an
-   empty safely-unsent receipt, discards every stale coordinate, and requires a
-   fresh login scan or newer same-identity gameplay tick before another intent;
-4. only after a valid preflight opens and arms the private Arduino transport;
-5. requires two identical PMv2 cursor samples one timestep apart, then a fresh
-   physical-button quiet proof and a final unchanged cursor/foreground sample
-   before the first MOVE, accepting a stationary manual position as current
-   truth while typing continued motion or a late prior report as cursor
-   invalidation;
-6. when the fresh cursor is just outside the canvas but still inside the exact
-   pinned outer window on one axis, performs only the bounded movement-only
-   ingress and proves stable canvas headroom before continuing;
-7. retains the canonical action identity/aim separately from the actual settled
+   device pixel, and retains exact native outer/client plus telemetry-canvas
+   geometry;
+4. if the cursor is outside the canvas, derives a neutral inset region inside
+   that canvas, opens and arms the same private Arduino transport, and performs
+   one movement-only cursor-reacquisition transaction. Protocol-safe ARM proves
+   zero firmware-held keys/buttons before its first MOVE. RuneLite never moves
+   or resizes, and no software cursor API, click, mouse button, or key is sent;
+5. during reacquisition, preserves the PMv2 virtual desktop, exact PID/root HWND,
+   foreground ownership, unchanged outer/client/canvas geometry, physical-
+   button release, direction/gain, and bounded velocity/acceleration on every
+   sample. Foreign-surface transit is allowed only before canvas entry; every
+   later point remains in the canvas and belongs to the pinned root;
+6. settles at the neutral canvas point, retains `cursorReacquisition` before/
+   after cursor and geometry evidence, then always performs authoritative
+   `STOP_ALL -> DISARM -> STATUS` cleanup and returns typed invalidation. The old
+   action or login intent is discarded and can never activate merely because
+   reacquisition succeeded;
+7. requires gameplay to obtain a strictly newer tick from the same PID/session
+   whose source is fresh, wall-clock-fresh, and coherent, with exact unchanged
+   geometry, or login to refetch telemetry, re-find the exact window, and
+   re-screen the full client. Target/prompt recognition and
+   normal SafetyGate validation run again. Login permits only two total cursor-
+   recovery attempts before an explicit manual-attention result;
+8. for every first MOVE, requires two identical PMv2 cursor samples one timestep
+   apart, then a fresh physical-button quiet proof and a final unchanged cursor/
+   foreground sample, accepting a stationary manual position as current truth
+   while typing continued motion or a late prior report as cursor invalidation;
+9. retains the canonical action identity/aim separately from the actual settled
    cursor, selects bounded command-space waypoints toward the exact observed
    screen point, runs the pure exact planner for each waypoint with bounded velocity,
    acceleration, braking, four-sided transfer headroom, transaction-wide plan
    and MOVE caps, and actual-feedback correction, then accepts only a complete-
    plan settled endpoint inside the caller's explicit activation region;
-8. starts a monotonic clock before every serial MOVE and, when ordinary samples
+10. starts a monotonic clock before every serial MOVE and, when ordinary samples
    lack any commanded axis, discards the trajectory and uses at most ten fixed
    20 ms no-input polls; the full cumulative effect must be observed by 200 ms
    and two later identical whole-cursor samples by 240 ms, with pinned
@@ -256,34 +274,37 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    extended sample, then physical-button quiet plus a final unchanged owned
    sample before a fresh plan; unresolved or invalid evidence becomes typed
    cursor-state invalidation and can never be stacked with another command;
-9. passes that actual stable device-pixel endpoint to the caller's
+11. passes that actual stable device-pixel endpoint to the caller's
    lane-specific validator under a checked firmware-watchdog lease; if that
    validator outlives the lease, performs at most one explicit safe rearm and
    reruns the same semantic validator, while a second expiry blocks input;
-10. for pointer lanes, repeatedly requires quiet physical buttons and exact
+12. for pointer lanes, repeatedly requires quiet physical buttons and exact
    `WindowFromPoint` root ownership around the newer menu/widget proof; typed
    key lanes instead require their exact camera/interface/dialogue constraint;
-11. when the exact action is a unique lower context entry, opens the menu,
+13. when the exact action is a unique lower context entry, opens the menu,
    derives that row from RuneLite menu geometry, moves to it, revalidates the
    fresh open-menu sample and pointer, and clicks it once;
-12. otherwise clicks the exact default entry or submits the one approved key,
+14. otherwise clicks the exact default entry or submits the one approved key,
     then uses a bounded source-blind attribution window and two all-clear
     samples for the acknowledged Windows button transition; same-button human
     input during that window remains inherently best effort;
-13. records each command and firmware acknowledgement without truncation plus
+15. records each command and firmware acknowledgement without truncation plus
     bounded delayed-feedback counts, maxima, last command/points/timings, and
     outcome; and
-14. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
+16. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
    wire `STATUS` proving disarmed with zero held inputs before closing.
 
 The immutable `InputReceipt` is successful only when the activation and final
 cleanup sequence are present in order, every command is terminal and
 acknowledged, no ledger entry is unresolved, the final firmware state is safe,
 every recorded cursor-feedback wait settled, and both ledger and transport
-close. Older additive-v1 receipts may omit `cursorFeedback`; current receipts
-always serialize it. The raw transport methods are private and only the
-coordinator imports them. A state-changing firmware rejection is never retried
-implicitly. There is no software-input fallback.
+close. Current receipts also serialize additive `cursorReacquisition` evidence
+for movement-only external-cursor transactions: PMv2 virtual/neutral bounds,
+before/after cursor, bound PID/root HWND, exact outer/client/canvas geometry,
+completion, unchanged geometry, and no activation. Older additive-v1 receipts
+may omit `cursorFeedback` or `cursorReacquisition`. The raw transport methods are
+private and only the coordinator imports them. A state-changing firmware
+rejection is never retried implicitly. There is no software-input fallback.
 
 The action layer may emit typed `TARGET_EVIDENCE_INVALIDATED` when an adaptive
 object/walk proposal exhausts bounded fresh hover reobservation before

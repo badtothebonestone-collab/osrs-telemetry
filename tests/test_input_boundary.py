@@ -19,6 +19,8 @@ REQUIRED_COORDINATOR_OPERATIONS = {
     "_current_position",
     "_move_relative",
     "_assert_foreground",
+    "_virtual_desktop_bounds",
+    "_verify_physical_mouse_buttons_released",
     "_mouse_down",
     "_mouse_up",
     "_press",
@@ -45,6 +47,18 @@ FORBIDDEN_RAW_CALLS = REQUIRED_COORDINATOR_OPERATIONS | {
     "_legacy_key_up",
 }
 SOFTWARE_INPUT_MODULES = {"pyautogui", "pydirectinput", "pynput"}
+CURSOR_POLICY_MODULES = {
+    "arduino.py",
+    "input_coordinator.py",
+    "login.py",
+}
+FORBIDDEN_CURSOR_MUTATION_APIS = {
+    "SetWindowPos",
+    "MoveWindow",
+    "SetCursorPos",
+    "SendInput",
+    "mouse_event",
+}
 
 
 def _module_name(path: Path) -> str:
@@ -119,6 +133,32 @@ class AutomatedInputBoundaryTests(unittest.TestCase):
 
         self.assertEqual([], python_offenders)
         self.assertEqual([], java_offenders)
+
+    def test_production_cursor_recovery_and_focus_cannot_mutate_window_geometry_or_use_software_cursor_input(
+        self,
+    ) -> None:
+        offenders: list[str] = []
+        for name in sorted(CURSOR_POLICY_MODULES):
+            path = PACKAGE / name
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            for api in sorted(FORBIDDEN_CURSOR_MUTATION_APIS):
+                if api in source:
+                    offenders.append(f"{name}:source:{api}")
+            for node in ast.walk(tree):
+                referenced_name = None
+                if isinstance(node, ast.Attribute):
+                    referenced_name = node.attr
+                elif isinstance(node, ast.Name):
+                    referenced_name = node.id
+                if referenced_name in FORBIDDEN_CURSOR_MUTATION_APIS:
+                    offenders.append(
+                        f"{name}:{node.lineno}:{referenced_name}"
+                    )
+
+        # debug_overlay.py is intentionally outside this production cursor/focus
+        # audit; its passive overlay positioning remains a separate GUI concern.
+        self.assertEqual([], offenders)
 
     def test_login_runtime_and_actions_depend_on_coordinator_not_transport(self) -> None:
         for name in ("action.py", "login.py", "runtime.py"):

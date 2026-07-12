@@ -835,13 +835,22 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual([], task.applied)
         self.assertEqual(1, result.actions)
 
-    def test_safely_unsent_cursor_replan_waits_for_strictly_newer_tick(self) -> None:
+    def test_cursor_reacquisition_discards_stale_intent_and_requires_newer_exact_geometry(self) -> None:
         first, _ = _executable(10)
         complete = Decision(
             "complete",
             "newer cursor evidence selected no further action",
             Action(ActionKind.WAIT, "Wait", 11),
         )
+        canvas = ScreenBounds(100, 100, 765, 503)
+        client = ScreenBounds(88, 72, 789, 543)
+
+        def geometry_observation(tick: int) -> Observation:
+            return replace(
+                _observation(tick),
+                canvas_bounds=canvas,
+                client_window_bounds=client,
+            )
 
         class RecordingTask(_Task):
             def __init__(self) -> None:
@@ -852,20 +861,24 @@ class TaskRuntimeTests(unittest.TestCase):
                 self.decision_ticks.append(observation.tick)
                 return super().decide(observation)
 
-        reason = "cursor_start_outside_verified_movement_bounds"
+        reason = "cursor_reacquired_reobserve_required"
         task = RecordingTask()
         execution = _safe_unsent_execution(
             first.action,
             10,
             reason,
             disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
-            disconnected_preflight=True,
         )
         assert execution.receipt is not None
-        self.assertTrue(execution.receipt.safely_unsent)
+        self.assertFalse(execution.receipt.safely_unsent)
+        self.assertTrue(execution.cleanup_confirmed)
         interface = _ActionInterface(execution)
         runtime = TaskRuntime(
-            _Client(_observation(10), _observation(10), _observation(11)),
+            _Client(
+                geometry_observation(10),
+                geometry_observation(10),
+                geometry_observation(11),
+            ),
             task,
             _Verifier(None),
             interface,
@@ -881,6 +894,142 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(3, result.observations)
         self.assertEqual(1, result.actions)
         self.assertEqual(1, len(interface.calls))
+        self.assertEqual(canvas, interface.calls[0][1].canvas_bounds)
+        self.assertEqual(client, interface.calls[0][1].client_window_bounds)
+
+    def test_cursor_reacquisition_waits_for_fresh_coherent_newer_observation(self) -> None:
+        canvas = ScreenBounds(100, 100, 765, 503)
+        client = ScreenBounds(88, 72, 789, 543)
+        reason = "cursor_reacquired_reobserve_required"
+        invalid_shapes = {
+            "source_not_fresh": {"fresh": False},
+            "wall_clock_not_fresh": {"cache_wall_clock_fresh": False},
+            "source_incoherent": {"source_coherent": False},
+        }
+
+        def geometry_observation(tick: int, **changes: object) -> Observation:
+            return replace(
+                _observation(tick),
+                canvas_bounds=canvas,
+                client_window_bounds=client,
+                **changes,
+            )
+
+        for label, changes in invalid_shapes.items():
+            with self.subTest(label=label):
+                first, _ = _executable(10)
+                complete = Decision(
+                    "complete",
+                    "fresh coherent cursor evidence selected no further action",
+                    Action(ActionKind.WAIT, "Wait", 12),
+                )
+
+                class RecordingTask(_Task):
+                    def __init__(self) -> None:
+                        super().__init__([first, complete])
+                        self.decision_ticks: list[int] = []
+
+                    def decide(self, observation: Observation) -> Decision:
+                        self.decision_ticks.append(observation.tick)
+                        return super().decide(observation)
+
+                task = RecordingTask()
+                execution = _safe_unsent_execution(
+                    first.action,
+                    10,
+                    reason,
+                    disposition=(
+                        UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+                    ),
+                )
+                interface = _ActionInterface(execution)
+                runtime = TaskRuntime(
+                    _Client(
+                        geometry_observation(10),
+                        geometry_observation(11, **changes),
+                        geometry_observation(12),
+                    ),
+                    task,
+                    _Verifier(None),
+                    interface,
+                    sleep=lambda _: None,
+                )
+
+                result = runtime.run(execute=True)
+
+                self.assertEqual("COMPLETE", result.status)
+                self.assertEqual([10, 12], task.decision_ticks)
+                self.assertEqual([reason], task.discarded)
+                self.assertEqual(3, result.observations)
+                self.assertEqual(1, result.actions)
+                self.assertEqual(1, len(interface.calls))
+
+    def test_cursor_reacquisition_blocks_if_canvas_or_client_geometry_changes(self) -> None:
+        canvas = ScreenBounds(100, 100, 765, 503)
+        client = ScreenBounds(88, 72, 789, 543)
+        first_observation = replace(
+            _observation(10),
+            canvas_bounds=canvas,
+            client_window_bounds=client,
+        )
+        changes = {
+            "canvas": {
+                "canvas_bounds": ScreenBounds(
+                    canvas.x + 1,
+                    canvas.y,
+                    canvas.width,
+                    canvas.height,
+                )
+            },
+            "client": {
+                "client_window_bounds": ScreenBounds(
+                    client.x,
+                    client.y,
+                    client.width - 1,
+                    client.height,
+                )
+            },
+        }
+
+        for label, replacement in changes.items():
+            with self.subTest(label=label):
+                first, _ = _executable(10)
+                reason = "cursor_reacquired_reobserve_required"
+                task = _Task([first])
+                execution = _safe_unsent_execution(
+                    first.action,
+                    10,
+                    reason,
+                    disposition=UnsentActionDisposition.CURSOR_STATE_INVALIDATED,
+                )
+                interface = _ActionInterface(execution)
+                changed_values = {
+                    "canvas_bounds": canvas,
+                    "client_window_bounds": client,
+                }
+                changed_values.update(replacement)
+                changed = replace(_observation(11), **changed_values)
+                runtime = TaskRuntime(
+                    _Client(first_observation, changed),
+                    task,
+                    _Verifier(None),
+                    interface,
+                    sleep=lambda _: None,
+                )
+
+                result = runtime.run(execute=True)
+
+                self.assertEqual("BLOCKED", result.status)
+                self.assertEqual(
+                    "RuneLite geometry changed after cursor reacquisition",
+                    result.reason,
+                )
+                self.assertEqual([reason], task.discarded)
+                self.assertEqual([False], task.discard_policies)
+                self.assertEqual(1, task.decide_calls)
+                self.assertEqual(1, result.actions)
+                self.assertEqual(2, result.observations)
+                self.assertEqual(1, len(interface.calls))
 
     def test_cursor_replan_rejects_session_or_process_identity_change(self) -> None:
         first, _ = _executable(10)

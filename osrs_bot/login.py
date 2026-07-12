@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
+from datetime import datetime
 import json
 import os
 import time
@@ -27,6 +28,7 @@ from .observation import ObservationClient
 
 MAX_LOGIN_CLICKS = 4
 MAX_LOGIN_SECONDS = 180.0
+MAX_CURSOR_RECOVERY_FRESH_POLLS = 2
 TRANSITION_SECONDS = 15.0
 POST_MOVE_VISUAL_SETTLE_SECONDS = 0.05
 MAX_LOADED_SCENE_PROOF_AGE_SECONDS = 2.0
@@ -741,18 +743,78 @@ def find_runelite_window(expected_pid: int) -> RuneLiteWindow:
 
 
 def focus_exact_window(window: RuneLiteWindow) -> bool:
+    """Focus only the exact RuneLite root without restoring or moving it."""
+
+    if window.outer_bounds is None:
+        raise LoginSafetyError(
+            "exact RuneLite outer geometry is required for focus-only activation"
+        )
+    _enable_windows_dpi_awareness()
     user32 = _user32()
-    foreground = int(user32.GetForegroundWindow() or 0)
-    if foreground != window.hwnd:
-        user32.ShowWindow(window.hwnd, 5)
-        user32.SetForegroundWindow(window.hwnd)
+    before = find_runelite_window(window.pid)
+    if before.outer_bounds is None:
+        raise LoginSafetyError(
+            "exact RuneLite outer geometry is unavailable before focus-only activation"
+        )
+
+    def identity_and_geometry(
+        candidate: RuneLiteWindow,
+    ) -> tuple[int, int, ScreenBounds, ScreenBounds | None]:
+        return (
+            candidate.hwnd,
+            candidate.pid,
+            candidate.client_bounds,
+            candidate.outer_bounds,
+        )
+
+    if identity_and_geometry(before) != identity_and_geometry(window):
+        raise LoginSafetyError(
+            "RuneLite geometry changed before focus-only activation"
+        )
+    required = (
+        "GetForegroundWindow",
+        "GetAncestor",
+        "GetWindowThreadProcessId",
+        "IsWindowVisible",
+        "IsIconic",
+        "SetForegroundWindow",
+    )
+    if any(not callable(getattr(user32, name, None)) for name in required):
+        raise LoginSafetyError("required Windows focus-only API is unavailable")
+    hwnd = wintypes.HWND(window.hwnd)
+    if not user32.IsWindowVisible(hwnd):
+        raise LoginSafetyError("exact RuneLite window is not visible")
+    if user32.IsIconic(hwnd):
+        raise LoginSafetyError(
+            "exact RuneLite window is minimized; manual attention is required"
+        )
+
+    def foreground_root() -> int:
+        foreground = int(user32.GetForegroundWindow() or 0)
+        return int(user32.GetAncestor(foreground, 2) or foreground)
+
+    if foreground_root() != window.hwnd:
+        user32.SetForegroundWindow(hwnd)
         time.sleep(0.15)
-    foreground = int(user32.GetForegroundWindow() or 0)
+    foreground = foreground_root()
     if foreground != window.hwnd:
-        return False
+        raise LoginSafetyError(
+            "exact RuneLite telemetry window could not be focused without geometry mutation"
+        )
     pid = ctypes.c_ulong()
     user32.GetWindowThreadProcessId(foreground, ctypes.byref(pid))
-    return int(pid.value) == window.pid
+    if int(pid.value) != window.pid:
+        raise LoginSafetyError("focused RuneLite root PID changed")
+    after = find_runelite_window(window.pid)
+    if after.outer_bounds is None:
+        raise LoginSafetyError(
+            "exact RuneLite outer geometry is unavailable after focus-only activation"
+        )
+    if identity_and_geometry(after) != identity_and_geometry(before):
+        raise LoginSafetyError(
+            "RuneLite geometry changed during focus-only activation"
+        )
+    return True
 
 
 def point_belongs_to_window(window: RuneLiteWindow, point: ScreenPoint) -> bool:
@@ -822,6 +884,14 @@ class LoginPromptHelper:
         deadline = started + runtime_limit
         clicks: list[LoginClick] = []
         cursor_replans = 0
+        cursor_recovery_after: tuple[
+            int,
+            str | None,
+            datetime,
+            str | None,
+            datetime | None,
+        ] | None = None
+        cursor_recovery_stale_polls = 0
         misses = 0
         loaded_proof: tuple[int, str | None, int] | None = None
 
@@ -832,6 +902,68 @@ class LoginPromptHelper:
                 return self._result("ERROR", f"observation_unavailable: {type(error).__name__}: {error}", False, started, clicks)
             if observation.client_process_id is None:
                 return self._result("BLOCKED", "telemetry_client_process_id_unavailable", False, started, clicks)
+            if cursor_recovery_after is not None:
+                (
+                    expected_pid,
+                    expected_session,
+                    minimum_timestamp,
+                    prior_frame_id,
+                    prior_assembled_at,
+                ) = cursor_recovery_after
+                if (
+                    observation.client_process_id != expected_pid
+                    or observation.session_id != expected_session
+                ):
+                    return self._result(
+                        "BLOCKED",
+                        "cursor_recovery_observation_identity_changed",
+                        False,
+                        started,
+                        clicks,
+                    )
+                if (
+                    not observation.fresh
+                    or not observation.cache_wall_clock_fresh
+                    or not observation.source_coherent
+                ):
+                    return self._result(
+                        "BLOCKED",
+                        "fresh_observation_invalid_after_cursor_reacquisition",
+                        False,
+                        started,
+                        clicks,
+                    )
+                observation_advanced = bool(
+                    observation.timestamp > minimum_timestamp
+                    or (
+                        observation.frame_id is not None
+                        and observation.frame_id != prior_frame_id
+                    )
+                    or (
+                        observation.assembled_at is not None
+                        and (
+                            prior_assembled_at is None
+                            or observation.assembled_at > prior_assembled_at
+                        )
+                    )
+                )
+                if not observation_advanced:
+                    cursor_recovery_stale_polls += 1
+                    if (
+                        cursor_recovery_stale_polls
+                        >= MAX_CURSOR_RECOVERY_FRESH_POLLS
+                    ):
+                        return self._result(
+                            "BLOCKED",
+                            "fresh_observation_required_after_cursor_reacquisition",
+                            False,
+                            started,
+                            clicks,
+                        )
+                    self._sleep(self._poll_seconds)
+                    continue
+                cursor_recovery_after = None
+                cursor_recovery_stale_polls = 0
             if observation.game_state not in {"LOGIN_SCREEN", "LOGGED_IN", "LOGGING_IN", "LOADING"}:
                 return self._result("BLOCKED", f"unsupported_game_state:{observation.game_state}", False, started, clicks)
             if observation.game_state in {"LOGGING_IN", "LOADING"}:
@@ -948,13 +1080,31 @@ class LoginPromptHelper:
                 )
             clicks.append(click)
             if not receipt.successful:
+                cursor_recovery_failure = self._may_retry_cursor_state(receipt)
                 if (
                     cursor_replans < 1
-                    and self._may_retry_cursor_state(receipt)
+                    and cursor_recovery_failure
                 ):
                     cursor_replans += 1
+                    assert observation.client_process_id is not None
+                    cursor_recovery_after = (
+                        observation.client_process_id,
+                        observation.session_id,
+                        observation.timestamp,
+                        observation.frame_id,
+                        observation.assembled_at,
+                    )
+                    cursor_recovery_stale_polls = 0
                     self._sleep(self._poll_seconds)
                     continue
+                if cursor_recovery_failure and cursor_replans >= 1:
+                    return self._result(
+                        "BLOCKED",
+                        "manual_attention_required_after_two_login_recovery_attempts",
+                        False,
+                        started,
+                        clicks,
+                    )
                 result_status = "BLOCKED" if receipt.status == "BLOCKED" else "ERROR"
                 return self._result(
                     result_status,

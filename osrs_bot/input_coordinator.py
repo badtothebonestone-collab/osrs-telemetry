@@ -24,10 +24,8 @@ MAX_POINTER_FEEDBACK_PLANS = 64
 MAX_FEEDBACK_PLAN_AXIS_DELTA = 64
 MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT = 4
 CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT = 8
-MAX_CURSOR_REACQUISITION_GAP_DEVICE_PX = 64
-MAX_CURSOR_REACQUISITION_STEPS = 72
-CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX = 32
-CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS = 0.05
+CURSOR_REACQUISITION_NEUTRAL_INSET_DEVICE_PX = 64
+CURSOR_REACQUISITION_NEUTRAL_RADIUS_DEVICE_PX = 8
 AWT_NATIVE_OUTER_ORIGIN_TOLERANCE_DEVICE_PX = 1
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
 DEFAULT_CLICK_HOLD_SECONDS = 0.06
@@ -586,6 +584,149 @@ class CursorFeedbackEvidence:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RuneLiteGeometryEvidence:
+    """Exact native geometry pinned to one RuneLite PID/root HWND."""
+
+    expected_pid: int
+    expected_hwnd: int
+    outer_bounds: ScreenBounds
+    client_bounds: ScreenBounds
+    canvas_bounds: ScreenBounds
+
+    def __post_init__(self) -> None:
+        if not _is_int(self.expected_pid) or self.expected_pid <= 0:
+            raise ValueError("expected_pid must be a positive integer")
+        if not _is_int(self.expected_hwnd) or self.expected_hwnd <= 0:
+            raise ValueError("expected_hwnd must be a positive integer")
+        outer = _validate_bounds(self.outer_bounds, "outer_bounds")
+        client = _validate_bounds(self.client_bounds, "client_bounds")
+        canvas = _validate_bounds(self.canvas_bounds, "canvas_bounds")
+        if not _bounds_contains_bounds(outer, client):
+            raise ValueError("outer_bounds must contain client_bounds")
+        if not _bounds_contains_bounds(client, canvas):
+            raise ValueError("client_bounds must contain canvas_bounds")
+
+    @staticmethod
+    def _bounds_dict(bounds: ScreenBounds) -> dict[str, int]:
+        return {
+            "x": bounds.x,
+            "y": bounds.y,
+            "width": bounds.width,
+            "height": bounds.height,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "expectedPid": self.expected_pid,
+            "expectedHwnd": self.expected_hwnd,
+            "outerBounds": self._bounds_dict(self.outer_bounds),
+            "clientBounds": self._bounds_dict(self.client_bounds),
+            "canvasBounds": self._bounds_dict(self.canvas_bounds),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CursorReacquisitionEvidence:
+    """Retained proof for a movement-only external-cursor transaction."""
+
+    coordinate_space: str
+    virtual_desktop_bounds: ScreenBounds
+    neutral_bounds: ScreenBounds
+    cursor_before: ScreenPoint
+    before_geometry: RuneLiteGeometryEvidence
+    cursor_after: ScreenPoint | None = None
+    after_geometry: RuneLiteGeometryEvidence | None = None
+    completed: bool = False
+    no_activation_sent: bool = True
+
+    def __post_init__(self) -> None:
+        if self.coordinate_space != "device_pixels_pm_v2":
+            raise ValueError("coordinate_space must be device_pixels_pm_v2")
+        desktop = _validate_bounds(
+            self.virtual_desktop_bounds, "virtual_desktop_bounds"
+        )
+        neutral = _validate_bounds(self.neutral_bounds, "neutral_bounds")
+        if not isinstance(self.cursor_before, ScreenPoint):
+            raise TypeError("cursor_before must be ScreenPoint")
+        if not desktop.contains(self.cursor_before):
+            raise ValueError("cursor_before must be inside virtual_desktop_bounds")
+        if not _bounds_contains_bounds(
+            desktop, self.before_geometry.canvas_bounds
+        ):
+            raise ValueError("canvas must be inside virtual_desktop_bounds")
+        if not _bounds_contains_bounds(
+            self.before_geometry.canvas_bounds, neutral
+        ):
+            raise ValueError("neutral_bounds must be inside the canvas")
+        if self.cursor_after is not None and not isinstance(
+            self.cursor_after, ScreenPoint
+        ):
+            raise TypeError("cursor_after must be ScreenPoint or None")
+        if self.after_geometry is not None and not isinstance(
+            self.after_geometry, RuneLiteGeometryEvidence
+        ):
+            raise TypeError(
+                "after_geometry must be RuneLiteGeometryEvidence or None"
+            )
+        if not isinstance(self.completed, bool):
+            raise TypeError("completed must be bool")
+        if not isinstance(self.no_activation_sent, bool):
+            raise TypeError("no_activation_sent must be bool")
+        if self.completed:
+            if self.cursor_after is None or self.after_geometry is None:
+                raise ValueError(
+                    "completed reacquisition requires final cursor and geometry"
+                )
+            if not neutral.contains(self.cursor_after):
+                raise ValueError("completed cursor must be inside neutral_bounds")
+            if self.after_geometry != self.before_geometry:
+                raise ValueError("completed RuneLite geometry must be unchanged")
+            if not self.no_activation_sent:
+                raise ValueError("cursor reacquisition cannot send activation")
+
+    @property
+    def geometry_unchanged(self) -> bool:
+        return bool(
+            self.completed
+            and self.after_geometry is not None
+            and self.after_geometry == self.before_geometry
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": "cursor_reacquisition.v1",
+            "coordinateSpace": self.coordinate_space,
+            "virtualDesktopBounds": RuneLiteGeometryEvidence._bounds_dict(
+                self.virtual_desktop_bounds
+            ),
+            "neutralBounds": RuneLiteGeometryEvidence._bounds_dict(
+                self.neutral_bounds
+            ),
+            "cursorBefore": {
+                "x": self.cursor_before.x,
+                "y": self.cursor_before.y,
+            },
+            "cursorAfter": (
+                {
+                    "x": self.cursor_after.x,
+                    "y": self.cursor_after.y,
+                }
+                if self.cursor_after is not None
+                else None
+            ),
+            "beforeGeometry": self.before_geometry.to_dict(),
+            "afterGeometry": (
+                self.after_geometry.to_dict()
+                if self.after_geometry is not None
+                else None
+            ),
+            "completed": self.completed,
+            "geometryUnchanged": self.geometry_unchanged,
+            "noActivationSent": self.no_activation_sent,
+        }
+
+
 def _wire_proof_complete(commands: tuple[CommandEvidence, ...]) -> bool:
     names = tuple(command.command for command in commands)
     try:
@@ -634,6 +775,7 @@ class InputReceipt:
     context_cancel_acknowledged: bool = False
     errors: tuple[str, ...] = ()
     cursor_feedback: CursorFeedbackEvidence = CursorFeedbackEvidence()
+    cursor_reacquisition: CursorReacquisitionEvidence | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -713,10 +855,45 @@ class InputReceipt:
         )
         if not isinstance(self.cursor_feedback, CursorFeedbackEvidence):
             raise TypeError("cursor_feedback must be CursorFeedbackEvidence")
+        if self.cursor_reacquisition is not None and not isinstance(
+            self.cursor_reacquisition, CursorReacquisitionEvidence
+        ):
+            raise TypeError(
+                "cursor_reacquisition must be CursorReacquisitionEvidence or None"
+            )
         successful_move_count = sum(
             command.command == "MOVE" and command.successful
             for command in self.commands
         )
+        if self.cursor_reacquisition is not None:
+            activation_commands = {
+                "MOUSE_DOWN",
+                "MOUSE_UP",
+                "CLICK",
+                "KEY_DOWN",
+                "KEY_UP",
+                "KEY_PRESS",
+                "HOLD_KEYS",
+            }
+            if any(
+                command.command in activation_commands
+                for command in self.commands
+            ):
+                raise ValueError(
+                    "cursor reacquisition evidence cannot accompany activation"
+                )
+            if self.cursor_reacquisition.completed and (
+                self.status not in {"BLOCKED", "ERROR"}
+                or self.failure_kind
+                is not InputFailureKind.CURSOR_STATE_INVALIDATED
+                or not self.connected
+                or not self.arm_acknowledged
+                or successful_move_count < 1
+            ):
+                raise ValueError(
+                    "completed cursor reacquisition requires a connected, "
+                    "movement-only typed invalidation"
+                )
         if self.mode == "key" and self.cursor_feedback.wait_count != 0:
             raise ValueError("key receipts cannot carry cursor feedback waits")
         if self.cursor_feedback.wait_count > successful_move_count:
@@ -758,9 +935,9 @@ class InputReceipt:
     def safely_unsent(self) -> bool:
         """Prove that a blocked preflight never connected to the Arduino.
 
-        A window-geometry handoff happens before serial connect or ARM.  It
-        therefore has no firmware cleanup to perform, but the empty ledger and
-        closed backend still prove that no automated input was possible.
+        Lease, focus, or geometry failures before serial connect have no
+        firmware cleanup to perform; an empty ledger and closed backend still
+        prove that no automated input was possible.
         """
 
         return bool(
@@ -839,6 +1016,11 @@ class InputReceipt:
             "contextCancelAttempted": self.context_cancel_attempted,
             "contextCancelAcknowledged": self.context_cancel_acknowledged,
             "cursorFeedback": self.cursor_feedback.to_dict(),
+            "cursorReacquisition": (
+                self.cursor_reacquisition.to_dict()
+                if self.cursor_reacquisition is not None
+                else None
+            ),
             "errors": list(self.errors),
         }
 
@@ -871,6 +1053,8 @@ class _Backend(Protocol):
 
     def _verify_physical_mouse_quiet(self) -> dict[str, Any]: ...
 
+    def _verify_physical_mouse_buttons_released(self) -> dict[str, Any]: ...
+
     def _consume_owned_mouse_transition(
         self, button: str
     ) -> dict[str, Any]: ...
@@ -885,15 +1069,7 @@ class _Backend(Protocol):
         required_inner_bounds: tuple[int, int, int, int],
     ) -> dict[str, Any]: ...
 
-    def _reposition_window_for_cursor(
-        self,
-        *,
-        expected_pid: int,
-        expected_hwnd: int,
-        cursor: tuple[int, int],
-        movement_bounds: tuple[int, int, int, int],
-        inset_px: int,
-    ) -> dict[str, Any]: ...
+    def _virtual_desktop_bounds(self) -> dict[str, Any]: ...
 
     def _mouse_down(self, *, button: str = "left") -> None: ...
 
@@ -1182,6 +1358,13 @@ class _TransactionState:
     body_status: str = "ERROR"
     body_reason: str = "input_transaction_not_executed"
     failure_kind: InputFailureKind = InputFailureKind.NONE
+    cursor_reacquisition: CursorReacquisitionEvidence | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CursorReacquisitionPlan:
+    intent: ApprovedPointerIntent
+    evidence: CursorReacquisitionEvidence
 
 
 class InputCoordinator:
@@ -1624,6 +1807,7 @@ class InputCoordinator:
             state.intent_ids = intent_ids
             backend: _Backend | None = None
             transaction: _Transaction | None = None
+            reacquisition_plan: _CursorReacquisitionPlan | None = None
             ledger_started = False
             connection_attempted = False
             try:
@@ -1633,10 +1817,9 @@ class InputCoordinator:
                 )
                 backend._begin_command_ledger()
                 ledger_started = True
-                # The same cross-process lease covers both a pre-serial window
-                # handoff and the later Arduino session. Without it, another
-                # host process could mutate the pinned HWND during an active
-                # transaction even though each coordinator is locally locked.
+                # The same cross-process lease covers preflight and the later
+                # Arduino session. Another host process therefore cannot move
+                # the cursor through a competing coordinator transaction.
                 try:
                     backend._acquire_input_lease()
                 except Exception as error:
@@ -1647,22 +1830,27 @@ class InputCoordinator:
                     ) from error
                 if not transaction.sync() or transaction.snapshot.commands:
                     raise _TransactionAbort("command ledger did not begin empty")
-                if (
-                    pointer_preflight is not None
-                    and self._prepare_stationary_cursor_handoff(
+                if pointer_preflight is not None:
+                    reacquisition_plan = self._prepare_cursor_reacquisition(
                         backend,
                         pointer_preflight,
                     )
-                ):
-                    raise _cursor_state_invalidated(
-                        "cursor_window_repositioned_reobserve_required"
-                    )
+                    if reacquisition_plan is not None:
+                        state.cursor_reacquisition = reacquisition_plan.evidence
                 connection_attempted = True
                 backend._connect()
                 state.connected = True
                 state.arm_acknowledged, _ = transaction.invoke("ARM", backend._arm)
                 if not state.arm_acknowledged:
                     raise _TransactionAbort("arm_not_acknowledged")
+                if reacquisition_plan is not None:
+                    state.cursor_reacquisition = self._reacquire_external_cursor(
+                        transaction,
+                        reacquisition_plan,
+                    )
+                    raise _cursor_state_invalidated(
+                        "cursor_reacquired_reobserve_required"
+                    )
                 body(transaction)
                 state.body_status = "PASS"
                 state.body_reason = "input_transaction_executed"
@@ -1760,17 +1948,17 @@ class InputCoordinator:
         finally:
             self._transaction_lock.release()
 
-    def _prepare_stationary_cursor_handoff(
+    def _prepare_cursor_reacquisition(
         self,
         backend: _Backend,
         intent: ApprovedPointerIntent,
-    ) -> bool:
-        """Place the exact RuneLite window under a quiet external cursor.
+    ) -> _CursorReacquisitionPlan | None:
+        """Capture stationary RuneLite geometry and plan no-click ingress.
 
-        The original intent is deliberately never executed after a window
-        move: every screen coordinate in it is stale.  Returning ``True``
-        makes the caller emit a typed, safely-unsent receipt so login or the
-        runtime can obtain a newer observation and build a fresh intent.
+        No window API is reachable from this path. A cursor already inside the
+        verified canvas proceeds normally. Any cursor outside it is handled by
+        one connected Arduino movement-only transaction whose original intent
+        is always discarded afterward.
         """
 
         self._require_physical_mouse_quiet(
@@ -1778,26 +1966,21 @@ class InputCoordinator:
             phase="pointer_preflight",
             allow_historical_activity=True,
         )
-        envelope = intent.reacquisition_bounds
-        if intent.purpose is InputPurpose.LOGIN_PROMPT:
-            expected_outer = envelope
-            expected_client: ScreenBounds | None = intent.movement_bounds
-        elif envelope is not None:
-            expected_outer = envelope
-            expected_client = None
-        else:
-            return False
+        if (
+            intent.purpose is not InputPurpose.LOGIN_PROMPT
+            and intent.reacquisition_bounds is None
+        ):
+            return None
         start = self._current_position(backend)
-
         try:
             foreground = self._assert_foreground(
                 backend, intent.expected_pid
             )
         except _TransactionAbort:
             raise
-        except Exception as error:  # fail closed before serial connect
+        except Exception as error:
             raise _TransactionAbort(
-                "cursor_window_handoff_foreground_blocked: "
+                "runelite_foreground_required_for_cursor_recovery: "
                 f"{type(error).__name__}: {error}",
                 blocked=True,
             ) from error
@@ -1805,11 +1988,16 @@ class InputCoordinator:
             foreground,
             expected_hwnd=intent.expected_hwnd,
         )
-        self._require_window_geometry(
+        expected_client = (
+            intent.movement_bounds
+            if intent.purpose is InputPurpose.LOGIN_PROMPT
+            else None
+        )
+        geometry = self._require_window_geometry(
             backend,
             expected_pid=intent.expected_pid,
             expected_hwnd=pinned_hwnd,
-            expected_outer_bounds=expected_outer,
+            expected_outer_bounds=intent.reacquisition_bounds,
             expected_client_bounds=expected_client,
             required_inner_bounds=intent.movement_bounds,
             allow_outer_origin_quantization=intent.purpose in {
@@ -1819,54 +2007,57 @@ class InputCoordinator:
                 InputPurpose.CONTEXT_ROW,
             },
         )
-        if envelope is None or envelope.contains(start):
-            return False
+        if intent.movement_bounds.contains(start):
+            return None
 
-        self._sleep(CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS)
+        self._sleep(self._pointer_timestep_seconds)
         settled = self._current_position(backend)
-        if settled != start:
-            raise _cursor_state_invalidated(
-                "cursor_window_handoff_not_settled"
-            )
-
         try:
-            evidence = backend._reposition_window_for_cursor(
-                expected_pid=intent.expected_pid,
-                expected_hwnd=pinned_hwnd,
-                cursor=(start.x, start.y),
-                movement_bounds=(
-                    intent.movement_bounds.x,
-                    intent.movement_bounds.y,
-                    intent.movement_bounds.width,
-                    intent.movement_bounds.height,
-                ),
-                inset_px=CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX,
+            settled_foreground = self._assert_foreground(
+                backend, intent.expected_pid
             )
-        except Exception as error:  # backend performs the atomic Win32 checks
-            if getattr(error, "window_mutation_attempted", False) is True:
-                raise _TransactionAbort(
-                    "cursor_window_handoff_post_mutation_unproved: "
-                    f"{type(error).__name__}: {error}",
-                    blocked=True,
-                ) from error
+        except Exception as error:
             raise _cursor_state_invalidated(
-                "cursor_window_handoff_blocked: "
+                "cursor_reacquisition_foreground_changed_before_connect: "
                 f"{type(error).__name__}: {error}"
             ) from error
-        try:
-            self._require_window_handoff_evidence(
-                evidence,
-                intent=intent,
-                cursor=start,
-                expected_hwnd=pinned_hwnd,
+        self._assert_same_foreground_window(settled_foreground, pinned_hwnd)
+        if settled != start:
+            raise _cursor_state_invalidated(
+                "cursor_reacquisition_not_stationary_before_connect"
             )
-        except _TransactionAbort as error:
-            raise _TransactionAbort(
-                "cursor_window_handoff_post_mutation_evidence_unproved: "
-                f"{error}",
-                blocked=True,
-            ) from error
-        return True
+        self._require_physical_mouse_quiet(
+            backend,
+            phase="cursor_reacquisition_before_connect",
+        )
+        desktop = self._require_virtual_desktop_bounds(backend)
+        if not desktop.contains(start):
+            raise _cursor_state_invalidated(
+                "cursor_outside_verified_virtual_desktop"
+            )
+        if not _bounds_contains_bounds(desktop, geometry.canvas_bounds):
+            raise _cursor_state_invalidated(
+                "runelite_canvas_outside_verified_virtual_desktop"
+            )
+        neutral = self._neutral_cursor_bounds(geometry.canvas_bounds)
+        ingress_intent = ApprovedPointerIntent(
+            intent_id=f"{intent.intent_id}:cursor-reacquire",
+            purpose=intent.purpose,
+            target=neutral.center,
+            movement_bounds=desktop,
+            target_bounds=neutral,
+            expected_pid=intent.expected_pid,
+            expected_hwnd=pinned_hwnd,
+            button=intent.button,
+        )
+        evidence = CursorReacquisitionEvidence(
+            coordinate_space="device_pixels_pm_v2",
+            virtual_desktop_bounds=desktop,
+            neutral_bounds=neutral,
+            cursor_before=start,
+            before_geometry=geometry,
+        )
+        return _CursorReacquisitionPlan(ingress_intent, evidence)
 
     @staticmethod
     def _require_physical_mouse_quiet(
@@ -1903,6 +2094,97 @@ class InputCoordinator:
             )
 
     @staticmethod
+    def _require_physical_mouse_buttons_released(
+        backend: _Backend,
+        *,
+        phase: str,
+    ) -> None:
+        try:
+            raw = backend._verify_physical_mouse_buttons_released()
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                f"physical_mouse_buttons_not_released_{phase}: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("schema") != "physical_mouse_buttons_released.v1"
+            or raw.get("buttonsUp") is not True
+            or raw.get("activityClear") is not True
+        ):
+            raise _cursor_state_invalidated(
+                f"physical_mouse_button_evidence_invalid_{phase}"
+            )
+
+    @staticmethod
+    def _require_virtual_desktop_bounds(backend: _Backend) -> ScreenBounds:
+        try:
+            raw = backend._virtual_desktop_bounds()
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                "virtual_desktop_geometry_unavailable: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        try:
+            if not isinstance(raw, Mapping):
+                raise ValueError("virtual desktop evidence is not an object")
+            if raw.get("schema") != "virtual_desktop_geometry.v1":
+                raise ValueError("virtual desktop evidence schema is unsupported")
+            if raw.get("coordinateSpace") != "device_pixels_pm_v2":
+                raise ValueError("virtual desktop coordinate space is unsupported")
+            bounds = raw.get("bounds")
+            if not isinstance(bounds, Mapping):
+                raise ValueError("virtual desktop bounds are unavailable")
+            return _validate_bounds(
+                ScreenBounds(
+                    bounds.get("x"),
+                    bounds.get("y"),
+                    bounds.get("width"),
+                    bounds.get("height"),
+                ),
+                "virtual_desktop_bounds",
+            )
+        except Exception as error:
+            raise _cursor_state_invalidated(
+                "virtual_desktop_geometry_invalid: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
+    @staticmethod
+    def _neutral_cursor_bounds(canvas: ScreenBounds) -> ScreenBounds:
+        center = canvas.center
+        radius = min(
+            CURSOR_REACQUISITION_NEUTRAL_RADIUS_DEVICE_PX,
+            max(1, (canvas.width - 1) // 4),
+            max(1, (canvas.height - 1) // 4),
+        )
+        neutral = ScreenBounds(
+            center.x - radius,
+            center.y - radius,
+            radius * 2 + 1,
+            radius * 2 + 1,
+        )
+        if not _bounds_contains_bounds(canvas, neutral):
+            raise _cursor_state_invalidated(
+                "runelite_canvas_has_no_neutral_cursor_region"
+            )
+        minimum_margin = min(
+            CURSOR_REACQUISITION_NEUTRAL_INSET_DEVICE_PX,
+            max(1, min(canvas.width, canvas.height) // 4),
+        )
+        margins = (
+            neutral.x - canvas.x,
+            canvas.x + canvas.width - (neutral.x + neutral.width),
+            neutral.y - canvas.y,
+            canvas.y + canvas.height - (neutral.y + neutral.height),
+        )
+        if min(margins) < minimum_margin:
+            raise _cursor_state_invalidated(
+                "runelite_canvas_neutral_region_lacks_safe_inset"
+            )
+        return neutral
+
+    @staticmethod
     def _consume_owned_mouse_transition(
         backend: _Backend,
         button: MouseButton,
@@ -1936,7 +2218,7 @@ class InputCoordinator:
         expected_client_bounds: ScreenBounds | None,
         required_inner_bounds: ScreenBounds,
         allow_outer_origin_quantization: bool,
-    ) -> None:
+    ) -> RuneLiteGeometryEvidence:
         def coordinates(
             bounds: ScreenBounds | None,
         ) -> tuple[int, int, int, int] | None:
@@ -2019,6 +2301,8 @@ class InputCoordinator:
             actual_contains_inner = _bounds_contains_bounds(
                 actual_client, required_inner_bounds
             )
+            if not _bounds_contains_bounds(actual_outer, actual_client):
+                raise ValueError("native outer bounds do not contain the client")
             if inner_contained is not actual_contains_inner:
                 raise ValueError("inner containment proof contradicts actual bounds")
             outer_origin_quantization_compatible = bool(
@@ -2030,8 +2314,8 @@ class InputCoordinator:
             )
             # Gameplay's outer envelope is published from AWT logical bounds,
             # which can quantize one device pixel away from native
-            # GetWindowRect after SetWindowPos on a scaled display. Login also
-            # supplies an exact native client rectangle and remains exact.
+            # GetWindowRect on a scaled display. Login also supplies an exact
+            # native client rectangle and remains exact.
             if (
                 (
                     outer_matches is False
@@ -2047,6 +2331,13 @@ class InputCoordinator:
                 raise _cursor_state_invalidated(
                     "cursor_window_geometry_changed_reobserve_required"
                 )
+            return RuneLiteGeometryEvidence(
+                expected_pid=expected_pid,
+                expected_hwnd=expected_hwnd,
+                outer_bounds=actual_outer,
+                client_bounds=actual_client,
+                canvas_bounds=required_inner_bounds,
+            )
         except _TransactionAbort:
             raise
         except Exception as error:
@@ -2055,89 +2346,119 @@ class InputCoordinator:
                 f"{type(error).__name__}: {error}"
             ) from error
 
-    @staticmethod
-    def _require_window_handoff_evidence(
-        raw: object,
-        *,
-        intent: ApprovedPointerIntent,
-        cursor: ScreenPoint,
-        expected_hwnd: int,
-    ) -> None:
-        """Validate the backend's post-SetWindowPos proof fail-closed."""
-
-        try:
-            if not isinstance(raw, Mapping):
-                raise ValueError("evidence is not an object")
-            if raw.get("schema") != "cursor_window_handoff.v1":
-                raise ValueError("evidence schema is unsupported")
-            if raw.get("expectedPid") != intent.expected_pid:
-                raise ValueError("expected PID changed")
-            if raw.get("expectedHwnd") != expected_hwnd:
-                raise ValueError("expected HWND changed")
-            for field in (
-                "repositioned",
-                "cursorUnchanged",
-                "buttonsUpConfirmed",
-                "foregroundConfirmed",
-                "pointOwnerConfirmed",
-            ):
-                if raw.get(field) is not True:
-                    raise ValueError(f"{field} was not proved")
-
-            raw_cursor = raw.get("cursor")
-            if not isinstance(raw_cursor, Mapping) or (
-                raw_cursor.get("x"), raw_cursor.get("y")
-            ) != (cursor.x, cursor.y):
-                raise ValueError("cursor proof changed")
-
-            def bounds(field: str) -> ScreenBounds:
-                value = raw.get(field)
-                if not isinstance(value, Mapping):
-                    raise ValueError(f"{field} is not an object")
-                candidate = ScreenBounds(
-                    value.get("x"),
-                    value.get("y"),
-                    value.get("width"),
-                    value.get("height"),
-                )
-                return _validate_bounds(candidate, field)
-
-            old_bounds = bounds("oldMovementBounds")
-            new_bounds = bounds("newMovementBounds")
-            if old_bounds != intent.movement_bounds:
-                raise ValueError("old movement bounds changed")
-            if (
-                new_bounds.width != old_bounds.width
-                or new_bounds.height != old_bounds.height
-                or new_bounds == old_bounds
-            ):
-                raise ValueError("movement bounds were not rigidly translated")
-            inset = CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX
-            if (
-                new_bounds.width <= inset * 2
-                or new_bounds.height <= inset * 2
-                or not (
-                    new_bounds.x + inset
-                    <= cursor.x
-                    < new_bounds.x + new_bounds.width - inset
-                    and new_bounds.y + inset
-                    <= cursor.y
-                    < new_bounds.y + new_bounds.height - inset
-                )
-            ):
-                raise ValueError(
-                    "cursor is not inside the translated movement inset"
-                )
-        except _TransactionAbort:
-            raise
-        except Exception as error:
+    def _require_unchanged_window_geometry(
+        self,
+        backend: _Backend,
+        before: RuneLiteGeometryEvidence,
+    ) -> RuneLiteGeometryEvidence:
+        after = self._require_window_geometry(
+            backend,
+            expected_pid=before.expected_pid,
+            expected_hwnd=before.expected_hwnd,
+            expected_outer_bounds=before.outer_bounds,
+            expected_client_bounds=before.client_bounds,
+            required_inner_bounds=before.canvas_bounds,
+            allow_outer_origin_quantization=False,
+        )
+        if after != before:
             raise _cursor_state_invalidated(
-                "cursor_window_handoff_evidence_invalid: "
-                f"{type(error).__name__}: {error}"
-            ) from error
+                "runelite_geometry_changed_during_cursor_reacquisition"
+            )
+        return after
+
+    def _reacquire_external_cursor(
+        self,
+        transaction: _Transaction,
+        plan: _CursorReacquisitionPlan,
+    ) -> CursorReacquisitionEvidence:
+        intent = plan.intent
+        evidence = plan.evidence
+        before_geometry = evidence.before_geometry
+        entered_canvas = [False]
+
+        self._assert_firmware_armed(
+            transaction,
+            phase="before_cursor_reacquisition",
+        )
+
+        def movement_guard(point: ScreenPoint, phase: str) -> None:
+            self._assert_pointer_foreground(transaction, intent)
+            current_desktop = self._require_virtual_desktop_bounds(
+                transaction.backend
+            )
+            if current_desktop != evidence.virtual_desktop_bounds:
+                raise _cursor_state_invalidated(
+                    "virtual_desktop_geometry_changed_during_cursor_reacquisition"
+                )
+            if not current_desktop.contains(point):
+                raise _cursor_state_invalidated(
+                    "cursor_left_verified_virtual_desktop"
+                )
+            self._require_physical_mouse_buttons_released(
+                transaction.backend,
+                phase=phase,
+            )
+            self._require_unchanged_window_geometry(
+                transaction.backend,
+                before_geometry,
+            )
+            inside_canvas = before_geometry.canvas_bounds.contains(point)
+            if entered_canvas[0] and not inside_canvas:
+                raise _cursor_state_invalidated(
+                    "cursor_left_canvas_after_reacquisition_entry"
+                )
+            if inside_canvas:
+                entered_canvas[0] = True
+                self._assert_point_owned_by_window(
+                    transaction.backend,
+                    point,
+                    expected_pid=before_geometry.expected_pid,
+                    expected_hwnd=before_geometry.expected_hwnd,
+                    reason_prefix="cursor_reacquisition",
+                )
+
+        actual = self._move(
+            transaction,
+            intent,
+            expected_start=evidence.cursor_before,
+            movement_guard=movement_guard,
+            allow_foreign_transit=True,
+            strict_transfer_envelope=False,
+        )
+        if not entered_canvas[0] or not evidence.neutral_bounds.contains(actual):
+            raise _cursor_state_invalidated(
+                "cursor_reacquisition_did_not_reach_neutral_canvas_region"
+            )
+        self._require_physical_mouse_quiet(
+            transaction.backend,
+            phase="after_cursor_reacquisition",
+        )
+        final = self._current_position(transaction.backend)
+        movement_guard(final, "cursor_reacquisition_final")
+        if final != actual:
+            raise _cursor_state_invalidated(
+                "cursor_not_stable_after_reacquisition"
+            )
+        final_geometry = self._require_unchanged_window_geometry(
+            transaction.backend,
+            before_geometry,
+        )
+        return replace(
+            evidence,
+            cursor_after=final,
+            after_geometry=final_geometry,
+            completed=True,
+        )
 
     def _move(
-        self, transaction: _Transaction, intent: ApprovedPointerIntent
+        self,
+        transaction: _Transaction,
+        intent: ApprovedPointerIntent,
+        *,
+        expected_start: ScreenPoint | None = None,
+        movement_guard: Callable[[ScreenPoint, str], None] | None = None,
+        allow_foreign_transit: bool = False,
+        strict_transfer_envelope: bool = True,
     ) -> ScreenPoint:
         backend = transaction.backend
         self._ensure_firmware_armed(transaction)
@@ -2163,12 +2484,16 @@ class InputCoordinator:
                 "cursor_changed_before_pointer_motion"
             )
         start = final_start
-        if not intent.movement_bounds.contains(start):
-            start = self._reacquire_cursor_start(
-                transaction,
-                intent,
-                start,
+        if expected_start is not None and start != expected_start:
+            raise _cursor_state_invalidated(
+                "cursor_changed_after_reacquisition_preflight"
             )
+        if not intent.movement_bounds.contains(start):
+            raise _cursor_state_invalidated(
+                "cursor_start_outside_verified_movement_bounds"
+            )
+        if movement_guard is not None:
+            movement_guard(start, "cursor_reacquisition_start")
         actual = start
         x_calibrated = False
         y_calibrated = False
@@ -2211,12 +2536,15 @@ class InputCoordinator:
                 calibrated=y_calibrated,
                 axis="y",
             )
-            command_dx, command_dy = self._clamp_feedback_waypoint_to_envelope(
-                actual,
-                command_dx,
-                command_dy,
-                intent.movement_bounds,
-            )
+            if strict_transfer_envelope:
+                command_dx, command_dy = (
+                    self._clamp_feedback_waypoint_to_envelope(
+                        actual,
+                        command_dx,
+                        command_dy,
+                        intent.movement_bounds,
+                    )
+                )
             command_target = ScreenPoint(
                 actual.x + command_dx,
                 actual.y + command_dy,
@@ -2238,11 +2566,12 @@ class InputCoordinator:
                 raise _TransactionAbort(
                     "pointer plan does not match the feedback waypoint"
                 )
-            self._assert_plan_transfer_envelope(
-                actual,
-                plan,
-                intent.movement_bounds,
-            )
+            if strict_transfer_envelope:
+                self._assert_plan_transfer_envelope(
+                    actual,
+                    plan,
+                    intent.movement_bounds,
+                )
             if (
                 transaction.pointer_step_count + len(plan.steps)
                 > self._max_pointer_steps
@@ -2257,12 +2586,24 @@ class InputCoordinator:
                     raise _cursor_state_invalidated(
                         "cursor_left_verified_movement_bounds"
                     )
-                self._assert_transfer_headroom(
-                    actual,
-                    step.dx,
-                    step.dy,
-                    intent.movement_bounds,
-                )
+                if movement_guard is not None:
+                    movement_guard(actual, "cursor_reacquisition_after_move")
+                if movement_guard is not None:
+                    movement_guard(actual, "cursor_reacquisition_before_move")
+                if strict_transfer_envelope:
+                    self._assert_transfer_headroom(
+                        actual,
+                        step.dx,
+                        step.dy,
+                        intent.movement_bounds,
+                    )
+                else:
+                    self._assert_directed_transfer_headroom(
+                        actual,
+                        step.dx,
+                        step.dy,
+                        intent.movement_bounds,
+                    )
                 before = actual
                 feedback_started_at = self._feedback_now()
                 acknowledged, _ = transaction.invoke(
@@ -2342,6 +2683,11 @@ class InputCoordinator:
                         raise _cursor_state_invalidated(
                             "cursor_left_verified_movement_bounds"
                         )
+                    if movement_guard is not None:
+                        movement_guard(
+                            actual,
+                            "cursor_reacquisition_delayed_sample",
+                        )
                     self._assert_feedback_sample_delta(
                         transaction=transaction,
                         commanded=step.dx,
@@ -2388,6 +2734,8 @@ class InputCoordinator:
                         feedback_started_at=feedback_started_at,
                         actual_sampled_at=actual_sampled_at,
                         first_effect_millis=first_effect_millis,
+                        require_point_owner=not allow_foreign_transit,
+                        movement_guard=movement_guard,
                     )
                     x_calibrated, _ = self._validate_axis_transfer(
                         transaction=transaction,
@@ -2434,6 +2782,11 @@ class InputCoordinator:
                 self._sleep(plan.timestep_seconds)
                 settled = self._current_position(backend)
                 self._assert_pointer_foreground(transaction, intent)
+                if movement_guard is not None:
+                    movement_guard(
+                        settled,
+                        "cursor_reacquisition_plan_settled",
+                    )
                 x_calibrated, _ = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=0,
@@ -2477,6 +2830,8 @@ class InputCoordinator:
                 )
 
         final = self._current_position(backend)
+        if movement_guard is not None:
+            movement_guard(final, "cursor_reacquisition_move_final")
         if not intent.movement_bounds.contains(final):
             raise _cursor_state_invalidated(
                 "cursor_final_position_outside_verified_bounds"
@@ -2484,255 +2839,6 @@ class InputCoordinator:
         if not intent.target_bounds.contains(final):
             raise _TransactionAbort("cursor_target_outside_verified_target_bounds")
         return final
-
-    def _reacquire_cursor_start(
-        self,
-        transaction: _Transaction,
-        intent: ApprovedPointerIntent,
-        start: ScreenPoint,
-    ) -> ScreenPoint:
-        """Move a freshly observed outer-window cursor into the strict region.
-
-        This is movement-only recovery for a manual cursor handoff or window
-        resize. It never activates input and hands control to the ordinary
-        client/canvas planner only after an unchanged sample has at least one
-        transfer unit of inward headroom.
-        """
-
-        outer = intent.reacquisition_bounds
-        if outer is None or not outer.contains(start):
-            raise _cursor_state_invalidated(
-                "cursor_start_outside_verified_movement_bounds"
-            )
-        self._assert_pointer_foreground(transaction, intent)
-        pinned_hwnd = transaction.pointer_hwnd
-        if pinned_hwnd is None:
-            raise _TransactionAbort(
-                "pointer_foreground_hwnd_unavailable", blocked=True
-            )
-        self._assert_point_owned_by_window(
-            transaction.backend,
-            start,
-            expected_pid=intent.expected_pid,
-            expected_hwnd=pinned_hwnd,
-        )
-        bounds = intent.movement_bounds
-        left = bounds.x
-        right = bounds.x + bounds.width - 1
-        top = bounds.y
-        bottom = bounds.y + bounds.height - 1
-        outside = (
-            max(0, left - start.x),
-            max(0, start.x - right),
-            max(0, top - start.y),
-            max(0, start.y - bottom),
-        )
-        outside_axes = int(bool(outside[0] or outside[1])) + int(
-            bool(outside[2] or outside[3])
-        )
-        if outside_axes != 1:
-            raise _cursor_state_invalidated(
-                "cursor_reacquisition_requires_one_outside_axis"
-            )
-        gap = max(outside)
-        if gap > MAX_CURSOR_REACQUISITION_GAP_DEVICE_PX:
-            raise _cursor_state_invalidated(
-                "cursor_reacquisition_gap_exceeded"
-            )
-
-        inset = CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
-        if outside[0]:
-            direction = 1
-            axis = "x"
-            destination = left + inset
-            cross_margins = (start.y - top, bottom - start.y)
-        elif outside[1]:
-            direction = -1
-            axis = "x"
-            destination = right - inset
-            cross_margins = (start.y - top, bottom - start.y)
-        elif outside[2]:
-            direction = 1
-            axis = "y"
-            destination = top + inset
-            cross_margins = (start.x - left, right - start.x)
-        else:
-            direction = -1
-            axis = "y"
-            destination = bottom - inset
-            cross_margins = (start.x - left, right - start.x)
-        if min(cross_margins) < inset:
-            raise _TransactionAbort(
-                "cursor_reacquisition_cross_axis_headroom_insufficient",
-                blocked=True,
-            )
-
-        if transaction.pointer_plan_count >= self._max_correction_plans + 1:
-            raise _TransactionAbort(
-                "pointer transaction exceeds the total feedback plan limit"
-            )
-        transaction.pointer_plan_count += 1
-
-        def remaining(point: ScreenPoint) -> int:
-            coordinate = point.x if axis == "x" else point.y
-            return max(0, (destination - coordinate) * direction)
-
-        def ready(point: ScreenPoint) -> bool:
-            return bounds.contains(point) and remaining(point) == 0
-
-        actual = start
-        for step_index in range(MAX_CURSOR_REACQUISITION_STEPS + 1):
-            if ready(actual):
-                self._sleep(self._pointer_timestep_seconds)
-                settled = self._current_position(transaction.backend)
-                self._assert_pointer_foreground(transaction, intent)
-                self._assert_point_owned_by_window(
-                    transaction.backend,
-                    settled,
-                    expected_pid=intent.expected_pid,
-                    expected_hwnd=pinned_hwnd,
-                )
-                if settled != actual:
-                    raise _cursor_state_invalidated(
-                        "cursor_reacquisition_did_not_settle"
-                    )
-                return actual
-            if step_index >= MAX_CURSOR_REACQUISITION_STEPS:
-                break
-            if transaction.pointer_step_count >= self._max_pointer_steps:
-                raise _TransactionAbort(
-                    "pointer motion exceeds the total step limit"
-                )
-            before = actual
-            command_dx = direction if axis == "x" else 0
-            command_dy = direction if axis == "y" else 0
-            self._assert_pointer_foreground(transaction, intent)
-            self._assert_point_owned_by_window(
-                transaction.backend,
-                before,
-                expected_pid=intent.expected_pid,
-                expected_hwnd=pinned_hwnd,
-            )
-            try:
-                self._assert_transfer_headroom(
-                    before, command_dx, command_dy, outer
-                )
-            except _TransactionAbort as error:
-                raise _TransactionAbort(
-                    "cursor_reacquisition_outer_headroom_insufficient",
-                    blocked=True,
-                ) from error
-            feedback_started_at = self._feedback_now()
-            acknowledged, _ = transaction.invoke(
-                "MOVE",
-                lambda dx=command_dx, dy=command_dy: (
-                    transaction.backend._move_relative(dx, dy)
-                ),
-            )
-            if not acknowledged:
-                raise _TransactionAbort("move_not_acknowledged")
-            transaction.pointer_step_count += 1
-            self._sleep(self._pointer_timestep_seconds)
-            actual = self._current_position(transaction.backend)
-            actual_sampled_at = self._feedback_now()
-            if actual_sampled_at < feedback_started_at:
-                raise _TransactionAbort("cursor_feedback_clock_regressed")
-            first_effect_millis = (
-                self._feedback_elapsed_millis(
-                    feedback_started_at,
-                    actual_sampled_at,
-                )
-                if actual != before
-                else None
-            )
-            self._assert_pointer_foreground(transaction, intent)
-            if actual == before and actual_sampled_at < (
-                feedback_started_at
-                + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
-            ):
-                # Permit one delayed/coalesced cursor report, but never issue a
-                # second command while the first is unresolved.
-                self._sleep(
-                    min(
-                        self._pointer_timestep_seconds,
-                        feedback_started_at
-                        + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
-                        - actual_sampled_at,
-                    )
-                )
-                actual = self._current_position(transaction.backend)
-                actual_sampled_at = self._feedback_now()
-                if actual_sampled_at < feedback_started_at:
-                    raise _TransactionAbort("cursor_feedback_clock_regressed")
-                if first_effect_millis is None and actual != before:
-                    first_effect_millis = self._feedback_elapsed_millis(
-                        feedback_started_at,
-                        actual_sampled_at,
-                    )
-                self._assert_pointer_foreground(transaction, intent)
-            if actual == before:
-                actual = self._await_delayed_cursor_feedback(
-                    transaction=transaction,
-                    intent=intent,
-                    feedback_bounds=outer,
-                    before=before,
-                    actual=actual,
-                    commanded_x=command_dx,
-                    commanded_y=command_dy,
-                    feedback_started_at=feedback_started_at,
-                    actual_sampled_at=actual_sampled_at,
-                    first_effect_millis=first_effect_millis,
-                )
-            else:
-                self._require_cursor_effect_observed_by_arrival_deadline(
-                    transaction=transaction,
-                    before=before,
-                    actual=actual,
-                    commanded_x=command_dx,
-                    commanded_y=command_dy,
-                    feedback_started_at=feedback_started_at,
-                    actual_sampled_at=actual_sampled_at,
-                    first_effect_millis=first_effect_millis,
-                )
-            observed_axis = (
-                actual.x - before.x if axis == "x" else actual.y - before.y
-            )
-            observed_cross = (
-                actual.y - before.y if axis == "x" else actual.x - before.x
-            )
-            if observed_cross != 0:
-                raise _cursor_state_invalidated(
-                    "cursor_reacquisition_cross_axis_motion"
-                )
-            if observed_axis == 0:
-                raise _TransactionAbort(
-                    "cursor_reacquisition_no_effect", blocked=True
-                )
-            if (observed_axis > 0) != (direction > 0):
-                raise _cursor_state_invalidated(
-                    "cursor_reacquisition_direction_mismatch"
-                )
-            if abs(observed_axis) > MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT:
-                raise _TransactionAbort(
-                    "cursor_reacquisition_transfer_gain_exceeded", blocked=True
-                )
-            if not outer.contains(actual):
-                raise _cursor_state_invalidated(
-                    "cursor_left_verified_reacquisition_bounds"
-                )
-            self._assert_point_owned_by_window(
-                transaction.backend,
-                actual,
-                expected_pid=intent.expected_pid,
-                expected_hwnd=pinned_hwnd,
-            )
-            if remaining(actual) >= remaining(before):
-                raise _cursor_state_invalidated(
-                    "cursor_reacquisition_made_no_progress"
-                )
-        raise _TransactionAbort(
-            "cursor_reacquisition_step_limit_exceeded", blocked=True
-        )
 
     @staticmethod
     def _feedback_axis_command(
@@ -2860,6 +2966,25 @@ class InputCoordinator:
         if required > min(margins):
             raise _TransactionAbort(
                 "pointer_plan_transfer_envelope_would_leave_bounds"
+            )
+
+    @staticmethod
+    def _assert_directed_transfer_headroom(
+        actual: ScreenPoint,
+        dx: int,
+        dy: int,
+        bounds: ScreenBounds,
+    ) -> None:
+        """Contain no-click ingress while permitting an inward corner probe."""
+
+        maximum_effect = MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+        endpoint = ScreenPoint(
+            actual.x + dx * maximum_effect,
+            actual.y + dy * maximum_effect,
+        )
+        if not bounds.contains(endpoint):
+            raise _TransactionAbort(
+                "cursor_reacquisition_directed_transfer_would_leave_virtual_desktop"
             )
 
     @staticmethod
@@ -3021,6 +3146,8 @@ class InputCoordinator:
         feedback_started_at: float,
         actual_sampled_at: float,
         first_effect_millis: int | None,
+        require_point_owner: bool = True,
+        movement_guard: Callable[[ScreenPoint, str], None] | None = None,
     ) -> ScreenPoint:
         """Await one ACKed MOVE without ever stacking another command.
 
@@ -3062,13 +3189,19 @@ class InputCoordinator:
             )
 
         try:
-            self._assert_point_owned_by_window(
-                transaction.backend,
-                actual,
-                expected_pid=intent.expected_pid,
-                expected_hwnd=pinned_hwnd,
-                reason_prefix="cursor_feedback",
-            )
+            if require_point_owner:
+                self._assert_point_owned_by_window(
+                    transaction.backend,
+                    actual,
+                    expected_pid=intent.expected_pid,
+                    expected_hwnd=pinned_hwnd,
+                    reason_prefix="cursor_feedback",
+                )
+            if movement_guard is not None:
+                movement_guard(
+                    actual,
+                    "cursor_reacquisition_feedback_initial",
+                )
             for poll_index in range(
                 1,
                 DELAYED_CURSOR_FEEDBACK_MAX_EXTRA_POLLS + 1,
@@ -3097,13 +3230,19 @@ class InputCoordinator:
                 previous = last
                 last = sample
                 self._assert_pointer_foreground(transaction, intent)
-                self._assert_point_owned_by_window(
-                    transaction.backend,
-                    sample,
-                    expected_pid=intent.expected_pid,
-                    expected_hwnd=pinned_hwnd,
-                    reason_prefix="cursor_feedback",
-                )
+                if require_point_owner:
+                    self._assert_point_owned_by_window(
+                        transaction.backend,
+                        sample,
+                        expected_pid=intent.expected_pid,
+                        expected_hwnd=pinned_hwnd,
+                        reason_prefix="cursor_feedback",
+                    )
+                if movement_guard is not None:
+                    movement_guard(
+                        sample,
+                        "cursor_reacquisition_feedback_poll",
+                    )
                 if not feedback_bounds.contains(sample):
                     raise _cursor_state_invalidated(
                         "cursor_left_verified_movement_bounds"
@@ -3216,13 +3355,19 @@ class InputCoordinator:
             final = self._current_position(transaction.backend)
             rejected_last = final
             self._assert_pointer_foreground(transaction, intent)
-            self._assert_point_owned_by_window(
-                transaction.backend,
-                final,
-                expected_pid=intent.expected_pid,
-                expected_hwnd=pinned_hwnd,
-                reason_prefix="cursor_feedback",
-            )
+            if require_point_owner:
+                self._assert_point_owned_by_window(
+                    transaction.backend,
+                    final,
+                    expected_pid=intent.expected_pid,
+                    expected_hwnd=pinned_hwnd,
+                    reason_prefix="cursor_feedback",
+                )
+            if movement_guard is not None:
+                movement_guard(
+                    final,
+                    "cursor_reacquisition_feedback_final",
+                )
             if final != last:
                 raise _cursor_state_invalidated(
                     "cursor_changed_after_delayed_cursor_feedback"
@@ -3793,4 +3938,5 @@ class InputCoordinator:
                 if transaction is not None
                 else CursorFeedbackEvidence()
             ),
+            cursor_reacquisition=state.cursor_reacquisition,
         )

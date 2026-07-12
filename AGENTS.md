@@ -62,14 +62,23 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Require a fresh loaded scene before gameplay. `LOGGED_IN` alone is not proof.
 - `docs/INPUT_COORDINATOR.md` governs pointer transactions. Always sample the
   real current Win32 cursor in a proven per-monitor-v2 device-pixel context;
-  never infer it from a prior command. A quiet cursor may use only the bounded
-  ingress or stationary pre-serial window-handoff paths defined there. Never
-  move the pointer across a foreign desktop surface. Any handoff invalidates
-  screen coordinates and requires reobservation; continued interference or a
-  repeated invalidation blocks.
-- Before pointer motion and again before activation, prove the physical mouse
-  is quiet, the exact root HWND/PID still owns the point, and current Win32
-  outer/client geometry agrees with the intent's outer/client/canvas facts.
+  never infer it from a prior command. RuneLite stays stationary during cursor
+  recovery: production cursor paths may not reposition or resize it and may not
+  use a software cursor API. A cursor outside the verified canvas may move only
+  through the existing Arduino-backed coordinator under its existing
+  cross-process lease, to a neutral point comfortably inside that canvas, with
+  no click or key activation. That movement invalidates the old intent and
+  requires fresh lane-specific observation and safety validation.
+- Before pointer motion, bind the exact telemetry PID and foreground root HWND,
+  prove the physical mouse quiet, sample the PMv2 virtual desktop, and retain
+  exact native outer/client plus telemetry-canvas geometry. A connected Arduino
+  preflight must also prove zero firmware-held keys and mouse buttons before the
+  first MOVE. Gameplay waits for
+  RuneLite to become foreground and blocks if it does not; saved-session login
+  may use one bounded `SetForegroundWindow`-only attempt when exact identity and
+  outer/client geometry remain unchanged. A minimized window or failed focus
+  requires manual attention. After the cursor enters the canvas and again
+  before activation, the exact pinned root HWND/PID must own the point.
   The first MOVE also requires two identical PMv2 cursor samples separated by
   one timestep, followed by a fresh physical-button quiet proof and one final
   unchanged cursor/foreground sample. A stationary manual takeover is accepted
@@ -91,12 +100,15 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   the complete effect must be observed by 200 ms and two later identical whole-
   cursor samples must fit by 240 ms, with at most ten extra polls. Send no Arduino
   command, STATUS, rearm, or watchdog refresh during that wait. Every extended
-  sample must retain the pinned foreground/point owner, bounds, direction,
-  gain, and uncommanded-axis proof. After stability, re-prove physical-button
+  sample must retain the pinned foreground, virtual-desktop/canvas bounds,
+  exact unchanged outer/client/canvas geometry, direction, gain, and
+  uncommanded-axis proof; exact point ownership is additionally required once
+  the cursor has entered the canvas. After stability, re-prove physical-button
   quiet and one final unchanged owned cursor, discard the old trajectory, and
   replan from current truth. Timeout becomes typed cursor-state invalidation
-  and may receive only the existing lane-specific fresh reobservation;
-  repetition blocks. Same-direction, in-gain buttonless human motion is
+  and may receive only the bounded lane-specific fresh reobservation. Saved-
+  session login permits at most two total cursor-recovery attempts before a
+  manual-attention blocker. Same-direction, in-gain buttonless human motion is
   source-indistinguishable, so fresh ownership and semantic validation remain
   the final vetoes.
 - Require exact target identity, verified canvas geometry, and exact post-move
@@ -111,9 +123,10 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Every connected attempt must end with confirmed `STOP_ALL`, `DISARM`, and
   authoritative wire `STATUS` proving disarmed, zero held keys, zero held mouse
   buttons, and no unresolved command evidence.
-- A handoff rejected before serial connect instead needs an empty closed ledger
-  and closed backend; never claim firmware cleanup for hardware that was not
-  opened.
+- A lease or preflight rejection before serial connect instead needs an empty
+  closed ledger and closed backend; never claim firmware cleanup for hardware
+  that was not opened. A connected cursor-reacquisition attempt always requires
+  the full authoritative cleanup sequence, including on failure.
 - Fail closed. Missing authorization proof is not permission to add an input-
   capable fallback.
 - Dry-run, replay, overlay, diagnostics, and demonstration capture must not
@@ -123,7 +136,9 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 saved-session Play Now, and Click here to play surfaces. All other
 login/recovery surfaces fail closed. A coherent loaded scene may use a bounded
 template-only absence check after the normal matcher caps, but that check cannot
-use the disconnect heuristic or authorize input.
+use the disconnect heuristic or authorize input. Login cursor recovery is
+limited to two total automated attempts; after that, or for credentials, MFA,
+PIN, minimized-window, or unsupported-prompt handling, request manual attention.
 
 ## Architecture and development
 

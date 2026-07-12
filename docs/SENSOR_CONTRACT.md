@@ -74,13 +74,16 @@ available geometry whose schema or coordinate space is missing or different.
 `clientWindowHeight` are optional only as one all-or-none group. Dimensions must
 be positive and the resulting device-pixel window must contain the complete
 canvas; partial or contradictory bounds reject the observation. This outer
-window is not gameplay transit or activation authority. It is only the pinned
-RuneLite ownership/reacquisition envelope. The input boundary independently
-matches it to PMv2 `GetWindowRect` and proves the canvas inside the actual Win32
-client. A cursor still inside that envelope may use the stricter movement-only
-canvas ingress. A quiet cursor beyond it can only trigger a pre-serial exact-
-window translation followed by complete reobservation; these sensor coordinates
-are never reused after the window moves.
+window is not gameplay transit or activation authority. It is expected geometry
+for the pinned RuneLite PID/root HWND. The input boundary independently matches
+it to PMv2 `GetWindowRect`, samples the actual Win32 client, and proves the exact
+canvas inside that client. RuneLite remains stationary during cursor recovery.
+A cursor anywhere outside the canvas but inside the freshly proven PMv2 virtual
+desktop may use only the connected Arduino movement-only lane to a neutral
+canvas point. That lane retains the exact outer/client/canvas geometry before
+and after, requires it unchanged throughout, sends no activation, discards the
+old intent, and requires complete lane-specific reobservation before later
+input.
 
 For a projected object, `aimPoint` must be inside both the viewport and the
 first present authoritative API shape in clickbox -> convex hull -> canvas tile

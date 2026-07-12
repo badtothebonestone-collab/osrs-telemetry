@@ -503,6 +503,11 @@ class CoordinatedActionInterface:
         if action.screen_point is None:
             raise ValueError("pointer action has no verified screen point")
         canvas = self._required_canvas(observation)
+        outer_window = observation.client_window_bounds
+        if outer_window is None:
+            raise ValueError(
+                "RuneLite outer window geometry unavailable for pointer recovery"
+            )
         purpose = (
             InputPurpose.GAMEPLAY_WIDGET
             if action.kind is ActionKind.CLICK_WIDGET
@@ -520,7 +525,7 @@ class CoordinatedActionInterface:
             ),
             expected_pid=self._required_pid(observation),
             button=MouseButton.LEFT,
-            reacquisition_bounds=observation.client_window_bounds,
+            reacquisition_bounds=outer_window,
         )
 
     @staticmethod

@@ -29,8 +29,12 @@ the FSM advances.
   `failureKind` (such as `cursor_state_invalidated`), complete command/ACK
   ledger, `safelyUnsent` pre-serial proof when applicable, and final firmware
   status. Its additive `cursorFeedback` evidence carries wait/settled counts,
-  maxima, and the last delayed MOVE's command, points, timings, and outcome;
-  older v1 artifacts may omit that field. The adjacent `activationAttempted`
+  maxima, and the last delayed MOVE's command, points, timings, and outcome.
+  Movement-only external-cursor receipts additionally carry
+  `cursorReacquisition`: PMv2 virtual/neutral bounds, before/after cursor,
+  bound PID/root HWND, exact outer/client/canvas geometry, completion,
+  unchanged-geometry, and no-activation evidence. Older v1 artifacts may omit
+  either additive field. The adjacent `activationAttempted`
   boolean preserves the conservative may-have-activated classification even
   when that receipt is unsuccessful; and
 - cleanup evidence derived from command/ACK counts and final firmware state,
@@ -40,7 +44,7 @@ Diagnostics never rerun target selection or SafetyGate checks. A diagnostic
 publication failure is recorded internally and cannot change task control.
 The publisher intentionally retains only the latest frame/receipt, not prior
 retry history; per-transaction evidence remains complete, but a later execution
-can replace an earlier safely-unsent cursor-invalidation receipt.
+can replace an earlier cursor-invalidation/reacquisition receipt.
 
 ## Candidate and safety evidence
 

@@ -18,9 +18,11 @@ from osrs_bot.input_coordinator import (
 from osrs_bot.login import (
     LoginCandidate,
     LoginPromptHelper,
+    LoginSafetyError,
     RuneLiteWindow,
     TEMPLATE_DIR,
     detect_login_surfaces,
+    focus_exact_window,
 )
 from osrs_bot.model import (
     InventoryObservation,
@@ -66,6 +68,70 @@ class FakeDpiUser32:
         if self.setter_result:
             self.per_monitor_v2 = self.per_monitor_v2_after_set
         return self.setter_result
+
+
+class FakeFocusUser32:
+    def __init__(
+        self,
+        *,
+        foreground_hwnd: int,
+        foreground_root: int | None = None,
+        focus_succeeds: bool = True,
+        minimized: bool = False,
+        visible: bool = True,
+        pid: int = 4242,
+    ) -> None:
+        self.foreground_hwnd = foreground_hwnd
+        self.foreground_root = (
+            foreground_root if foreground_root is not None else foreground_hwnd
+        )
+        self.focus_succeeds = focus_succeeds
+        self.minimized = minimized
+        self.visible = visible
+        self.pid = pid
+        self.calls: list[str] = []
+        self.GetForegroundWindow = FakeWinFunction(
+            lambda: self.foreground_hwnd
+        )
+        self.GetAncestor = FakeWinFunction(self._get_ancestor)
+        self.GetWindowThreadProcessId = FakeWinFunction(self._get_pid)
+        self.IsWindowVisible = FakeWinFunction(lambda _hwnd: self.visible)
+        self.IsIconic = FakeWinFunction(lambda _hwnd: self.minimized)
+        self.SetForegroundWindow = FakeWinFunction(self._set_foreground)
+        self.ShowWindow = FakeWinFunction(
+            lambda *_args: self._forbidden("ShowWindow")
+        )
+        self.SetWindowPos = FakeWinFunction(
+            lambda *_args: self._forbidden("SetWindowPos")
+        )
+        self.MoveWindow = FakeWinFunction(
+            lambda *_args: self._forbidden("MoveWindow")
+        )
+
+    @staticmethod
+    def _handle(value: object) -> int:
+        return int(getattr(value, "value", value) or 0)
+
+    def _get_ancestor(self, hwnd: object, _kind: int) -> int:
+        value = self._handle(hwnd)
+        if value == self.foreground_hwnd:
+            return self.foreground_root
+        return value
+
+    def _get_pid(self, _hwnd: object, pid_pointer: object) -> int:
+        pid_pointer._obj.value = self.pid
+        return 1
+
+    def _set_foreground(self, hwnd: object) -> bool:
+        self.calls.append("SetForegroundWindow")
+        if self.focus_succeeds:
+            self.foreground_hwnd = self._handle(hwnd)
+            self.foreground_root = self.foreground_hwnd
+        return self.focus_succeeds
+
+    def _forbidden(self, name: str) -> bool:
+        self.calls.append(name)
+        raise AssertionError(f"focus-only activation called forbidden {name}")
 
 
 def observation(
@@ -143,14 +209,12 @@ class FakeBackend:
         start: tuple[int, int] = (150, 500),
         foreground_hwnd: int = 77,
         change_position_on_call: int | None = None,
-        window_handoff_callback=None,
     ) -> None:
         self.calls: list[object] = []
         self.fail_at = fail_at
         self.position = start
         self.foreground_hwnd = foreground_hwnd
         self.change_position_on_call = change_position_on_call
-        self.window_handoff_callback = window_handoff_callback
         self.owned_transition_pending: str | None = None
         self.position_call_count = 0
         self.armed = False
@@ -231,55 +295,6 @@ class FakeBackend:
         self._call("point_owner", point)
         return {"pid": 4242, "hwnd": 77}
 
-    def _reposition_window_for_cursor(
-        self,
-        *,
-        expected_pid: int,
-        expected_hwnd: int,
-        cursor: tuple[int, int],
-        movement_bounds: tuple[int, int, int, int],
-        inset_px: int,
-    ) -> dict[str, object]:
-        self._call("window_handoff")
-        x, y, width, height = movement_bounds
-        cursor_x, cursor_y = cursor
-        dx = 0
-        dy = 0
-        if cursor_x < x + inset_px:
-            dx = cursor_x - (x + inset_px)
-        elif cursor_x >= x + width - inset_px:
-            dx = cursor_x - (x + width - inset_px - 1)
-        if cursor_y < y + inset_px:
-            dy = cursor_y - (y + inset_px)
-        elif cursor_y >= y + height - inset_px:
-            dy = cursor_y - (y + height - inset_px - 1)
-        evidence: dict[str, object] = {
-            "schema": "cursor_window_handoff.v1",
-            "expectedPid": expected_pid,
-            "expectedHwnd": expected_hwnd,
-            "cursor": {"x": cursor_x, "y": cursor_y},
-            "oldMovementBounds": {
-                "x": x,
-                "y": y,
-                "width": width,
-                "height": height,
-            },
-            "newMovementBounds": {
-                "x": x + dx,
-                "y": y + dy,
-                "width": width,
-                "height": height,
-            },
-            "repositioned": True,
-            "cursorUnchanged": True,
-            "buttonsUpConfirmed": True,
-            "foregroundConfirmed": True,
-            "pointOwnerConfirmed": True,
-        }
-        if self.window_handoff_callback is not None:
-            self.window_handoff_callback(evidence)
-        return evidence
-
     def _verify_window_geometry(
         self,
         *,
@@ -318,6 +333,19 @@ class FakeBackend:
             "innerContainedByClient": True,
         }
 
+    def _virtual_desktop_bounds(self) -> dict[str, object]:
+        self._call("virtual_desktop")
+        return {
+            "schema": "virtual_desktop_geometry.v1",
+            "coordinateSpace": "device_pixels_pm_v2",
+            "bounds": {
+                "x": -4000,
+                "y": -2200,
+                "width": 8000,
+                "height": 4400,
+            },
+        }
+
     def _verify_physical_mouse_quiet(self) -> dict[str, object]:
         self._call("physical_mouse_quiet")
         if self.owned_transition_pending is not None:
@@ -328,6 +356,14 @@ class FakeBackend:
             "activityClear": True,
             "historicalActivityConsumed": False,
             "sampleCount": 3,
+        }
+
+    def _verify_physical_mouse_buttons_released(self) -> dict[str, object]:
+        self._call("physical_mouse_buttons_released")
+        return {
+            "schema": "physical_mouse_buttons_released.v1",
+            "buttonsUp": True,
+            "activityClear": True,
         }
 
     def _consume_owned_mouse_transition(self, button: str) -> dict[str, object]:
@@ -406,28 +442,32 @@ def build_helper(
     backends: list[FakeBackend] | None = None,
     fail_at: str | None = None,
     cursor_start: tuple[int, int] = (150, 500),
+    cursor_starts: list[tuple[int, int]] | None = None,
     foreground_hwnd: int = 77,
     cursor_change_calls: list[int | None] | None = None,
     window_finder=None,
-    window_handoff_callback=None,
     loaded_scene_detector=None,
     clock: FakeClock | None = None,
 ) -> LoginPromptHelper:
     clock = clock or FakeClock()
     collection = backends if backends is not None else []
     pending_cursor_changes = list(cursor_change_calls or ())
+    pending_cursor_starts = list(cursor_starts or ())
 
     def backend_factory() -> FakeBackend:
         backend = FakeBackend(
             fail_at=fail_at,
-            start=cursor_start,
+            start=(
+                pending_cursor_starts.pop(0)
+                if pending_cursor_starts
+                else cursor_start
+            ),
             foreground_hwnd=foreground_hwnd,
             change_position_on_call=(
                 pending_cursor_changes.pop(0)
                 if pending_cursor_changes
                 else None
             ),
-            window_handoff_callback=window_handoff_callback,
         )
         collection.append(backend)
         return backend
@@ -460,7 +500,7 @@ def safely_unsent_cursor_receipt(transaction_id: str) -> InputReceipt:
         mode="pointer",
         intent_ids=(f"{transaction_id}-intent",),
         status="BLOCKED",
-        reason="cursor_window_repositioned_reobserve_required",
+        reason="cursor_reacquired_reobserve_required",
         connected=False,
         arm_acknowledged=False,
         stop_all_acknowledged=False,
@@ -1075,6 +1115,152 @@ class DpiAwarenessTests(unittest.TestCase):
         self.assertFalse(login_module._DPI_AWARENESS_SET)
 
 
+class FocusExactWindowTests(unittest.TestCase):
+    @staticmethod
+    def _patch_focus(
+        user32: FakeFocusUser32,
+        *windows: RuneLiteWindow,
+    ):
+        return (
+            patch.object(login_module, "_enable_windows_dpi_awareness"),
+            patch.object(login_module, "_user32", return_value=user32),
+            patch.object(
+                login_module,
+                "find_runelite_window",
+                side_effect=windows,
+            ),
+            patch.object(login_module.time, "sleep"),
+        )
+
+    def assertNoGeometryMutation(self, user32: FakeFocusUser32) -> None:
+        self.assertFalse(
+            {"ShowWindow", "SetWindowPos", "MoveWindow"}.intersection(
+                user32.calls
+            )
+        )
+
+    def test_already_foreground_root_needs_no_activation(self) -> None:
+        user32 = FakeFocusUser32(
+            foreground_hwnd=701,
+            foreground_root=WINDOW.hwnd,
+        )
+        awareness, user32_patch, finder, sleep = self._patch_focus(
+            user32,
+            WINDOW,
+            WINDOW,
+        )
+
+        with awareness as awareness_mock, user32_patch, finder as finder_mock, sleep as sleep_mock:
+            self.assertTrue(focus_exact_window(WINDOW))
+
+        awareness_mock.assert_called_once_with()
+        self.assertEqual(2, finder_mock.call_count)
+        sleep_mock.assert_not_called()
+        self.assertNotIn("SetForegroundWindow", user32.calls)
+        self.assertNoGeometryMutation(user32)
+
+    def test_focus_only_requires_concrete_outer_geometry(self) -> None:
+        user32 = FakeFocusUser32(
+            foreground_hwnd=701,
+            foreground_root=WINDOW.hwnd,
+        )
+        missing_outer = replace(WINDOW, outer_bounds=None)
+        awareness, user32_patch, finder, sleep = self._patch_focus(
+            user32,
+            missing_outer,
+        )
+
+        with awareness, user32_patch, finder, sleep:
+            with self.assertRaisesRegex(
+                LoginSafetyError,
+                "outer geometry is required",
+            ):
+                focus_exact_window(missing_outer)
+
+        self.assertEqual([], user32.calls)
+        self.assertNoGeometryMutation(user32)
+
+    def test_set_foreground_only_preserves_exact_root_pid_and_geometry(self) -> None:
+        user32 = FakeFocusUser32(foreground_hwnd=909, focus_succeeds=True)
+        awareness, user32_patch, finder, sleep = self._patch_focus(
+            user32,
+            WINDOW,
+            WINDOW,
+        )
+
+        with awareness, user32_patch, finder as finder_mock, sleep as sleep_mock:
+            self.assertTrue(focus_exact_window(WINDOW))
+
+        self.assertEqual(2, finder_mock.call_count)
+        sleep_mock.assert_called_once_with(0.15)
+        self.assertEqual(["SetForegroundWindow"], user32.calls)
+        self.assertNoGeometryMutation(user32)
+
+    def test_focus_failure_leaves_foreign_window_and_blocks(self) -> None:
+        user32 = FakeFocusUser32(foreground_hwnd=909, focus_succeeds=False)
+        awareness, user32_patch, finder, sleep = self._patch_focus(
+            user32,
+            WINDOW,
+        )
+
+        with awareness, user32_patch, finder, sleep:
+            with self.assertRaisesRegex(
+                LoginSafetyError,
+                "could not be focused without geometry mutation",
+            ):
+                focus_exact_window(WINDOW)
+
+        self.assertEqual(["SetForegroundWindow"], user32.calls)
+        self.assertNoGeometryMutation(user32)
+
+    def test_geometry_drift_after_focus_blocks(self) -> None:
+        changed = replace(
+            WINDOW,
+            client_bounds=ScreenBounds(
+                WINDOW.client_bounds.x,
+                WINDOW.client_bounds.y,
+                WINDOW.client_bounds.width - 1,
+                WINDOW.client_bounds.height,
+            ),
+        )
+        user32 = FakeFocusUser32(foreground_hwnd=909, focus_succeeds=True)
+        awareness, user32_patch, finder, sleep = self._patch_focus(
+            user32,
+            WINDOW,
+            changed,
+        )
+
+        with awareness, user32_patch, finder, sleep:
+            with self.assertRaisesRegex(
+                LoginSafetyError,
+                "geometry changed during focus-only activation",
+            ):
+                focus_exact_window(WINDOW)
+
+        self.assertEqual(["SetForegroundWindow"], user32.calls)
+        self.assertNoGeometryMutation(user32)
+
+    def test_minimized_window_requires_manual_attention_without_restore(self) -> None:
+        user32 = FakeFocusUser32(
+            foreground_hwnd=909,
+            minimized=True,
+        )
+        awareness, user32_patch, finder, sleep = self._patch_focus(
+            user32,
+            WINDOW,
+        )
+
+        with awareness, user32_patch, finder, sleep:
+            with self.assertRaisesRegex(
+                LoginSafetyError,
+                "minimized; manual attention is required",
+            ):
+                focus_exact_window(WINDOW)
+
+        self.assertNotIn("SetForegroundWindow", user32.calls)
+        self.assertNoGeometryMutation(user32)
+
+
 class ClientCaptureTests(unittest.TestCase):
     def test_capture_reverifies_dpi_context_and_uses_exact_device_bounds(self) -> None:
         image = Image.new("RGBA", (1000, 700), (20, 20, 20, 255))
@@ -1369,7 +1555,7 @@ class LoginHelperTests(unittest.TestCase):
         self.assertEqual(result.reason, "candidate_outside_exact_runelite_client")
         self.assertEqual(backends, [])
 
-    def test_cursor_window_handoff_blocks_after_one_stale_geometry_retry(self) -> None:
+    def test_cursor_recovery_blocks_for_manual_attention_after_two_attempts(self) -> None:
         backends: list[FakeBackend] = []
         helper = build_helper(
             FakeObservations(
@@ -1386,21 +1572,44 @@ class LoginHelperTests(unittest.TestCase):
         result = helper.run()
 
         self.assertEqual("BLOCKED", result.status)
-        self.assertIn("repositioned_reobserve_required", result.reason)
+        self.assertEqual(
+            "manual_attention_required_after_two_login_recovery_attempts",
+            result.reason,
+        )
         self.assertEqual(2, len(backends))
-        self.assertTrue(all("mouse_down" not in backend.calls for backend in backends))
-        self.assertTrue(all("window_handoff" in backend.calls for backend in backends))
-        self.assertTrue(all("connect" not in backend.calls for backend in backends))
-        self.assertTrue(all("stop_all" not in backend.calls for backend in backends))
+        self.assertTrue(
+            all("mouse_down" not in backend.calls for backend in backends)
+        )
+        self.assertTrue(all("press" not in backend.calls for backend in backends))
+        self.assertTrue(all("connect" in backend.calls for backend in backends))
+        self.assertTrue(all("stop_all" in backend.calls for backend in backends))
+        self.assertTrue(all("disarm" in backend.calls for backend in backends))
         self.assertEqual([1, 2], [click.source_tick for click in result.clicks])
-        self.assertTrue(all(click.receipt.safely_unsent for click in result.clicks))
-        self.assertTrue(all(not click.receipt.commands for click in result.clicks))
+        for click in result.clicks:
+            evidence = click.receipt.cursor_reacquisition
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertTrue(evidence.completed)
+            self.assertTrue(evidence.geometry_unchanged)
+            self.assertTrue(evidence.no_activation_sent)
+            self.assertTrue(click.receipt.connected)
+            self.assertTrue(click.receipt.firmware_status)
+            self.assertTrue(click.receipt.firmware_status.safe)
 
-    def test_login_reobserves_shifted_window_after_safely_unsent_handoff(self) -> None:
+    def test_login_reobserves_after_connected_no_click_cursor_reacquisition(self) -> None:
+        initial = observation("LOGIN_SCREEN", 0)
+        refreshed = observation("LOGIN_SCREEN", 0)
+        refreshed_at = initial.timestamp + timedelta(seconds=1)
+        refreshed = replace(
+            refreshed,
+            timestamp=refreshed_at,
+            assembled_at=refreshed_at,
+            menu_timestamp=refreshed_at,
+        )
         source = FakeObservations(
             [
-                observation("LOGIN_SCREEN", 0),
-                observation("LOGIN_SCREEN", 0),
+                initial,
+                refreshed,
                 observation("LOGGING_IN", 3),
                 observation("LOGGED_IN", 4, loaded=True),
                 observation("LOGGED_IN", 5, loaded=True),
@@ -1408,40 +1617,12 @@ class LoginHelperTests(unittest.TestCase):
         )
         detections = iter(((PLAY,), (PLAY,), (PLAY,), (), ()))
         backends: list[FakeBackend] = []
-        current_window = [WINDOW]
-
-        def apply_handoff(evidence: dict[str, object]) -> None:
-            old = current_window[0]
-            translated = evidence["newMovementBounds"]
-            assert isinstance(translated, dict)
-            client = ScreenBounds(
-                translated["x"],
-                translated["y"],
-                translated["width"],
-                translated["height"],
-            )
-            dx = client.x - old.client_bounds.x
-            dy = client.y - old.client_bounds.y
-            current_window[0] = RuneLiteWindow(
-                old.hwnd,
-                old.pid,
-                old.title,
-                client,
-                ScreenBounds(
-                    old.outer_bounds.x + dx,
-                    old.outer_bounds.y + dy,
-                    old.outer_bounds.width,
-                    old.outer_bounds.height,
-                ),
-            )
 
         helper = build_helper(
             source,
             lambda image: next(detections),
             backends=backends,
-            cursor_start=(1500, 500),
-            window_finder=lambda pid: current_window[0],
-            window_handoff_callback=apply_handoff,
+            cursor_starts=[(1500, 500), (600, 450)],
         )
 
         result = helper.run(max_clicks=1, timeout_seconds=10)
@@ -1449,24 +1630,82 @@ class LoginHelperTests(unittest.TestCase):
         self.assertTrue(result.successful)
         self.assertEqual(2, len(result.clicks))
         first, second = result.clicks
-        self.assertTrue(first.receipt.safely_unsent)
+        self.assertFalse(first.receipt.safely_unsent)
         self.assertIs(
             first.receipt.failure_kind,
             InputFailureKind.CURSOR_STATE_INVALIDATED,
         )
-        self.assertEqual((), first.receipt.commands)
-        self.assertFalse(first.receipt.connected)
+        self.assertTrue(first.receipt.connected)
         self.assertTrue(first.receipt.backend_closed)
+        evidence = first.receipt.cursor_reacquisition
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertTrue(evidence.completed)
+        self.assertTrue(evidence.geometry_unchanged)
+        self.assertTrue(evidence.no_activation_sent)
         self.assertTrue(second.receipt.successful)
         self.assertEqual([0, 0], [first.source_tick, second.source_tick])
         self.assertEqual(2, len(backends))
-        self.assertIn("window_handoff", backends[0].calls)
-        self.assertNotIn("connect", backends[0].calls)
+        self.assertIn("connect", backends[0].calls)
         self.assertNotIn("mouse_down", backends[0].calls)
+        self.assertNotIn("press", backends[0].calls)
+        self.assertTrue(any(
+            isinstance(call, tuple) and call[0] == "move"
+            for call in backends[0].calls
+        ))
+        self.assertIn("stop_all", backends[0].calls)
+        self.assertIn("disarm", backends[0].calls)
         self.assertIn("connect", backends[1].calls)
         self.assertIn("mouse_down", backends[1].calls)
         self.assertIn("stop_all", backends[1].calls)
         self.assertIn("disarm", backends[1].calls)
+
+    def test_cursor_reacquisition_rejects_two_stale_observation_reads(self) -> None:
+        initial = observation("LOGIN_SCREEN", 0)
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            FakeObservations([initial, initial, initial]),
+            lambda _image: (PLAY,),
+            backends=backends,
+            cursor_start=(1500, 500),
+        )
+
+        result = helper.run(timeout_seconds=10)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual(
+            "fresh_observation_required_after_cursor_reacquisition",
+            result.reason,
+        )
+        self.assertEqual(1, len(backends))
+        self.assertEqual(1, len(result.clicks))
+        self.assertTrue(result.clicks[0].receipt.cursor_reacquisition)
+        self.assertNotIn("mouse_down", backends[0].calls)
+
+    def test_cursor_reacquisition_rejects_incoherent_fresh_read(self) -> None:
+        initial = observation("LOGIN_SCREEN", 0)
+        incoherent = replace(
+            observation("LOGIN_SCREEN", 0),
+            source_coherent=False,
+        )
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            FakeObservations([initial, incoherent]),
+            lambda _image: (PLAY,),
+            backends=backends,
+            cursor_start=(1500, 500),
+        )
+
+        result = helper.run(timeout_seconds=10)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual(
+            "fresh_observation_invalid_after_cursor_reacquisition",
+            result.reason,
+        )
+        self.assertEqual(1, len(backends))
+        self.assertEqual(1, len(result.clicks))
+        self.assertNotIn("mouse_down", backends[0].calls)
 
     def test_login_prompt_remains_safe_when_pregame_canvas_is_unavailable(self) -> None:
         source = FakeObservations(
@@ -1500,34 +1739,46 @@ class LoginHelperTests(unittest.TestCase):
             activation_target.contains(ScreenPoint(*backends[0].position))
         )
 
-    def test_login_reacquires_cursor_from_exact_window_border(self) -> None:
+    def test_login_reacquires_window_border_without_click_then_reobserves(self) -> None:
         source = FakeObservations(
             [
                 observation("LOGIN_SCREEN", 1),
-                observation("LOGGING_IN", 2),
-                observation("LOGGED_IN", 3, loaded=True),
+                observation("LOGIN_SCREEN", 2),
+                observation("LOGGING_IN", 3),
                 observation("LOGGED_IN", 4, loaded=True),
                 observation("LOGGED_IN", 5, loaded=True),
             ]
         )
-        detections = iter(((PLAY,), (PLAY,), (), ()))
+        detections = iter(((PLAY,), (PLAY,), (PLAY,), (), ()))
         backends: list[FakeBackend] = []
         helper = build_helper(
             source,
             lambda image: next(detections),
             backends=backends,
-            cursor_start=(1103, 500),
+            cursor_starts=[(1103, 500), (600, 450)],
         )
 
         result = helper.run(timeout_seconds=10)
 
         self.assertTrue(result.successful)
-        self.assertEqual(["play_now"], [click.name for click in result.clicks])
-        self.assertTrue(result.clicks[0].receipt.successful)
-        self.assertIn(("move", {"dx": -1, "dy": 0}), backends[0].calls)
+        self.assertEqual(["play_now", "play_now"], [click.name for click in result.clicks])
+        first, second = result.clicks
+        self.assertFalse(first.sent)
+        self.assertEqual(
+            "cursor_reacquired_reobserve_required",
+            first.receipt.reason,
+        )
+        self.assertIsNotNone(first.receipt.cursor_reacquisition)
+        self.assertTrue(second.receipt.successful)
+        self.assertNotIn("mouse_down", backends[0].calls)
+        self.assertTrue(any(
+            isinstance(call, tuple) and call[0] == "move"
+            for call in backends[0].calls
+        ))
+        self.assertIn("mouse_down", backends[1].calls)
         self.assertTrue(
-            result.clicks[0].receipt.firmware_status
-            and result.clicks[0].receipt.firmware_status.safe
+            first.receipt.firmware_status
+            and first.receipt.firmware_status.safe
         )
 
     def test_login_does_not_stop_at_semantic_match_edge(self) -> None:
@@ -1600,10 +1851,19 @@ class LoginHelperTests(unittest.TestCase):
         self.assertTrue(all("disarm" in backend.calls for backend in backends))
 
     def test_login_safely_unsent_replans_with_fresh_window_scan_at_tick_zero(self) -> None:
+        initial = observation("LOGIN_SCREEN", 0)
+        refreshed = observation("LOGIN_SCREEN", 0)
+        refreshed_at = initial.timestamp + timedelta(seconds=1)
+        refreshed = replace(
+            refreshed,
+            timestamp=refreshed_at,
+            assembled_at=refreshed_at,
+            menu_timestamp=refreshed_at,
+        )
         source = FakeObservations(
             [
-                observation("LOGIN_SCREEN", 0),
-                observation("LOGIN_SCREEN", 0),
+                initial,
+                refreshed,
             ]
         )
         coordinator = InputCoordinator(lambda: FakeBackend())
@@ -1628,7 +1888,10 @@ class LoginHelperTests(unittest.TestCase):
         self.assertEqual([0, 0], [click.source_tick for click in result.clicks])
         self.assertTrue(all(not click.sent for click in result.clicks))
         self.assertTrue(all(click.receipt.backend_closed for click in result.clicks))
-        self.assertIn("repositioned_reobserve_required", result.reason)
+        self.assertEqual(
+            "manual_attention_required_after_two_login_recovery_attempts",
+            result.reason,
+        )
 
     def test_login_pins_exact_hwnd_even_when_cursor_starts_inside_client(self) -> None:
         source = FakeObservations([observation("LOGIN_SCREEN", 1)])
