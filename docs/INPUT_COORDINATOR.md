@@ -66,8 +66,8 @@ approved activation region may authorize a click; a transient crossing cannot.
 An already-stable point in that region is represented by a complete zero-step
 plan and still requires fresh actual-point validation. Gameplay regions are the
 verified target and canvas intersection clipped to three device pixels around
-the SafetyGate-approved point; saved-session login may use the complete freshly
-recognized prompt bounds inside the exact client.
+the SafetyGate-approved point; template-backed saved-session login uses a tight
+cursor-safe activation footprint inside the freshly recognized prompt bounds.
 
 Cursor position is external mutable state, not coordinator history. Every
 backend cursor sample establishes per-monitor-v2 awareness on the calling
@@ -182,6 +182,14 @@ of a coincident human transition on the same button is necessarily best effort;
 the bounded window and final all-clear proof prevent that ambiguity from leaking
 into a context row or the next transaction. Context-menu failures attempt an
 acknowledged Escape before normal cleanup.
+
+RuneLite exposes its menu mouse position as integer source-canvas pixels. At
+the retained scaled layout, mapping that value back to PMv2 device pixels has a
+separately bounded four-device-pixel correlation allowance. That allowance is
+used only to bind a fresh exact hover/default or context-row menu sample to the
+settled Win32 cursor. It does not enlarge the three-pixel coordinator activation
+region, source/fresh canonical aim checks, canvas/shape containment, or menu
+identity requirements; a five-pixel menu-coordinate disagreement still blocks.
 
 The coordinator treats the firmware watchdog as a short activation lease. It
 checks or explicitly refreshes that lease before each lane-specific validator,

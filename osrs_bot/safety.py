@@ -24,6 +24,11 @@ from .model import (
 
 
 POINTER_MATCH_TOLERANCE_PX = 3
+# RuneLite reports menu mouse coordinates as integer source-canvas pixels,
+# which are then expanded back into PMv2 device pixels. One additional device
+# pixel is evidence-backed at the retained 175% layout. This correlates only a
+# fresh menu sample; it never expands the +/-3 activation or fresh-aim regions.
+MENU_POINTER_MATCH_TOLERANCE_PX = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,7 +432,11 @@ class SafetyGate:
             checks,
             "context_menu.row_pointer_match",
             _allow("context_row_pointer_exact")
-            if _points_close(observation.menu_mouse_screen_point, row_point)
+            if _points_close(
+                observation.menu_mouse_screen_point,
+                row_point,
+                tolerance=MENU_POINTER_MATCH_TOLERANCE_PX,
+            )
             else _reject("context_row_pointer_mismatch"),
         )
         if not pointer_match.allowed:
@@ -518,7 +527,9 @@ class SafetyGate:
                 f"{stage}.hover_pointer",
                 _allow("hover_pointer_exact")
                 if _points_close(
-                    observation.menu_mouse_screen_point, actual_pointer
+                    observation.menu_mouse_screen_point,
+                    actual_pointer,
+                    tolerance=MENU_POINTER_MATCH_TOLERANCE_PX,
                 )
                 else _reject("hover_pointer_mismatch"),
             )

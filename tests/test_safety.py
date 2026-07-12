@@ -297,6 +297,29 @@ class SafetyGateTest(unittest.TestCase):
             evaluation.checks,
         )
 
+    def test_menu_pointer_correlation_has_separate_four_pixel_bound(self) -> None:
+        settled = ScreenPoint(TREE_POINT.x + 3, TREE_POINT.y)
+        within = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            menu_point=ScreenPoint(settled.x - 4, settled.y),
+        )
+        beyond = replace(
+            within,
+            menu_mouse_screen_point=ScreenPoint(settled.x - 5, settled.y),
+        )
+
+        self.assertTrue(
+            self.gate.validate_post_move(
+                tree_action(), within, settled_pointer=settled
+            ).allowed
+        )
+        result = self.gate.validate_post_move(
+            tree_action(), beyond, settled_pointer=settled
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual("hover_pointer_mismatch", result.reason)
+
     def test_settled_pointer_must_remain_inside_fresh_target_bounds(self) -> None:
         outside = ScreenPoint(TREE_POINT.x + 3, TREE_POINT.y)
         narrow = replace(
@@ -705,6 +728,29 @@ class SafetyGateTest(unittest.TestCase):
                 row_point=row_point,
             ).allowed
         )
+
+        quantized_row_hover = replace(
+            row_hover,
+            menu_mouse_screen_point=ScreenPoint(row_point.x - 4, row_point.y),
+        )
+        self.assertTrue(
+            self.gate.validate_context_menu(
+                tree_action(), quantized_row_hover,
+                minimum_menu_client_tick=1102,
+                row_point=row_point,
+            ).allowed
+        )
+        beyond_row_hover = replace(
+            row_hover,
+            menu_mouse_screen_point=ScreenPoint(row_point.x - 5, row_point.y),
+        )
+        result = self.gate.validate_context_menu(
+            tree_action(), beyond_row_hover,
+            minimum_menu_client_tick=1102,
+            row_point=row_point,
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual("context_row_pointer_mismatch", result.reason)
 
     def test_walk_context_requires_one_unique_walk_here_row(self) -> None:
         intercepting_tree = exact_hover()
