@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import time
@@ -515,17 +516,8 @@ def detect_loaded_scene_login_surfaces(
     )
 
 
-class _WinPoint(ctypes.Structure):
-    _fields_ = (("x", ctypes.c_long), ("y", ctypes.c_long))
-
-
-class _WinRect(ctypes.Structure):
-    _fields_ = (
-        ("left", ctypes.c_long),
-        ("top", ctypes.c_long),
-        ("right", ctypes.c_long),
-        ("bottom", ctypes.c_long),
-    )
+_WinPoint = wintypes.POINT
+_WinRect = wintypes.RECT
 
 
 def _user32() -> Any:

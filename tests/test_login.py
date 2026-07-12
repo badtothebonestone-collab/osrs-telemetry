@@ -772,6 +772,10 @@ class DpiAwarenessTests(unittest.TestCase):
         ):
             login_module._enable_windows_dpi_awareness()
 
+    def test_login_and_input_backend_share_canonical_win32_structures(self) -> None:
+        self.assertIs(login_module._WinPoint, login_module.wintypes.POINT)
+        self.assertIs(login_module._WinRect, login_module.wintypes.RECT)
+
     def test_existing_per_monitor_v2_context_is_verified_without_resetting_it(self) -> None:
         user32 = FakeDpiUser32(per_monitor_v2=True)
 
