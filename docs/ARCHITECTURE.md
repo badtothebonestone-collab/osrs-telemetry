@@ -248,11 +248,14 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    acceleration, braking, four-sided transfer headroom, transaction-wide plan
    and MOVE caps, and actual-feedback correction, then accepts only a complete-
    plan settled endpoint inside the caller's explicit activation region;
-8. if an acknowledged MOVE has an unchanged ordinary sample, polls once more
-   without another MOVE, ends the precomputed trajectory, and uses the existing
-   plan-settle sample before any further MOVE; a settled report replans from the
-   observed point, while unresolved credit becomes typed cursor-state
-   invalidation and can never be stacked with another command;
+8. starts a monotonic clock before every serial MOVE and, when ordinary samples
+   lack any commanded axis, discards the trajectory and uses at most ten fixed
+   20 ms no-input polls; the full cumulative effect must be observed by 200 ms
+   and two later identical whole-cursor samples by 240 ms, with pinned
+   focus/ownership, bounds, direction, gain, and uncommanded-axis proof on every
+   extended sample, then physical-button quiet plus a final unchanged owned
+   sample before a fresh plan; unresolved or invalid evidence becomes typed
+   cursor-state invalidation and can never be stacked with another command;
 9. passes that actual stable device-pixel endpoint to the caller's
    lane-specific validator under a checked firmware-watchdog lease; if that
    validator outlives the lease, performs at most one explicit safe rearm and
@@ -267,16 +270,20 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
     then uses a bounded source-blind attribution window and two all-clear
     samples for the acknowledged Windows button transition; same-button human
     input during that window remains inherently best effort;
-13. records each command and firmware acknowledgement without truncation; and
+13. records each command and firmware acknowledgement without truncation plus
+    bounded delayed-feedback counts, maxima, last command/points/timings, and
+    outcome; and
 14. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
    wire `STATUS` proving disarmed with zero held inputs before closing.
 
 The immutable `InputReceipt` is successful only when the activation and final
 cleanup sequence are present in order, every command is terminal and
 acknowledged, no ledger entry is unresolved, the final firmware state is safe,
-and both ledger and transport close. The raw transport methods are private and
-only the coordinator imports them. A state-changing firmware rejection is
-never retried implicitly. There is no software-input fallback.
+every recorded cursor-feedback wait settled, and both ledger and transport
+close. Older additive-v1 receipts may omit `cursorFeedback`; current receipts
+always serialize it. The raw transport methods are private and only the
+coordinator imports them. A state-changing firmware rejection is never retried
+implicitly. There is no software-input fallback.
 
 The action layer may emit typed `TARGET_EVIDENCE_INVALIDATED` when an adaptive
 object/walk proposal exhausts bounded fresh hover reobservation before

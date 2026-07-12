@@ -149,15 +149,12 @@ runtime logic.
   timestep-separated identical samples, a fresh physical-button quiet proof,
   and one final unchanged cursor/foreground sample accept a stationary manual
   position as current truth and reject continuing motion or a late prior report.
-- **D027 — Serial ACK is not Windows cursor proof:** an acknowledged MOVE with
-  an unchanged ordinary sample receives one additional no-input poll before any
-  new MOVE. If still unchanged, the current trajectory ends and its plan-settle
-  read must clear that single command before replanning. Delayed and current
-  command credit may never coexist; unresolved credit becomes typed cursor-state
-  invalidation for at most one lane-specific fresh reobservation: login re-finds
-  and re-screens the exact current client, while gameplay requires a newer
-  same-identity tick. Both sample intervals and settlement enforce direction,
-  gain, bounds, focus, and uncommanded-axis rules; repetition remains fail-closed.
+- **D027 — Serial ACK is not Windows cursor proof:** never infer cursor arrival
+  from an acknowledged MOVE or a prior command. Observe the current PMv2 cursor,
+  never stack a second MOVE on an unproved effect, and turn unresolved cursor
+  state into typed invalidation for at most one lane-specific fresh
+  reobservation: login re-finds/re-screens the client, while gameplay requires a
+  newer same-identity tick. Repetition remains fail-closed.
 - **D028 — Loaded-scene login proof is absence-only:** if the normal prompt
   matcher caps on a coherent loaded scene, one larger bounded scan may search
   only the exact retained templates. The broad disconnect heuristic remains a
@@ -202,6 +199,19 @@ runtime logic.
   It rejects any other button immediately and still blocks a persistent owned
   state. Same-button human input anywhere in the window remains inherently
   source-indistinguishable and best effort.
+- **D035 - Delayed Windows MOVE feedback has an absolute no-input settlement
+  bound:** start a monotonic clock before the serial MOVE so ACK latency counts.
+  If ordinary samples do not show every commanded axis, use at most ten fixed
+  20 ms polls with no Arduino command or watchdog refresh. The complete
+  cumulative effect must be observed by 200 ms and two later identical whole-
+  cursor samples by 240 ms. Every extended sample rechecks foreground, pinned point
+  ownership, bounds, direction, gain, and uncommanded axes; final settlement
+  additionally requires physical-button quiet and one unchanged owned sample.
+  Discard the interrupted trajectory and freshly replan from the stable point.
+  Receipts retain bounded counts, maxima, the last command/points/timings, and a
+  settled, unresolved, or rejected outcome. Same-direction/in-gain buttonless
+  human motion remains source-indistinguishable and subject to the fresh
+  semantic/owner veto.
 
 ## Phases and acceptance
 
@@ -634,13 +644,34 @@ runtime logic.
   safely-unsent discard, verifier credit, or an unsent semantic claim. A
   context opener alone does not cross that boundary. The boolean is persisted
   in EngineFrame/application JSON for one diagnostic truth.
-- Current offline gate: 544 Python tests, focused boundary suite 148/148, golden
-  replay 2/2, compile/diff, facade catalog/schema/profile validation, and
-  `run.cmd test` pass. A forced Java rerun executed 76/76 tests across 8 suites
-  from the configured external build directory.
-- A complete cycle on this current candidate remains **NOT YET EVALUATED**. The
-  next live action is one bounded Arduino-only retry from fresh loaded-scene
-  evidence, followed by explicit cleanup proof.
+- Checkpoint `07de1ef` commits the 500 ms owned-button bound and conservative
+  activation truth. Its retained login proof passed `loaded_scene_verified` in
+  27.109 seconds with three allowed clicks and complete safe cleanup (SHA-256
+  `BC00AACF2D5AC5A218B057439F57577C4FB3F43DB9BD612C99D6E856B93D32C2`). This
+  proves the code was live-integrated, not that a transition over 100 ms was
+  absorbed.
+- The retained `07de1ef` gameplay run lasted 747.893 seconds, made 91 action
+  attempts and 1,997 observations. The combined retained client/plugin
+  chronology already showed the prior bank/deposit/return and a fresh full
+  inventory; this run advanced that reconciled outbound state to route step
+  `16/19`. Transaction 91 then blocked before activation after eight
+  acknowledged MOVEs because the final MOVE effect was not visible through the
+  old roughly 60 ms sampling. Every command was terminal and cleanup proved
+  `STOP_ALL`, `DISARM`, disarmed zero-held status, and closed ledger/backend
+  (SHA-256
+  `61D7DFE5C7C168941BD0E827DF5307B1853F0BA8F7B22FE467D7711D9800AA99`). The
+  artifact cannot distinguish a late Windows report from lost/no effect. The
+  user was asleep, so it does not support manual movement as the cause.
+- The D035 checkpoint candidate replaces that blind sampling limit with the
+  absolute 200/240 ms contract and retained per-transaction feedback evidence.
+  Its offline gate passes 560 Python tests, the 107-test coordinator suite, the
+  154-test cross-boundary suite, compileall, diff-check, golden replay 2/2,
+  `run.cmd test`, catalog, profile-schema, and default-profile validation. A
+  forced noncached Java rerun executed 76/76 tests across 8 suites from the
+  configured external build directory.
+- A complete fresh cycle on the D035 candidate remains **NOT YET EVALUATED**.
+  After checkpointing, the next live action is one bounded Arduino-only retry
+  from fresh loaded-scene evidence, followed by explicit cleanup proof.
 
 ## Prohibited during this mission
 
@@ -661,7 +692,7 @@ runtime logic.
   `11440` proof is a separate uninterrupted pre-audit cycle with its terminal
   JSON and final receipt preserved in ignored local evidence. Current evidence
   proves displaced login/gameplay recovery and progress to outbound step
-  `10/19`, but not a complete current-candidate bank-and-return cycle.
+  `16/19`, but not a complete current-candidate bank-and-return cycle.
 - Each new source tick can still force a world-model refresh behind a 250 ms
   provider wait. The final pre/post observations were fresh, coherent, and
   warning-free, but this remains a latency cost rather than a second cache.
@@ -685,3 +716,9 @@ runtime logic.
   current-checkpoint cycle still needs to confirm the live staircase
   prompt/options use the pinned widget shape. Any mismatch remains fail-closed
   and is not permission to restore text classification in the sensor.
+- `EngineFrame` intentionally retains only the latest execution receipt. A
+  delayed-feedback receipt is complete for its transaction, but a successful
+  one-reobservation retry can replace it in terminal run output; bounded prior-
+  attempt history remains a future observability decision, not control state.
+- `input_transaction_receipt.v1` gained additive `cursorFeedback` evidence.
+  Current artifacts serialize it; older v1 artifacts may omit the field.

@@ -51,6 +51,13 @@ Even after a blocked validator or action failure, any attempted connection
 runs all available cleanup operations and records their individual results.
 The receipt is carried by gameplay execution results, runtime output, and login
 click evidence rather than summarized into a mutable backend dictionary.
+`input_transaction_receipt.v1` now adds `cursorFeedback`: bounded wait/settled
+counts, maximum extra polls and elapsed milliseconds, and the last event's
+plan/step, command, before/final points, first/complete effect times, and
+outcome. Every recorded wait must settle for a successful receipt. Older v1
+artifacts may omit this additive field. `EngineFrame` intentionally retains
+only the latest execution receipt, so a later retry can replace an earlier
+transaction's evidence in terminal run output.
 
 ## Pointer policy
 
@@ -65,10 +72,11 @@ The coordinator aims at the center/proposed safe point but separately evaluates
 observed arrival because integer Arduino HID counts and Win32 device pixels need
 not share a one-pixel lattice at scaled display settings. It feeds the pure
 planner exact, bounded command-space waypoints and normally lets each plan finish
-at rest before replanning from actual cursor feedback. If delayed command credit
-interrupts a trajectory, the coordinator discards its remainder and requires a
-fresh correction or zero-step confirmation plan after settlement. The complete Arduino transaction,
-including context-row movement, is capped at 64 plans and 512 MOVE commands.
+at rest before replanning from actual cursor feedback. If bounded delayed-
+feedback settlement interrupts a trajectory, the coordinator discards its
+remainder and requires a fresh correction or zero-step confirmation plan. The
+complete Arduino transaction, including context-row movement, is capped at 64
+plans and 512 MOVE commands.
 Only a settled endpoint inside an explicit caller-
 approved activation region may authorize a click; a transient crossing cannot.
 An already-stable point in that region is represented by a complete zero-step
@@ -140,25 +148,34 @@ new MOVE. This no-input quiescence gate also precedes the one allowed
 lane-specific retry: login re-finds and re-screens the exact current client,
 while gameplay requires a newer tick from the same PID/session.
 
-If the ordinary post-MOVE sample is unchanged on any commanded axis, the
-coordinator waits one more deterministic timestep and samples again without
-sending another MOVE. Direction, gain, uncommanded-axis, movement bounds, and
-foreground checks apply independently to both the first prefix and the
-incremental second sample, so unrelated/manual motion cannot mask a bad report.
-If both are unchanged, the acknowledged command becomes outstanding credit and
-the remaining precomputed trajectory is discarded. The existing plan-settle
-sample is then a third no-input observation. A bounded same-direction/in-gain
-result clears only that one command and forces a replan from the observed point.
-An unchanged settle becomes typed cursor-state invalidation before another MOVE
-or activation; the existing runtime/login lane may reobserve once, and
-repetition blocks.
+The coordinator starts a monotonic cursor-feedback clock immediately before
+each serial MOVE, so write/ACK latency counts. If either ordinary post-MOVE
+sample still lacks a commanded axis, it discards the remaining trajectory and
+enters a no-input settlement loop. The loop uses a fixed 20 ms interval, at
+most ten extra polls, and sends no MOVE, STATUS, ARM, or watchdog refresh. A
+complete cumulative effect on every commanded axis must first be observed by
+200 ms. Two later identical whole-cursor samples must fit by the absolute
+240 ms cursor-stability deadline. The subsequent physical-button quiet proof
+and final unchanged cursor sample do not extend command credit or authorize a
+new MOVE.
 
-No path may hold a nonzero delayed command while sending another nonzero command
-on that axis, even in the same direction. This prevents an observation from
-ambiguously clearing two reports while one may still be pending, and preserves
-four-sided headroom accounting. Helper-level guards enforce the rule in addition
-to the trajectory-loop boundary. All transfer, plan, step, focus, owner, bounds,
-physical-button, cleanup, and fresh-validation checks remain unchanged.
+Every extended sample must retain the pinned foreground HWND/PID and exact
+point owner, stay inside the applicable canvas or outer reacquisition bounds,
+and satisfy cumulative direction, gain, and uncommanded-axis rules. The final
+sample repeats foreground, owner, and bounds proof. A stable stationary manual
+takeover is current truth, so the final stable point may differ from the point
+where the Arduino effect was first observed; the old trajectory is always
+discarded and a fresh correction or zero-step plan is required. Same-direction,
+in-gain buttonless human motion is inherently source-indistinguishable. Fresh
+point ownership, physical-button quiet, and the lane's exact semantic validator
+remain final vetoes rather than retrospective source attribution.
+
+Effect not observed by 200 ms, instability at 240 ms, focus/owner/bounds drift,
+or invalid transfer becomes typed cursor-state invalidation before activation.
+The existing runtime/login lane may reobserve once; repetition blocks. The
+receipt retains success and failure timing, including an effect first observed
+after the deadline, without misclassifying safe firmware cleanup as an input
+error. No path may send another MOVE while the prior effect remains unproved.
 
 Normal gameplay transit is confined to the loaded-scene telemetry canvas in
 Win32 device pixels. The optional telemetry `clientWindow*` bounds are the outer

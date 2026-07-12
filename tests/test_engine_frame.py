@@ -12,6 +12,8 @@ from osrs_bot.engine_frame import (
 )
 from osrs_bot.input_coordinator import (
     CommandEvidence,
+    CursorFeedbackEvidence,
+    DelayedCursorFeedbackEvent,
     FirmwareSafetyStatus,
     InputReceipt,
 )
@@ -61,11 +63,25 @@ def _command(sequence: int, name: str) -> CommandEvidence:
 def _receipt() -> InputReceipt:
     names = (
         "ARM",
+        "MOVE",
         "MOUSE_DOWN",
         "MOUSE_UP",
         "STOP_ALL",
         "DISARM",
         "STATUS",
+    )
+    delayed_feedback = DelayedCursorFeedbackEvent(
+        plan=1,
+        step=1,
+        command_dx=1,
+        command_dy=0,
+        before=ScreenPoint(10, 10),
+        last=ScreenPoint(11, 10),
+        extra_polls=3,
+        elapsed_millis=100,
+        first_effect_millis=60,
+        complete_effect_millis=60,
+        outcome="settled",
     )
     return InputReceipt(
         transaction_id="input-00000001",
@@ -86,6 +102,13 @@ def _receipt() -> InputReceipt:
         ledger_complete=True,
         ledger_closed=True,
         backend_closed=True,
+        cursor_feedback=CursorFeedbackEvidence(
+            wait_count=1,
+            settled_count=1,
+            max_extra_polls=3,
+            max_elapsed_millis=100,
+            last_wait=delayed_feedback,
+        ),
     )
 
 
@@ -194,6 +217,10 @@ class EngineFrameTests(unittest.TestCase):
         self.assertEqual(1511, payload["pendingVerification"]["itemId"])
         self.assertEqual(0, payload["pendingVerification"]["beforeQuantity"])
         self.assertTrue(payload["lastExecution"]["activationAttempted"])
+        cursor_feedback = payload["lastExecution"]["receipt"]["cursorFeedback"]
+        self.assertEqual(1, cursor_feedback["waitCount"])
+        self.assertEqual("settled", cursor_feedback["lastWait"]["outcome"])
+        self.assertEqual(60, cursor_feedback["lastWait"]["firstEffectMillis"])
         self.assertTrue(payload["cleanup"]["safe"])
         with self.assertRaises(FrozenInstanceError):
             frame.stage = EngineStage.TERMINAL  # type: ignore[misc]

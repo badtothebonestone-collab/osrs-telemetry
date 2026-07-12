@@ -4,19 +4,23 @@
 
 **Phase 8 is complete - external-cursor final regression is active.**
 
-The host/input stack through the current delayed-transition candidate passes
-its offline gates. The
-stitched displaced-login component proof and current displaced-gameplay
+The host/input stack through the current delayed-MOVE candidate passes its
+offline gates. The stitched displaced-login component proof and current
+displaced-gameplay
 handoff/reobserve subcriterion are **PASS** at the retained fixed-client 175%
-layout. The `f3dce8d` uninterrupted attempt was **BLOCKED** after reaching the
-fresh outbound route at step `10/19`; a complete cycle on the current candidate
-is **NOT YET EVALUATED**. The user-performed demonstration, artifact
-inspection, and post-demo cleanup are **NOT YET EVALUATED**.
+layout. The committed `07de1ef` uninterrupted attempt was **BLOCKED** after
+reaching a fresh outbound route at step `16/19`; a complete cycle on the new
+200/240 ms delayed-MOVE candidate is **NOT YET EVALUATED**. The user-performed
+demonstration, artifact inspection, and post-demo cleanup are
+**NOT YET EVALUATED**.
 
-Current restart checkpoint: `f3dce8d task: resume known bank return start`
+Current checkpoint: `input: await bounded cursor move feedback` (D035; use Git
+history for its final hash).
 
-Current input candidate: a source-blind 500 ms owned-button settlement bound,
-conservative post-activation classification, and persisted EngineFrame truth.
+Current input candidate: the committed source-blind 500 ms owned-button bound
+plus the absolute 200 ms MOVE-effect / 240 ms stability contract,
+conservative post-activation classification, and persisted receipt/EngineFrame
+truth.
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -153,12 +157,16 @@ Regression command:
   and after validation. Gameplay activation stays within +/-3 pixels of the
   approved safe point; template-backed saved-session login uses only a tight
   cursor-safe footprint inside its freshly recognized prompt bounds.
-- If an acknowledged MOVE initially shows no commanded-axis effect, the
-  coordinator performs exactly one additional no-input sample before any new
-  MOVE. Initial and incremental samples independently enforce direction, gain,
-  uncommanded-axis, focus, and bounds. Only persistent combined no-effect enters
-  the existing one-per-axis/eight-event bounded retry lane. The watchdog permits
-  at most one explicit safe rearm followed by complete semantic revalidation.
+- A monotonic clock starts before each serial MOVE, so ACK latency counts. If
+  ordinary samples lack any commanded axis, the coordinator discards the old
+  trajectory and uses at most ten fixed 20 ms no-input polls. Full cumulative
+  effect must be observed by 200 ms and two later identical whole-cursor samples
+  by 240 ms. Every extended sample rechecks focus, pinned point owner, bounds,
+  direction, gain, and uncommanded axes; physical-button quiet and a final
+  unchanged owned sample precede a fresh plan. No command, STATUS, rearm, or
+  watchdog refresh is sent during settlement. Same-direction/in-gain buttonless
+  human motion remains source-indistinguishable and subject to fresh semantic
+  validation.
 - Stable route-projection failure may use only the definition-owned camera lane:
   shortest fixed-point yaw direction, 250 ms holds, at most eight verified
   turns, and a typed camera-pose outcome. Missing evidence still waits and
@@ -193,7 +201,9 @@ Regression command:
 - Every connected transaction records a non-truncated command/ACK ledger and
   attempts `STOP_ALL`, `DISARM`, and wire `STATUS`. Success requires the final
   firmware report to prove disarmed with zero held keys/buttons and no missing,
-  failed, or unresolved command evidence.
+  failed, or unresolved command evidence. Additive `cursorFeedback` retains
+  wait/settled counts, maxima, and the last command/points/timings/outcome; every
+  recorded wait must settle for input success.
 - The Arduino transport and raw operations are private. Recursive static
   boundary tests reject another production importer/caller and reject software
   input modules.
@@ -389,7 +399,27 @@ the geometry condition and recovery behavior rather than source attribution.
   support manual interference as its cause. Windows button state remains
   source-blind, and the artifact does not retain raw `GetAsyncKeyState` samples
   or elapsed settle latency. It proves only that 100 ms was insufficient once;
-  the 500 ms candidate is covered offline but is not yet live-proven.
+  the later `07de1ef` run proves the 500 ms code was live-integrated and that the
+  old terminal blocker did not recur, but no artifact measures a transition
+  over 100 ms or proves that longer bound was exercised.
+- The retained `07de1ef` login proof passed `loaded_scene_verified` in 27.109
+  seconds with all three allowed clicks, full command/ACK evidence, and safe
+  cleanup. Its SHA-256 is
+  `BC00AACF2D5AC5A218B057439F57577C4FB3F43DB9BD612C99D6E856B93D32C2`.
+- The unattended `07de1ef` gameplay run lasted 747.893 seconds, made 91 action
+  attempts and 1,997 observations. The combined retained client/plugin
+  chronology already showed the prior bank/deposit/return and a fresh full
+  inventory; this run advanced that reconciled outbound state to step `16/19`
+  at `bank_floor_south_2`. Transaction 91 had eight acknowledged MOVEs and no
+  activation, then blocked because the final MOVE effect remained invisible to
+  the old roughly 60 ms sample window. All 18 commands were terminal; final
+  `STOP_ALL`, `DISARM`, disarmed zero-held STATUS, zero unresolved commands, and
+  closed ledger/backend passed. Its SHA-256 is
+  `61D7DFE5C7C168941BD0E827DF5307B1853F0BA8F7B22FE467D7711D9800AA99`.
+  The artifact cannot distinguish a late Windows report from lost/no effect.
+  The user was asleep, so this failure also does not support manual movement as
+  its cause. A later PASS observation was console-only and is not claimed as a
+  retained JSON artifact.
 - The current client log also contains unrelated/nonfatal startup and plugin
   noise: a reflective-access exception, repeated NpcAggroArea null-player
   subscriber exceptions during login-state transitions, World Hopper ping/DNS
@@ -460,7 +490,7 @@ the geometry condition and recovery behavior rather than source attribution.
   came from the configured external Gradle build directory. Focused tests also
   prove that cross-process lease contention cannot reach `SetWindowPos`, serial
   open, or input.
-- Current delayed-transition offline gate: 544 Python tests passed, including a
+- `07de1ef` owned-transition offline gate: 544 Python tests passed, including a
   focused 148-test action/runtime/EngineFrame/application/Arduino suite; golden
   replay passed 2/2; `python -m compileall`, `git diff --check`, `run.cmd test`,
   catalog, profile-schema, and default-profile validation passed. A forced Java
@@ -469,6 +499,17 @@ the geometry condition and recovery behavior rather than source attribution.
   delayed owned state, 500 ms timeout, late other-button rejection, clear-streak
   reset, source-blind same-button limits, and written/ambiguous/rejected/failed
   widget and key activation evidence.
+- D035 delayed-MOVE offline gate: 560 Python tests and the focused 154-test
+  cross-boundary suite pass;
+  coordinator-only coverage passes 107 tests. `python -m compileall` and
+  `git diff --check`, `run.cmd test`, golden replay 2/2, catalog,
+  profile-schema, and default-profile validation pass. A forced noncached Java
+  rerun executed 76 tests across 8 suites with zero failures, errors, or skips
+  from `C:\Users\badto\AppData\Local\Temp\osrs-telemetry-build-a231df6a`.
+  New cases cover normal and login-reacquisition slow ACKs, effect first
+  observed after 200 ms, instability at 240 ms, staggered axes, point-owner
+  loss, physical-button activity, final drift, clock failure, safe BLOCKED
+  cleanup classification, and nonempty EngineFrame serialization.
 - Current live handoff evidence: displaced saved-session login and displaced
   gameplay recovery subcriteria are PASS at the retained layout. Login is the
   stitched `31e1391` direct handoff plus current prompt/loaded and lease-test
@@ -479,11 +520,16 @@ the geometry condition and recovery behavior rather than source attribution.
   Its top-level BLOCKED status records only the deliberately short runtime
   expiring during the tenth attempt's verification; a complete cycle was not
   evaluated.
-- Latest live attempt at `f3dce8d`: the 11.5-minute run reached outbound step
+- Earlier live attempt at `f3dce8d`: the 11.5-minute run reached outbound step
   `10/19` and then ended BLOCKED on the old 100 ms owned-button settlement
   boundary before the semantic context-row click. Cleanup was fully safe. Its
   SHA-256 is
   `8F1DB084865262C58B322F6B52D0C439BE59611DAD7A0C5FFA70F40400242960`.
+- Latest live attempt at `07de1ef`: the 12.5-minute run reached outbound step
+  `16/19` and then ended BLOCKED before activation on an acknowledged MOVE whose
+  Windows effect was not observed inside the old roughly 60 ms samples. Cleanup
+  was fully safe. Its SHA-256 is
+  `61D7DFE5C7C168941BD0E827DF5307B1853F0BA8F7B22FE467D7711D9800AA99`.
 - Pre-audit live gate: PID `11440`/session
   `plugin-11440-1783810438162` loaded coherently with no warnings, then completed
   in 698.2 seconds with 1,994 observations and 82 actions. Terminal state was
@@ -499,11 +545,14 @@ the geometry condition and recovery behavior rather than source attribution.
 
 ## Remaining limitations and next work
 
-- A complete default bank-and-return cycle on the current delayed-transition
-  candidate is **NOT YET EVALUATED**. The `f3dce8d` attempt reached fresh
-  outbound step `10/19` but not terminal `COMPLETE`. The 500 ms bound must be
-  exercised once live; if the equivalent failure repeats, the next change is
-  elapsed/sample diagnostics rather than another blind deadline extension.
+- A complete default bank-and-return cycle on the D035 delayed-MOVE candidate
+  is **NOT YET EVALUATED**. The committed `07de1ef` attempt reached fresh
+  outbound step `16/19` but not terminal `COMPLETE`. It live-integrated the
+  500 ms button code without proving a transition over 100 ms, then exposed the
+  separate ACKed-MOVE/Windows-feedback boundary. D035 now retains the elapsed
+  and sampled evidence instead of relying on another blind deadline extension.
+  The client later idled to `LOGIN_SCREEN`, so the next live retry requires a
+  fresh Arduino-only loaded-scene login proof first.
 - An async window-position request that misses its 750 ms convergence deadline
   cannot be canceled and may complete later. That attempt is terminal and sends
   no input; every later attempt rechecks exact geometry. Cross-monitor
@@ -518,6 +567,12 @@ the geometry condition and recovery behavior rather than source attribution.
 - The pre-audit proof package retains only the terminal gameplay receipt rather than
   all 82 transaction receipts. The runtime result and plugin timeline strongly
   prove the cycle outcome, but the artifact is not a full action-by-action audit.
+- EngineFrame/application status intentionally retains only the latest execution
+  receipt. Each delayed-feedback transaction is self-contained, but a permitted
+  fresh retry can replace that earlier receipt in terminal run output; bounded
+  prior-attempt history remains a future observability decision.
+- Current `input_transaction_receipt.v1` JSON includes additive
+  `cursorFeedback`; older v1 proof artifacts may omit it.
 - There is intentionally no external profile loader, second definition, or
   generic navigation/transition framework.
 - The passive overlay has been compared against fresh live EngineFrames; a final
@@ -527,5 +582,5 @@ the geometry condition and recovery behavior rather than source attribution.
   `MenuOptionClicked` evidence instead.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
   demonstration, and frontend composition contracts are implemented. The full
-  current-checkpoint cycle, manual demo/inspection, and final confirmation that
+  D035 cycle, manual demo/inspection, and final confirmation that
   no client or proof endpoint remains are pending.

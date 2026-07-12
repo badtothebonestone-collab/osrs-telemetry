@@ -85,14 +85,20 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   blocks there; the ordinary quiet proofs still block fresh activity outside
   that window.
 - A firmware MOVE acknowledgement proves command handling, not Windows cursor
-  arrival. An unchanged ordinary sample receives one additional poll and then
-  the existing plan-settle sample before any new MOVE. Never stack another MOVE
-  on unobserved command credit. A valid settled report may replan from the
-  observed point; unresolved credit becomes typed cursor-state invalidation and
-  may receive only the existing lane-specific fresh reobservation: login
-  re-finds and re-screens the exact current client, while gameplay requires a
-  newer same-identity tick. Repetition blocks. Direction, gain, ownership,
-  focus, and bounds checks remain in force.
+  arrival. Start a monotonic feedback deadline before the serial MOVE so ACK
+  latency counts. If the ordinary samples do not show a complete cumulative
+  effect on every commanded axis, poll without input at fixed 20 ms intervals:
+  the complete effect must be observed by 200 ms and two later identical whole-
+  cursor samples must fit by 240 ms, with at most ten extra polls. Send no Arduino
+  command, STATUS, rearm, or watchdog refresh during that wait. Every extended
+  sample must retain the pinned foreground/point owner, bounds, direction,
+  gain, and uncommanded-axis proof. After stability, re-prove physical-button
+  quiet and one final unchanged owned cursor, discard the old trajectory, and
+  replan from current truth. Timeout becomes typed cursor-state invalidation
+  and may receive only the existing lane-specific fresh reobservation;
+  repetition blocks. Same-direction, in-gain buttonless human motion is
+  source-indistinguishable, so fresh ownership and semantic validation remain
+  the final vetoes.
 - Require exact target identity, verified canvas geometry, and exact post-move
   lane evidence for every pointer activation: object hover/menu or widget
   geometry/state as appropriate. Typed key actions instead require their exact

@@ -31,6 +31,11 @@ CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS = 0.05
 AWT_NATIVE_OUTER_ORIGIN_TOLERANCE_DEVICE_PX = 1
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
 DEFAULT_CLICK_HOLD_SECONDS = 0.06
+DELAYED_CURSOR_FEEDBACK_POLL_SECONDS = 0.02
+DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS = 0.20
+DELAYED_CURSOR_FEEDBACK_TOTAL_TIMEOUT_SECONDS = 0.24
+DELAYED_CURSOR_FEEDBACK_STABLE_SAMPLES = 2
+DELAYED_CURSOR_FEEDBACK_MAX_EXTRA_POLLS = 10
 MIN_PHYSICAL_MOUSE_QUIET_SAMPLE_COUNT = 3
 _COMMAND_ID = re.compile(r"^cmd-[0-9]{8,}$")
 _SAFE_KEY = re.compile(r"^[A-Z0-9_]{1,16}$")
@@ -382,6 +387,205 @@ class FirmwareSafetyStatus:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class DelayedCursorFeedbackEvent:
+    plan: int
+    step: int
+    command_dx: int
+    command_dy: int
+    before: ScreenPoint
+    last: ScreenPoint
+    extra_polls: int
+    elapsed_millis: int
+    first_effect_millis: int | None
+    complete_effect_millis: int | None
+    outcome: str
+
+    def __post_init__(self) -> None:
+        if (
+            not _is_int(self.plan)
+            or not 1 <= self.plan <= MAX_POINTER_FEEDBACK_PLANS
+        ):
+            raise ValueError("plan is outside the bounded pointer-plan limit")
+        if not _is_int(self.step) or not 1 <= self.step <= MAX_POINTER_STEPS:
+            raise ValueError("step is outside the bounded MOVE limit")
+        if not _is_int(self.command_dx) or not _is_int(self.command_dy):
+            raise TypeError("command deltas must be integers")
+        if self.command_dx == 0 and self.command_dy == 0:
+            raise ValueError("a delayed cursor event requires a nonzero command")
+        if not isinstance(self.before, ScreenPoint) or not isinstance(
+            self.last, ScreenPoint
+        ):
+            raise TypeError("before and last must be ScreenPoint values")
+        for name in ("before", "last"):
+            point = getattr(self, name)
+            if not _is_int(point.x) or not _is_int(point.y):
+                raise TypeError(f"{name} coordinates must be integers")
+        if (
+            not _is_int(self.extra_polls)
+            or not 0 <= self.extra_polls <= DELAYED_CURSOR_FEEDBACK_MAX_EXTRA_POLLS
+        ):
+            raise ValueError("extra_polls is outside the bounded feedback limit")
+        if not _is_int(self.elapsed_millis) or self.elapsed_millis < 0:
+            raise ValueError("elapsed_millis must be a non-negative integer")
+        for name in ("first_effect_millis", "complete_effect_millis"):
+            value = getattr(self, name)
+            if value is not None and (not _is_int(value) or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+            if value is not None and value > self.elapsed_millis:
+                raise ValueError(f"{name} cannot exceed elapsed_millis")
+        if (
+            self.complete_effect_millis is not None
+            and self.first_effect_millis is None
+        ):
+            raise ValueError("complete effect evidence requires first effect evidence")
+        if (
+            self.first_effect_millis is not None
+            and self.complete_effect_millis is not None
+            and self.first_effect_millis > self.complete_effect_millis
+        ):
+            raise ValueError("first effect evidence cannot follow complete effect")
+        if self.outcome not in {
+            "settled",
+            "effect_unresolved",
+            "stability_unresolved",
+            "rejected",
+        }:
+            raise ValueError("outcome is unsupported")
+        if self.outcome == "effect_unresolved" and self.complete_effect_millis is not None:
+            raise ValueError("unresolved effect cannot carry complete effect evidence")
+        if self.outcome in {"settled", "stability_unresolved"}:
+            if self.complete_effect_millis is None:
+                raise ValueError(f"{self.outcome} requires complete effect evidence")
+            if self.complete_effect_millis > int(
+                DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS * 1000
+            ):
+                raise ValueError("complete effect evidence exceeds the arrival deadline")
+        if (
+            self.outcome == "settled"
+            and self.elapsed_millis
+            > int(DELAYED_CURSOR_FEEDBACK_TOTAL_TIMEOUT_SECONDS * 1000)
+        ):
+            raise ValueError("settled feedback exceeds the total deadline")
+        if (
+            self.outcome == "settled"
+            and self.extra_polls
+            < DELAYED_CURSOR_FEEDBACK_STABLE_SAMPLES + 1
+        ):
+            raise ValueError("settled feedback omits its stable samples")
+        if self.outcome != "rejected":
+            observed_x = self.last.x - self.before.x
+            observed_y = self.last.y - self.before.y
+            for axis, commanded, observed in (
+                ("x", self.command_dx, observed_x),
+                ("y", self.command_dy, observed_y),
+            ):
+                if commanded == 0:
+                    if observed != 0:
+                        raise ValueError(
+                            f"non-rejected feedback moved uncommanded {axis}"
+                        )
+                    continue
+                if observed == 0:
+                    # The acknowledged effect may have been observed earlier,
+                    # followed by a stationary manual takeover back to before.
+                    continue
+                if (commanded > 0) != (observed > 0):
+                    raise ValueError(
+                        f"non-rejected feedback reversed commanded {axis}"
+                    )
+                if (
+                    abs(observed)
+                    > abs(commanded) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+                ):
+                    raise ValueError(
+                        f"non-rejected feedback exceeded {axis} transfer gain"
+                    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan": self.plan,
+            "step": self.step,
+            "command": {"dx": self.command_dx, "dy": self.command_dy},
+            "before": {"x": self.before.x, "y": self.before.y},
+            "last": {"x": self.last.x, "y": self.last.y},
+            "extraPolls": self.extra_polls,
+            "elapsedMillis": self.elapsed_millis,
+            "firstEffectMillis": self.first_effect_millis,
+            "completeEffectMillis": self.complete_effect_millis,
+            "outcome": self.outcome,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CursorFeedbackEvidence:
+    wait_count: int = 0
+    settled_count: int = 0
+    max_extra_polls: int = 0
+    max_elapsed_millis: int = 0
+    last_wait: DelayedCursorFeedbackEvent | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "wait_count",
+            "settled_count",
+            "max_extra_polls",
+            "max_elapsed_millis",
+        ):
+            value = getattr(self, name)
+            if not _is_int(value) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.settled_count > self.wait_count:
+            raise ValueError("settled_count cannot exceed wait_count")
+        if self.max_extra_polls > DELAYED_CURSOR_FEEDBACK_MAX_EXTRA_POLLS:
+            raise ValueError("max_extra_polls exceeds the bounded feedback limit")
+        if self.last_wait is not None and not isinstance(
+            self.last_wait, DelayedCursorFeedbackEvent
+        ):
+            raise TypeError("last_wait must be DelayedCursorFeedbackEvent or None")
+        if self.wait_count == 0:
+            if (
+                self.settled_count != 0
+                or self.max_extra_polls != 0
+                or self.max_elapsed_millis != 0
+                or self.last_wait is not None
+            ):
+                raise ValueError("empty cursor feedback evidence must be all-zero")
+        elif self.last_wait is None:
+            raise ValueError("nonempty cursor feedback evidence requires last_wait")
+        elif (
+            self.max_extra_polls < self.last_wait.extra_polls
+            or self.max_elapsed_millis < self.last_wait.elapsed_millis
+        ):
+            raise ValueError("cursor feedback maxima cannot omit the last wait")
+        elif self.wait_count == 1 and (
+            self.max_extra_polls != self.last_wait.extra_polls
+            or self.max_elapsed_millis != self.last_wait.elapsed_millis
+        ):
+            raise ValueError("single-wait maxima must equal the retained wait")
+        else:
+            expected_settled = (
+                self.wait_count
+                if self.last_wait.outcome == "settled"
+                else self.wait_count - 1
+            )
+            if self.settled_count != expected_settled:
+                raise ValueError(
+                    "settled_count is inconsistent with the terminal wait"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "waitCount": self.wait_count,
+            "settledCount": self.settled_count,
+            "maxExtraPolls": self.max_extra_polls,
+            "maxElapsedMillis": self.max_elapsed_millis,
+            "lastWait": (
+                self.last_wait.to_dict() if self.last_wait is not None else None
+            ),
+        }
+
+
 def _wire_proof_complete(commands: tuple[CommandEvidence, ...]) -> bool:
     names = tuple(command.command for command in commands)
     try:
@@ -429,6 +633,7 @@ class InputReceipt:
     context_cancel_attempted: bool = False
     context_cancel_acknowledged: bool = False
     errors: tuple[str, ...] = ()
+    cursor_feedback: CursorFeedbackEvidence = CursorFeedbackEvidence()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -506,6 +711,22 @@ class InputReceipt:
         object.__setattr__(
             self, "errors", tuple(_clean_text(error) for error in self.errors)
         )
+        if not isinstance(self.cursor_feedback, CursorFeedbackEvidence):
+            raise TypeError("cursor_feedback must be CursorFeedbackEvidence")
+        successful_move_count = sum(
+            command.command == "MOVE" and command.successful
+            for command in self.commands
+        )
+        if self.mode == "key" and self.cursor_feedback.wait_count != 0:
+            raise ValueError("key receipts cannot carry cursor feedback waits")
+        if self.cursor_feedback.wait_count > successful_move_count:
+            raise ValueError("cursor feedback waits exceed acknowledged MOVEs")
+        if self.cursor_feedback.last_wait is not None and (
+            self.cursor_feedback.last_wait.step > successful_move_count
+            or self.cursor_feedback.last_wait.step
+            < self.cursor_feedback.wait_count
+        ):
+            raise ValueError("cursor feedback step contradicts the MOVE ledger")
         calculated_unresolved = sum(
             command.status not in {
                 "PASS",
@@ -559,6 +780,7 @@ class InputReceipt:
             and self.backend_closed
             and not self.context_cancel_attempted
             and not self.context_cancel_acknowledged
+            and self.cursor_feedback.wait_count == 0
         )
 
     @property
@@ -579,6 +801,8 @@ class InputReceipt:
             and self.ledger_closed
             and self.backend_closed
             and self.wire_proof_complete
+            and self.cursor_feedback.wait_count
+            == self.cursor_feedback.settled_count
             and not self.errors
             and all(command.successful for command in self.commands)
         )
@@ -614,6 +838,7 @@ class InputReceipt:
             "backendClosed": self.backend_closed,
             "contextCancelAttempted": self.context_cancel_attempted,
             "contextCancelAcknowledged": self.context_cancel_acknowledged,
+            "cursorFeedback": self.cursor_feedback.to_dict(),
             "errors": list(self.errors),
         }
 
@@ -839,11 +1064,44 @@ class _Transaction:
         self.pointer_plan_count = 0
         self.pointer_step_count = 0
         self.pointer_hwnd: int | None = None
+        self.cursor_feedback_wait_count = 0
+        self.cursor_feedback_settled_count = 0
+        self.cursor_feedback_max_extra_polls = 0
+        self.cursor_feedback_max_elapsed_millis = 0
+        self.last_cursor_feedback_wait: DelayedCursorFeedbackEvent | None = None
 
     def add_error(self, reason: object) -> None:
         text = _clean_text(reason, fallback="unknown_input_error")
         if text and text not in self.errors:
             self.errors.append(text)
+
+    def record_cursor_feedback_wait(
+        self,
+        event: DelayedCursorFeedbackEvent,
+    ) -> None:
+        if not isinstance(event, DelayedCursorFeedbackEvent):
+            raise TypeError("event must be DelayedCursorFeedbackEvent")
+        self.cursor_feedback_wait_count += 1
+        if event.outcome == "settled":
+            self.cursor_feedback_settled_count += 1
+        self.cursor_feedback_max_extra_polls = max(
+            self.cursor_feedback_max_extra_polls,
+            event.extra_polls,
+        )
+        self.cursor_feedback_max_elapsed_millis = max(
+            self.cursor_feedback_max_elapsed_millis,
+            event.elapsed_millis,
+        )
+        self.last_cursor_feedback_wait = event
+
+    def cursor_feedback_evidence(self) -> CursorFeedbackEvidence:
+        return CursorFeedbackEvidence(
+            wait_count=self.cursor_feedback_wait_count,
+            settled_count=self.cursor_feedback_settled_count,
+            max_extra_polls=self.cursor_feedback_max_extra_polls,
+            max_elapsed_millis=self.cursor_feedback_max_elapsed_millis,
+            last_wait=self.last_cursor_feedback_wait,
+        )
 
     def sync(self) -> bool:
         try:
@@ -947,11 +1205,14 @@ class InputCoordinator:
         max_correction_plans: int = MAX_POINTER_FEEDBACK_PLANS - 1,
         max_ledger_entries: int = MAX_LEDGER_ENTRIES,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not callable(backend_factory):
             raise TypeError("backend_factory must be callable")
         if not callable(pointer_planner):
             raise TypeError("pointer_planner must be callable")
+        if not callable(monotonic):
+            raise TypeError("monotonic must be callable")
         if not isinstance(pointer_limits, PointerMotionLimits):
             raise TypeError("pointer_limits must be PointerMotionLimits")
         if isinstance(pointer_timestep_seconds, bool) or not isinstance(
@@ -1001,6 +1262,7 @@ class InputCoordinator:
         self._max_correction_plans = max_correction_plans
         self._max_ledger_entries = max_ledger_entries
         self._sleep = sleep
+        self._monotonic = monotonic
         self._transaction_lock = threading.Lock()
         self._transaction_sequence = 0
 
@@ -1195,31 +1457,11 @@ class InputCoordinator:
         )
         if not row_id:
             return receipt
-        # The receipt stays immutable; rebuild it with the dynamically resolved
-        # row intent identifier after the single transaction has closed.
-        return InputReceipt(
-            transaction_id=receipt.transaction_id,
-            mode=receipt.mode,
+        # The receipt stays immutable; replace only the dynamically resolved
+        # row identifier so every transaction diagnostic remains intact.
+        return replace(
+            receipt,
             intent_ids=(open_intent.intent_id, row_id[0]),
-            status=receipt.status,
-            reason=receipt.reason,
-            connected=receipt.connected,
-            arm_acknowledged=receipt.arm_acknowledged,
-            stop_all_acknowledged=receipt.stop_all_acknowledged,
-            disarm_acknowledged=receipt.disarm_acknowledged,
-            firmware_status_acknowledged=receipt.firmware_status_acknowledged,
-            firmware_status=receipt.firmware_status,
-            commands=receipt.commands,
-            unresolved_command_count=receipt.unresolved_command_count,
-            failed_command_count=receipt.failed_command_count,
-            ack_missing_count=receipt.ack_missing_count,
-            ledger_complete=receipt.ledger_complete,
-            ledger_closed=receipt.ledger_closed,
-            backend_closed=receipt.backend_closed,
-            failure_kind=receipt.failure_kind,
-            context_cancel_attempted=receipt.context_cancel_attempted,
-            context_cancel_acknowledged=receipt.context_cancel_acknowledged,
-            errors=receipt.errors,
         )
 
     def execute_adaptive_pointer(
@@ -1930,8 +2172,6 @@ class InputCoordinator:
         actual = start
         x_calibrated = False
         y_calibrated = False
-        x_delayed_command = 0
-        y_delayed_command = 0
         for plan_index in range(self._max_correction_plans + 1):
             if transaction.pointer_plan_count >= self._max_correction_plans + 1:
                 raise _TransactionAbort(
@@ -2009,7 +2249,7 @@ class InputCoordinator:
             ):
                 raise _TransactionAbort("pointer motion exceeds the total step limit")
             transaction.pointer_plan_count += 1
-            plan_interrupted_by_delayed_credit = False
+            plan_interrupted_by_feedback_wait = False
 
             for step in plan.steps:
                 self._assert_pointer_foreground(transaction, intent)
@@ -2017,23 +2257,14 @@ class InputCoordinator:
                     raise _cursor_state_invalidated(
                         "cursor_left_verified_movement_bounds"
                     )
-                self._assert_delayed_command_compatible(
-                    delayed=x_delayed_command,
-                    commanded=step.dx,
-                    axis="x",
-                )
-                self._assert_delayed_command_compatible(
-                    delayed=y_delayed_command,
-                    commanded=step.dy,
-                    axis="y",
-                )
                 self._assert_transfer_headroom(
                     actual,
-                    step.dx + x_delayed_command,
-                    step.dy + y_delayed_command,
+                    step.dx,
+                    step.dy,
                     intent.movement_bounds,
                 )
                 before = actual
+                feedback_started_at = self._feedback_now()
                 acknowledged, _ = transaction.invoke(
                     "MOVE",
                     lambda step=step: backend._move_relative(
@@ -2045,6 +2276,17 @@ class InputCoordinator:
                 transaction.pointer_step_count += 1
                 self._sleep(plan.timestep_seconds)
                 actual = self._current_position(backend)
+                actual_sampled_at = self._feedback_now()
+                if actual_sampled_at < feedback_started_at:
+                    raise _TransactionAbort("cursor_feedback_clock_regressed")
+                first_effect_millis = (
+                    self._feedback_elapsed_millis(
+                        feedback_started_at,
+                        actual_sampled_at,
+                    )
+                    if actual != before
+                    else None
+                )
                 self._assert_pointer_foreground(transaction, intent)
                 if not intent.movement_bounds.contains(actual):
                     raise _cursor_state_invalidated(
@@ -2053,11 +2295,14 @@ class InputCoordinator:
                 if (
                     (step.dx != 0 and actual.x == before.x)
                     or (step.dy != 0 and actual.y == before.y)
+                ) and actual_sampled_at < (
+                    feedback_started_at
+                    + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
                 ):
                     self._assert_feedback_sample_delta(
                         transaction=transaction,
                         commanded=step.dx,
-                        delayed_command=x_delayed_command,
+                        delayed_command=0,
                         observed=actual.x - before.x,
                         axis="x",
                         phase="initial_sample",
@@ -2065,7 +2310,7 @@ class InputCoordinator:
                     self._assert_feedback_sample_delta(
                         transaction=transaction,
                         commanded=step.dy,
-                        delayed_command=y_delayed_command,
+                        delayed_command=0,
                         observed=actual.y - before.y,
                         axis="y",
                         phase="initial_sample",
@@ -2075,8 +2320,23 @@ class InputCoordinator:
                     # all normal direction, gain, bounds, and foreground
                     # checks still apply to the combined observation below.
                     initial_sample = actual
-                    self._sleep(plan.timestep_seconds)
+                    self._sleep(
+                        min(
+                            plan.timestep_seconds,
+                            feedback_started_at
+                            + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
+                            - actual_sampled_at,
+                        )
+                    )
                     actual = self._current_position(backend)
+                    actual_sampled_at = self._feedback_now()
+                    if actual_sampled_at < feedback_started_at:
+                        raise _TransactionAbort("cursor_feedback_clock_regressed")
+                    if first_effect_millis is None and actual != before:
+                        first_effect_millis = self._feedback_elapsed_millis(
+                            feedback_started_at,
+                            actual_sampled_at,
+                        )
                     self._assert_pointer_foreground(transaction, intent)
                     if not intent.movement_bounds.contains(actual):
                         raise _cursor_state_invalidated(
@@ -2085,7 +2345,7 @@ class InputCoordinator:
                     self._assert_feedback_sample_delta(
                         transaction=transaction,
                         commanded=step.dx,
-                        delayed_command=x_delayed_command,
+                        delayed_command=0,
                         observed=actual.x - initial_sample.x,
                         axis="x",
                         phase="delayed_sample",
@@ -2093,79 +2353,112 @@ class InputCoordinator:
                     self._assert_feedback_sample_delta(
                         transaction=transaction,
                         commanded=step.dy,
-                        delayed_command=y_delayed_command,
+                        delayed_command=0,
                         observed=actual.y - initial_sample.y,
                         axis="y",
                         phase="delayed_sample",
                     )
-                x_calibrated, x_delayed_command = self._validate_axis_transfer(
+                effect_complete = self._cursor_move_effect_complete(
+                    transaction=transaction,
+                    commanded_x=step.dx,
+                    commanded_y=step.dy,
+                    observed_x=actual.x - before.x,
+                    observed_y=actual.y - before.y,
+                )
+                if effect_complete:
+                    self._require_cursor_effect_observed_by_arrival_deadline(
+                        transaction=transaction,
+                        before=before,
+                        actual=actual,
+                        commanded_x=step.dx,
+                        commanded_y=step.dy,
+                        feedback_started_at=feedback_started_at,
+                        actual_sampled_at=actual_sampled_at,
+                        first_effect_millis=first_effect_millis,
+                    )
+                if not effect_complete:
+                    actual = self._await_delayed_cursor_feedback(
+                        transaction=transaction,
+                        intent=intent,
+                        feedback_bounds=intent.movement_bounds,
+                        before=before,
+                        actual=actual,
+                        commanded_x=step.dx,
+                        commanded_y=step.dy,
+                        feedback_started_at=feedback_started_at,
+                        actual_sampled_at=actual_sampled_at,
+                        first_effect_millis=first_effect_millis,
+                    )
+                    x_calibrated, _ = self._validate_axis_transfer(
+                        transaction=transaction,
+                        commanded=step.dx,
+                        observed=actual.x - before.x,
+                        calibrated=x_calibrated,
+                        delayed_command=0,
+                        axis="x",
+                    )
+                    y_calibrated, _ = self._validate_axis_transfer(
+                        transaction=transaction,
+                        commanded=step.dy,
+                        observed=actual.y - before.y,
+                        calibrated=y_calibrated,
+                        delayed_command=0,
+                        axis="y",
+                    )
+                    # The old trajectory was computed without the late cursor
+                    # effect. Never execute its remainder; replan from the
+                    # fully settled observed point.
+                    plan_interrupted_by_feedback_wait = True
+                    break
+                x_calibrated, _ = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=step.dx,
                     observed=actual.x - before.x,
                     calibrated=x_calibrated,
-                    delayed_command=x_delayed_command,
+                    delayed_command=0,
                     axis="x",
                 )
-                y_calibrated, y_delayed_command = self._validate_axis_transfer(
+                y_calibrated, _ = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=step.dy,
                     observed=actual.y - before.y,
                     calibrated=y_calibrated,
-                    delayed_command=y_delayed_command,
+                    delayed_command=0,
                     axis="y",
                 )
-                if x_delayed_command != 0 or y_delayed_command != 0:
-                    # Never stack another HID report on top of unobserved
-                    # command credit.  The remaining precomputed trajectory is
-                    # stale until the existing plan-settle sample either proves
-                    # that transfer or leaves the cursor state invalidated.
-                    plan_interrupted_by_delayed_credit = True
-                    break
 
-            # Each planner trajectory ends at rest.  Give cursor feedback one
-            # full deterministic timestep to settle before deciding whether a
-            # bounded correction trajectory is needed.
-            self._sleep(plan.timestep_seconds)
-            settled = self._current_position(backend)
-            self._assert_pointer_foreground(transaction, intent)
-            if (
-                settled != actual
-                or x_delayed_command != 0
-                or y_delayed_command != 0
-            ):
-                x_calibrated, x_delayed_command = self._validate_axis_transfer(
+            if not plan_interrupted_by_feedback_wait:
+                # Each ordinary planner trajectory ends at rest. Give cursor
+                # feedback one deterministic timestep before deciding whether
+                # a bounded correction trajectory is needed.
+                self._sleep(plan.timestep_seconds)
+                settled = self._current_position(backend)
+                self._assert_pointer_foreground(transaction, intent)
+                x_calibrated, _ = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=0,
                     observed=settled.x - actual.x,
                     calibrated=x_calibrated,
-                    delayed_command=x_delayed_command,
+                    delayed_command=0,
                     axis="x",
                 )
-                y_calibrated, y_delayed_command = self._validate_axis_transfer(
+                y_calibrated, _ = self._validate_axis_transfer(
                     transaction=transaction,
                     commanded=0,
                     observed=settled.y - actual.y,
                     calibrated=y_calibrated,
-                    delayed_command=y_delayed_command,
+                    delayed_command=0,
                     axis="y",
                 )
-            actual = settled
+                actual = settled
             if not intent.movement_bounds.contains(actual):
                 raise _cursor_state_invalidated(
                     "cursor_left_verified_movement_bounds"
                 )
-            if x_delayed_command != 0 or y_delayed_command != 0:
-                raise _cursor_state_invalidated(
-                    "cursor_feedback_unresolved_delayed_command:"
-                    f"x={x_delayed_command}:y={y_delayed_command}:"
-                    f"plan={transaction.pointer_plan_count}:"
-                    f"step={transaction.pointer_step_count}"
-                )
-            if plan_interrupted_by_delayed_credit:
-                # Settlement proves only the previously unobserved command,
-                # not completion of the discarded trajectory.  Require a
-                # fresh correction (or zero-step confirmation) plan before
-                # the endpoint may authorize activation.
+            if plan_interrupted_by_feedback_wait:
+                # Settlement proves only the acknowledged MOVE, not completion
+                # of the discarded trajectory. Require a fresh correction (or
+                # zero-step confirmation) plan before activation.
                 if plan_index >= self._max_correction_plans:
                     raise _TransactionAbort(
                         "cursor_feedback_correction_limit_exceeded"
@@ -2329,6 +2622,7 @@ class InputCoordinator:
                     "cursor_reacquisition_outer_headroom_insufficient",
                     blocked=True,
                 ) from error
+            feedback_started_at = self._feedback_now()
             acknowledged, _ = transaction.invoke(
                 "MOVE",
                 lambda dx=command_dx, dy=command_dy: (
@@ -2340,13 +2634,66 @@ class InputCoordinator:
             transaction.pointer_step_count += 1
             self._sleep(self._pointer_timestep_seconds)
             actual = self._current_position(transaction.backend)
+            actual_sampled_at = self._feedback_now()
+            if actual_sampled_at < feedback_started_at:
+                raise _TransactionAbort("cursor_feedback_clock_regressed")
+            first_effect_millis = (
+                self._feedback_elapsed_millis(
+                    feedback_started_at,
+                    actual_sampled_at,
+                )
+                if actual != before
+                else None
+            )
             self._assert_pointer_foreground(transaction, intent)
-            if actual == before:
+            if actual == before and actual_sampled_at < (
+                feedback_started_at
+                + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
+            ):
                 # Permit one delayed/coalesced cursor report, but never issue a
                 # second command while the first is unresolved.
-                self._sleep(self._pointer_timestep_seconds)
+                self._sleep(
+                    min(
+                        self._pointer_timestep_seconds,
+                        feedback_started_at
+                        + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
+                        - actual_sampled_at,
+                    )
+                )
                 actual = self._current_position(transaction.backend)
+                actual_sampled_at = self._feedback_now()
+                if actual_sampled_at < feedback_started_at:
+                    raise _TransactionAbort("cursor_feedback_clock_regressed")
+                if first_effect_millis is None and actual != before:
+                    first_effect_millis = self._feedback_elapsed_millis(
+                        feedback_started_at,
+                        actual_sampled_at,
+                    )
                 self._assert_pointer_foreground(transaction, intent)
+            if actual == before:
+                actual = self._await_delayed_cursor_feedback(
+                    transaction=transaction,
+                    intent=intent,
+                    feedback_bounds=outer,
+                    before=before,
+                    actual=actual,
+                    commanded_x=command_dx,
+                    commanded_y=command_dy,
+                    feedback_started_at=feedback_started_at,
+                    actual_sampled_at=actual_sampled_at,
+                    first_effect_millis=first_effect_millis,
+                )
+            else:
+                self._require_cursor_effect_observed_by_arrival_deadline(
+                    transaction=transaction,
+                    before=before,
+                    actual=actual,
+                    commanded_x=command_dx,
+                    commanded_y=command_dy,
+                    feedback_started_at=feedback_started_at,
+                    actual_sampled_at=actual_sampled_at,
+                    first_effect_millis=first_effect_millis,
+                )
             observed_axis = (
                 actual.x - before.x if axis == "x" else actual.y - before.y
             )
@@ -2537,17 +2884,385 @@ class InputCoordinator:
                 "relative_move_bidirectional_transfer_envelope_would_leave_bounds"
             )
 
-    @staticmethod
-    def _assert_delayed_command_compatible(
+    def _feedback_now(self) -> float:
+        raw = self._monotonic()
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise _TransactionAbort("cursor_feedback_clock_invalid")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise _TransactionAbort("cursor_feedback_clock_invalid")
+        return value
+
+    def _cursor_move_effect_complete(
+        self,
         *,
-        delayed: int,
-        commanded: int,
-        axis: str,
+        transaction: _Transaction,
+        commanded_x: int,
+        commanded_y: int,
+        observed_x: int,
+        observed_y: int,
+    ) -> bool:
+        for axis, commanded, observed in (
+            ("x", commanded_x, observed_x),
+            ("y", commanded_y, observed_y),
+        ):
+            if commanded == 0:
+                if observed != 0:
+                    raise _cursor_state_invalidated(
+                        f"cursor_feedback_uncommanded_axis_{axis}"
+                    )
+                continue
+            if observed == 0:
+                continue
+            if (commanded > 0) != (observed > 0):
+                raise _cursor_state_invalidated(
+                    f"cursor_feedback_direction_mismatch_{axis}"
+                )
+            if (
+                abs(observed)
+                > abs(commanded) * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+            ):
+                raise _TransactionAbort(
+                    f"cursor_transfer_gain_exceeded_{axis}:"
+                    f"commanded={commanded}:observed={observed}:delayed=0:"
+                    f"plan={transaction.pointer_plan_count}:"
+                    f"step={transaction.pointer_step_count}"
+                )
+        return bool(
+            (commanded_x == 0 or observed_x != 0)
+            and (commanded_y == 0 or observed_y != 0)
+        )
+
+    @staticmethod
+    def _feedback_elapsed_millis(started_at: float, now: float) -> int:
+        return max(0, int(round((now - started_at) * 1000.0)))
+
+    @staticmethod
+    def _cursor_feedback_failure_reason(
+        prefix: str,
+        event: DelayedCursorFeedbackEvent,
+    ) -> str:
+        return (
+            f"{prefix}:command_x={event.command_dx}:"
+            f"command_y={event.command_dy}:"
+            f"before_x={event.before.x}:before_y={event.before.y}:"
+            f"last_x={event.last.x}:last_y={event.last.y}:"
+            f"extra_polls={event.extra_polls}:"
+            f"elapsed_ms={event.elapsed_millis}:"
+            f"plan={event.plan}:step={event.step}"
+        )
+
+    def _require_cursor_effect_observed_by_arrival_deadline(
+        self,
+        *,
+        transaction: _Transaction,
+        before: ScreenPoint,
+        actual: ScreenPoint,
+        commanded_x: int,
+        commanded_y: int,
+        feedback_started_at: float,
+        actual_sampled_at: float,
+        first_effect_millis: int | None,
     ) -> None:
-        if delayed != 0 and commanded != 0:
-            raise _TransactionAbort(
-                f"cursor_feedback_unresolved_delayed_command_before_move_{axis}"
+        """Reject an effect whose first complete observation missed 200 ms.
+
+        The clock begins before the serial MOVE call so firmware ACK latency is
+        part of the proof. A sample taken after the deadline cannot establish
+        that the Windows cursor effect arrived in time, even when it is visible.
+        """
+
+        if actual_sampled_at < feedback_started_at:
+            raise _TransactionAbort("cursor_feedback_clock_regressed")
+        arrival_deadline = (
+            feedback_started_at
+            + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
+        )
+        if actual_sampled_at <= arrival_deadline + 1e-9:
+            return
+        elapsed_millis = self._feedback_elapsed_millis(
+            feedback_started_at,
+            actual_sampled_at,
+        )
+        event = DelayedCursorFeedbackEvent(
+            plan=transaction.pointer_plan_count,
+            step=transaction.pointer_step_count,
+            command_dx=commanded_x,
+            command_dy=commanded_y,
+            before=before,
+            last=actual,
+            extra_polls=0,
+            elapsed_millis=elapsed_millis,
+            first_effect_millis=(
+                first_effect_millis
+                if first_effect_millis is not None
+                else elapsed_millis
+            ),
+            complete_effect_millis=elapsed_millis,
+            outcome="rejected",
+        )
+        transaction.record_cursor_feedback_wait(event)
+        raise _cursor_state_invalidated(
+            self._cursor_feedback_failure_reason(
+                "cursor_feedback_move_effect_not_observed_by_arrival_deadline",
+                event,
             )
+        )
+
+    def _await_delayed_cursor_feedback(
+        self,
+        *,
+        transaction: _Transaction,
+        intent: ApprovedPointerIntent,
+        feedback_bounds: ScreenBounds,
+        before: ScreenPoint,
+        actual: ScreenPoint,
+        commanded_x: int,
+        commanded_y: int,
+        feedback_started_at: float,
+        actual_sampled_at: float,
+        first_effect_millis: int | None,
+    ) -> ScreenPoint:
+        """Await one ACKed MOVE without ever stacking another command.
+
+        The complete two-axis effect must appear by the absolute arrival
+        deadline. Two subsequent identical whole-cursor samples must also fit
+        inside the total deadline. A fresh physical-button quiet proof and one
+        final unchanged cursor sample then close the handoff before replanning.
+        """
+
+        first_now = self._feedback_now()
+        if (
+            actual_sampled_at < feedback_started_at
+            or first_now < actual_sampled_at
+        ):
+            raise _TransactionAbort("cursor_feedback_clock_regressed")
+        complete_effect_millis: int | None = None
+        stable_samples = 0
+        extra_polls = 0
+        last = actual
+        elapsed_millis = self._feedback_elapsed_millis(
+            feedback_started_at,
+            first_now,
+        )
+        arrival_deadline = (
+            feedback_started_at
+            + DELAYED_CURSOR_FEEDBACK_ARRIVAL_TIMEOUT_SECONDS
+        )
+        total_deadline = (
+            feedback_started_at
+            + DELAYED_CURSOR_FEEDBACK_TOTAL_TIMEOUT_SECONDS
+        )
+        settled = False
+        last_clock = first_now
+        pinned_hwnd = transaction.pointer_hwnd
+        if pinned_hwnd is None:
+            raise _TransactionAbort(
+                "pointer_foreground_hwnd_unavailable",
+                blocked=True,
+            )
+
+        try:
+            self._assert_point_owned_by_window(
+                transaction.backend,
+                actual,
+                expected_pid=intent.expected_pid,
+                expected_hwnd=pinned_hwnd,
+                reason_prefix="cursor_feedback",
+            )
+            for poll_index in range(
+                1,
+                DELAYED_CURSOR_FEEDBACK_MAX_EXTRA_POLLS + 1,
+            ):
+                now = self._feedback_now()
+                if now < last_clock:
+                    raise _TransactionAbort("cursor_feedback_clock_regressed")
+                if now >= total_deadline:
+                    break
+                self._sleep(
+                    min(
+                        DELAYED_CURSOR_FEEDBACK_POLL_SECONDS,
+                        total_deadline - now,
+                    )
+                )
+                sample = self._current_position(transaction.backend)
+                sampled_at = self._feedback_now()
+                if sampled_at < now:
+                    raise _TransactionAbort("cursor_feedback_clock_regressed")
+                last_clock = sampled_at
+                extra_polls = poll_index
+                elapsed_millis = self._feedback_elapsed_millis(
+                    feedback_started_at,
+                    sampled_at,
+                )
+                previous = last
+                last = sample
+                self._assert_pointer_foreground(transaction, intent)
+                self._assert_point_owned_by_window(
+                    transaction.backend,
+                    sample,
+                    expected_pid=intent.expected_pid,
+                    expected_hwnd=pinned_hwnd,
+                    reason_prefix="cursor_feedback",
+                )
+                if not feedback_bounds.contains(sample):
+                    raise _cursor_state_invalidated(
+                        "cursor_left_verified_movement_bounds"
+                    )
+                if first_effect_millis is None and sample != before:
+                    first_effect_millis = elapsed_millis
+                complete = self._cursor_move_effect_complete(
+                    transaction=transaction,
+                    commanded_x=commanded_x,
+                    commanded_y=commanded_y,
+                    observed_x=sample.x - before.x,
+                    observed_y=sample.y - before.y,
+                )
+                if complete and complete_effect_millis is None:
+                    if sampled_at > arrival_deadline + 1e-9:
+                        complete_effect_millis = elapsed_millis
+                        late_event = DelayedCursorFeedbackEvent(
+                            plan=transaction.pointer_plan_count,
+                            step=transaction.pointer_step_count,
+                            command_dx=commanded_x,
+                            command_dy=commanded_y,
+                            before=before,
+                            last=last,
+                            extra_polls=extra_polls,
+                            elapsed_millis=elapsed_millis,
+                            first_effect_millis=(
+                                first_effect_millis
+                                if first_effect_millis is not None
+                                else elapsed_millis
+                            ),
+                            complete_effect_millis=complete_effect_millis,
+                            outcome="rejected",
+                        )
+                        raise _cursor_state_invalidated(
+                            self._cursor_feedback_failure_reason(
+                                "cursor_feedback_move_effect_not_observed_by_arrival_deadline",
+                                late_event,
+                            )
+                        )
+                    complete_effect_millis = elapsed_millis
+                if complete_effect_millis is not None:
+                    stable_samples = (
+                        stable_samples + 1 if sample == previous else 0
+                    )
+                    if (
+                        stable_samples >= DELAYED_CURSOR_FEEDBACK_STABLE_SAMPLES
+                        and sampled_at <= total_deadline + 1e-9
+                    ):
+                        settled = True
+                        break
+                else:
+                    stable_samples = 0
+                if (
+                    sampled_at >= arrival_deadline - 1e-9
+                    and complete_effect_millis is None
+                ):
+                    break
+        except Exception:
+            event = DelayedCursorFeedbackEvent(
+                plan=transaction.pointer_plan_count,
+                step=transaction.pointer_step_count,
+                command_dx=commanded_x,
+                command_dy=commanded_y,
+                before=before,
+                last=last,
+                extra_polls=extra_polls,
+                elapsed_millis=elapsed_millis,
+                first_effect_millis=first_effect_millis,
+                complete_effect_millis=complete_effect_millis,
+                outcome="rejected",
+            )
+            transaction.record_cursor_feedback_wait(event)
+            raise
+
+        if not settled:
+            outcome = (
+                "effect_unresolved"
+                if complete_effect_millis is None
+                else "stability_unresolved"
+            )
+            event = DelayedCursorFeedbackEvent(
+                plan=transaction.pointer_plan_count,
+                step=transaction.pointer_step_count,
+                command_dx=commanded_x,
+                command_dy=commanded_y,
+                before=before,
+                last=last,
+                extra_polls=extra_polls,
+                elapsed_millis=elapsed_millis,
+                first_effect_millis=first_effect_millis,
+                complete_effect_millis=complete_effect_millis,
+                outcome=outcome,
+            )
+            transaction.record_cursor_feedback_wait(event)
+            prefix = (
+                "cursor_feedback_move_effect_unresolved"
+                if outcome == "effect_unresolved"
+                else "cursor_feedback_move_stability_unresolved"
+            )
+            raise _cursor_state_invalidated(
+                self._cursor_feedback_failure_reason(prefix, event)
+            )
+
+        rejected_last = last
+        try:
+            self._require_physical_mouse_quiet(
+                transaction.backend,
+                phase="after_delayed_cursor_feedback",
+            )
+            final = self._current_position(transaction.backend)
+            rejected_last = final
+            self._assert_pointer_foreground(transaction, intent)
+            self._assert_point_owned_by_window(
+                transaction.backend,
+                final,
+                expected_pid=intent.expected_pid,
+                expected_hwnd=pinned_hwnd,
+                reason_prefix="cursor_feedback",
+            )
+            if final != last:
+                raise _cursor_state_invalidated(
+                    "cursor_changed_after_delayed_cursor_feedback"
+                )
+            if not feedback_bounds.contains(final):
+                raise _cursor_state_invalidated(
+                    "cursor_left_verified_movement_bounds"
+                )
+        except Exception:
+            event = DelayedCursorFeedbackEvent(
+                plan=transaction.pointer_plan_count,
+                step=transaction.pointer_step_count,
+                command_dx=commanded_x,
+                command_dy=commanded_y,
+                before=before,
+                last=rejected_last,
+                extra_polls=extra_polls,
+                elapsed_millis=elapsed_millis,
+                first_effect_millis=first_effect_millis,
+                complete_effect_millis=complete_effect_millis,
+                outcome="rejected",
+            )
+            transaction.record_cursor_feedback_wait(event)
+            raise
+
+        event = DelayedCursorFeedbackEvent(
+            plan=transaction.pointer_plan_count,
+            step=transaction.pointer_step_count,
+            command_dx=commanded_x,
+            command_dy=commanded_y,
+            before=before,
+            last=final,
+            extra_polls=extra_polls,
+            elapsed_millis=elapsed_millis,
+            first_effect_millis=first_effect_millis,
+            complete_effect_millis=complete_effect_millis,
+            outcome="settled",
+        )
+        transaction.record_cursor_feedback_wait(event)
+        return final
 
     @staticmethod
     def _validate_axis_transfer(
@@ -3073,4 +3788,9 @@ class InputCoordinator:
             context_cancel_attempted=state.context_cancel_attempted,
             context_cancel_acknowledged=state.context_cancel_acknowledged,
             errors=errors,
+            cursor_feedback=(
+                transaction.cursor_feedback_evidence()
+                if transaction is not None
+                else CursorFeedbackEvidence()
+            ),
         )
