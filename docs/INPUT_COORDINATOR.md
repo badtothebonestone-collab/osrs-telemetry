@@ -81,11 +81,13 @@ Every initial pointer intent has a no-input preflight before serial connect.
 The first physical-button sample consumes only historical released-button bits,
 then two bounded all-clear samples must prove no held or new button activity.
 The exact foreground root HWND/PID is pinned, and native PMv2 Win32 geometry is
-split deliberately: gameplay's telemetry `clientWindow*` envelope must equal
-`GetWindowRect`, its canvas must be contained by the current
-`GetClientRect`/`ClientToScreen` rectangle, and login must match both its exact
-outer and exact client rectangles. A same-PID window with different geometry
-does not qualify.
+split deliberately. Gameplay's telemetry `clientWindow*` envelope must have the
+exact `GetWindowRect` size; its AWT-derived origin may differ from the native
+origin by at most one device pixel per axis to reconcile display-scale
+quantization. Its exact canvas must still be contained by the current
+`GetClientRect`/`ClientToScreen` rectangle. Login must match both its exact outer
+and exact client rectangles. A resize, a larger origin difference, or failed
+canvas containment does not qualify.
 
 If the stationary cursor is beyond that verified outer window, the coordinator
 does not move it through the desktop. Instead, while the mouse remains quiet,

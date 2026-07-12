@@ -81,8 +81,10 @@ Regression command:
 - Gameplay and saved-session login now submit immutable approved intents to one
   `InputCoordinator`; neither can open an Arduino session or call raw input.
 - Normal gameplay pointer transit remains inside the loaded-scene telemetry
-  canvas. Telemetry `clientWindow*` is the outer `GetWindowRect` reacquisition
-  envelope; the canvas must also fit the separately sampled actual Win32 client.
+  canvas. Telemetry `clientWindow*` is the AWT-derived outer reacquisition
+  envelope: native outer size must match exactly, origin quantization is capped
+  at one device pixel per axis for gameplay only, and the exact canvas must also
+  fit the separately sampled actual Win32 client. Login remains exact.
   A fresh cursor on one outside axis may move inward under the fixed distance,
   headroom, ownership, and physical-button caps. A quiet stationary cursor
   beyond the outer window is handled before serial connect by one bounded,

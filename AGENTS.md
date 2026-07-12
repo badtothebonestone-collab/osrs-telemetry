@@ -71,6 +71,9 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Before pointer motion and again before activation, prove the physical mouse
   is quiet, the exact root HWND/PID still owns the point, and current Win32
   outer/client geometry agrees with the intent's outer/client/canvas facts.
+  Gameplay may reconcile only a one-device-pixel AWT/native outer-origin
+  quantization when outer size is exact and the native client still contains
+  the exact canvas; login outer/client geometry remains exact.
   Attribute and consume only the coordinator's own acknowledged click
   transition; held or new manual button activity blocks.
 - A firmware MOVE acknowledgement proves command handling, not Windows cursor

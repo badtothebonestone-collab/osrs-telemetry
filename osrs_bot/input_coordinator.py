@@ -28,6 +28,7 @@ MAX_CURSOR_REACQUISITION_GAP_DEVICE_PX = 64
 MAX_CURSOR_REACQUISITION_STEPS = 72
 CURSOR_WINDOW_HANDOFF_INSET_DEVICE_PX = 32
 CURSOR_WINDOW_HANDOFF_SETTLE_SECONDS = 0.05
+AWT_NATIVE_OUTER_ORIGIN_TOLERANCE_DEVICE_PX = 1
 MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES = 1
 MAX_TRANSACTION_NO_EFFECT_EVENTS = 8
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
@@ -74,6 +75,22 @@ def _bounds_contains_bounds(outer: ScreenBounds, inner: ScreenBounds) -> bool:
         and outer.contains(
             ScreenPoint(inner.x + inner.width - 1, inner.y + inner.height - 1)
         )
+    )
+
+
+def _outer_origin_quantization_compatible(
+    expected: ScreenBounds,
+    actual: ScreenBounds,
+) -> bool:
+    """Reconcile one AWT/native origin pixel without accepting a resize."""
+
+    return (
+        actual.width == expected.width
+        and actual.height == expected.height
+        and abs(actual.x - expected.x)
+        <= AWT_NATIVE_OUTER_ORIGIN_TOLERANCE_DEVICE_PX
+        and abs(actual.y - expected.y)
+        <= AWT_NATIVE_OUTER_ORIGIN_TOLERANCE_DEVICE_PX
     )
 
 
@@ -1539,6 +1556,12 @@ class InputCoordinator:
             expected_outer_bounds=expected_outer,
             expected_client_bounds=expected_client,
             required_inner_bounds=intent.movement_bounds,
+            allow_outer_origin_quantization=intent.purpose in {
+                InputPurpose.GAMEPLAY_OBJECT,
+                InputPurpose.GAMEPLAY_WIDGET,
+                InputPurpose.CONTEXT_MENU,
+                InputPurpose.CONTEXT_ROW,
+            },
         )
         if envelope is None or envelope.contains(start):
             return False
@@ -1645,6 +1668,7 @@ class InputCoordinator:
         expected_outer_bounds: ScreenBounds | None,
         expected_client_bounds: ScreenBounds | None,
         required_inner_bounds: ScreenBounds,
+        allow_outer_origin_quantization: bool,
     ) -> None:
         def coordinates(
             bounds: ScreenBounds | None,
@@ -1730,8 +1754,26 @@ class InputCoordinator:
             )
             if inner_contained is not actual_contains_inner:
                 raise ValueError("inner containment proof contradicts actual bounds")
+            outer_origin_quantization_compatible = bool(
+                expected_outer_bounds is not None
+                and _outer_origin_quantization_compatible(
+                    expected_outer_bounds,
+                    actual_outer,
+                )
+            )
+            # Gameplay's outer envelope is published from AWT logical bounds,
+            # which can quantize one device pixel away from native
+            # GetWindowRect after SetWindowPos on a scaled display. Login also
+            # supplies an exact native client rectangle and remains exact.
             if (
-                outer_matches is False
+                (
+                    outer_matches is False
+                    and not (
+                        allow_outer_origin_quantization
+                        and expected_client_bounds is None
+                        and outer_origin_quantization_compatible
+                    )
+                )
                 or client_matches is False
                 or not inner_contained
             ):

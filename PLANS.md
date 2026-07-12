@@ -72,7 +72,10 @@ runtime logic.
   with a proven single-monitor transform; Python rejects any other coordinate
   contract. Saved-session pregame assistance may use the exact PID-owned Win32
   client only after proving per-monitor-v2 awareness; gameplay remains confined
-  to loaded-scene telemetry canvas bounds.
+  to loaded-scene telemetry canvas bounds. Native gameplay preflight accepts
+  only exact outer size plus at most one device pixel of AWT/native origin
+  quantization, while still requiring native-client containment of the exact
+  canvas; login geometry stays exact.
 
 - **D016 — Observed pointer arrival:** the pure motion policy still targets one
   exact command-space waypoint at a time, but integer HID deltas may land on a

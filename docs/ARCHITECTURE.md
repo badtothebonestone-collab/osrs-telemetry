@@ -131,10 +131,11 @@ bound to the exact telemetry-owning RuneLite process.
 The optional device-pixel `clientWindow*` envelope is all-or-none, has positive
 dimensions, and must contain the canvas. It represents the outer window and is
 ownership/movement-only cursor-ingress evidence, never an activation region;
-the input preflight matches it to `GetWindowRect` and separately proves the
-canvas inside the actual Win32 client. Object aim points are likewise paired to
-authoritative geometry: the point must be inside the viewport and the first
-present API shape in clickbox -> convex hull -> canvas tile order. A present
+the input preflight requires its exact `GetWindowRect` size, permits only a
+one-device-pixel AWT/native origin reconciliation for gameplay, and separately
+proves the exact canvas inside the actual Win32 client. Object aim points are
+likewise paired to authoritative geometry: the point must be inside the viewport
+and the first present API shape in clickbox -> convex hull -> canvas tile order. A present
 shape never falls through to weaker geometry, and `canvasLocation` alone is
 diagnostic unless that shape contains it.
 
@@ -219,8 +220,9 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    opening serial;
 2. proves a bounded physical-button quiet dwell, samples the actual current
    cursor in the calling thread's PMv2 device-pixel context, pins the exact
-   foreground root HWND/PID, matches the telemetry outer window to
-   `GetWindowRect`, and proves the canvas inside the actual Win32 client;
+   foreground root HWND/PID, matches the telemetry outer size to
+   `GetWindowRect`, bounds gameplay-only AWT/native origin quantization to one
+   device pixel, and proves the exact canvas inside the actual Win32 client;
 3. when the stationary cursor is beyond that outer window, performs one
    bounded non-activating window translation under the cursor, closes with an
    empty safely-unsent receipt, discards every stale coordinate, and requires a

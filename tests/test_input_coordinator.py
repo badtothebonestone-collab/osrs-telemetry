@@ -893,6 +893,153 @@ class InputCoordinatorTests(unittest.TestCase):
             for event in backend.events
         ))
 
+    def test_one_pixel_awt_native_origin_quantization_allows_gameplay(self) -> None:
+        client = ScreenBounds(90, 90, 220, 220)
+        backend = FakeBackend(
+            start=(150, 150),
+            window_geometry_evidence_overrides={
+                "actualOuterBounds": {
+                    "x": 91,
+                    "y": 89,
+                    "width": 220,
+                    "height": 220,
+                },
+                "outerMatches": False,
+            },
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="awt-native-origin-quantization",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(160, 160),
+            movement_bounds=ScreenBounds(100, 100, 200, 200),
+            target_bounds=ScreenBounds(157, 157, 7, 7),
+            expected_pid=321,
+            reacquisition_bounds=client,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        self.assertIn("window_geometry", backend.events)
+        self.assertIn("connect", backend.events)
+        self.assertIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_gameplay_quantization_rejects_two_pixels_or_any_resize(self) -> None:
+        incompatible = (
+            {"x": 92, "y": 90, "width": 220, "height": 220},
+            {"x": 90, "y": 90, "width": 221, "height": 220},
+            {"x": 90, "y": 90, "width": 220, "height": 219},
+        )
+        for actual_outer in incompatible:
+            with self.subTest(actual_outer=actual_outer):
+                backend = FakeBackend(
+                    start=(150, 150),
+                    window_geometry_evidence_overrides={
+                        "actualOuterBounds": actual_outer,
+                        "outerMatches": False,
+                    },
+                )
+                intent = ApprovedPointerIntent(
+                    intent_id="reject-broad-geometry-tolerance",
+                    purpose=InputPurpose.GAMEPLAY_OBJECT,
+                    target=ScreenPoint(160, 160),
+                    movement_bounds=ScreenBounds(100, 100, 200, 200),
+                    target_bounds=ScreenBounds(157, 157, 7, 7),
+                    expected_pid=321,
+                    reacquisition_bounds=ScreenBounds(90, 90, 220, 220),
+                )
+
+                receipt = coordinator(backend).execute_pointer(
+                    intent,
+                    validate=lambda _intent, _actual: InputValidation.allow(),
+                )
+
+                self.assertEqual("BLOCKED", receipt.status)
+                self.assertTrue(receipt.safely_unsent)
+                self.assertIn(
+                    "geometry_changed_reobserve_required",
+                    receipt.reason,
+                )
+                self.assertNotIn("connect", backend.events)
+
+    def test_quantized_outer_never_bypasses_canvas_containment(self) -> None:
+        backend = FakeBackend(
+            start=(150, 150),
+            window_geometry_evidence_overrides={
+                "actualOuterBounds": {
+                    "x": 91,
+                    "y": 90,
+                    "width": 220,
+                    "height": 220,
+                },
+                "actualClientBounds": {
+                    "x": 140,
+                    "y": 140,
+                    "width": 20,
+                    "height": 20,
+                },
+                "outerMatches": False,
+                "innerContainedByClient": False,
+            },
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="quantized-outer-still-requires-canvas",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(160, 160),
+            movement_bounds=ScreenBounds(100, 100, 200, 200),
+            target_bounds=ScreenBounds(157, 157, 7, 7),
+            expected_pid=321,
+            reacquisition_bounds=ScreenBounds(90, 90, 220, 220),
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertTrue(receipt.safely_unsent)
+        self.assertIn("geometry_changed_reobserve_required", receipt.reason)
+        self.assertNotIn("connect", backend.events)
+
+    def test_login_keeps_exact_outer_geometry_under_one_pixel_drift(self) -> None:
+        backend = FakeBackend(
+            start=(150, 150),
+            window_geometry_evidence_overrides={
+                "actualOuterBounds": {
+                    "x": 91,
+                    "y": 90,
+                    "width": 220,
+                    "height": 220,
+                },
+                "outerMatches": False,
+            },
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="login-exact-native-geometry",
+            purpose=InputPurpose.LOGIN_PROMPT,
+            target=ScreenPoint(160, 160),
+            movement_bounds=ScreenBounds(100, 100, 200, 200),
+            target_bounds=ScreenBounds(157, 157, 7, 7),
+            expected_pid=321,
+            expected_hwnd=77,
+            reacquisition_bounds=ScreenBounds(90, 90, 220, 220),
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertTrue(receipt.safely_unsent)
+        self.assertIn("geometry_changed_reobserve_required", receipt.reason)
+        self.assertNotIn("connect", backend.events)
+
     def test_final_point_owner_mismatch_blocks_activation(self) -> None:
         backend = FakeBackend(
             start=(10, 10),
