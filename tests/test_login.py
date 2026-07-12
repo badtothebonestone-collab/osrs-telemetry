@@ -592,52 +592,61 @@ class LoginDetectionTests(unittest.TestCase):
 
     def test_template_activation_point_preserves_post_move_label_proof(self) -> None:
         cases = (
-            ("play_now", (470, 330), (287, 99)),
-            ("click_here_to_play", (400, 500), (421, 111)),
+            ("play_now", (470, 330)),
+            ("click_here_to_play", (400, 500)),
         )
-        for name, placement, scaled_size in cases:
-            with self.subTest(name=name):
-                screenshot = Image.new("RGB", (1200, 800), (55, 18, 14))
-                with Image.open(Path(TEMPLATE_DIR) / f"{name}.png") as opened:
-                    template = opened.convert("RGB").resize(
-                        scaled_size,
-                        Image.Resampling.BILINEAR,
+        for name, placement in cases:
+            with Image.open(Path(TEMPLATE_DIR) / f"{name}.png") as opened:
+                templates = login_module._scaled_templates(opened.convert("RGB"))
+            for template in templates:
+                with self.subTest(name=name, size=template.size):
+                    screenshot = Image.new("RGB", (1400, 1000), (55, 18, 14))
+                    screenshot.paste(template, placement)
+
+                    before = detect_login_surfaces(screenshot)
+
+                    self.assertEqual(1, len(before))
+                    candidate = before[0]
+                    self.assertEqual(name, candidate.name)
+                    self.assertLess(
+                        candidate.point.x,
+                        candidate.match_bounds.x
+                        + candidate.match_bounds.width // 4,
                     )
-                screenshot.paste(template, placement)
+                    self.assertGreater(
+                        candidate.point.y,
+                        candidate.match_bounds.y
+                        + candidate.match_bounds.height * 3 // 4,
+                    )
 
-                before = detect_login_surfaces(screenshot)
+                    occluded = screenshot.copy()
+                    painter = ImageDraw.Draw(occluded)
+                    painter.rectangle(
+                        (
+                            candidate.point.x - 2,
+                            candidate.point.y - 2,
+                            candidate.point.x + 93,
+                            candidate.point.y + 93,
+                        ),
+                        fill=(250, 250, 250),
+                    )
+                    painter.rectangle(
+                        (
+                            candidate.point.x + 4,
+                            candidate.point.y + 4,
+                            candidate.point.x + 87,
+                            candidate.point.y + 87,
+                        ),
+                        fill=(25, 80, 220),
+                    )
 
-                self.assertEqual(1, len(before))
-                candidate = before[0]
-                self.assertEqual(name, candidate.name)
-                self.assertLess(
-                    candidate.point.x,
-                    candidate.match_bounds.x + candidate.match_bounds.width // 4,
-                )
-                self.assertGreater(
-                    candidate.point.y,
-                    candidate.match_bounds.y
-                    + candidate.match_bounds.height * 3 // 4,
-                )
+                    after = detect_login_surfaces(occluded)
 
-                occluded = screenshot.copy()
-                ImageDraw.Draw(occluded).rectangle(
-                    (
-                        candidate.point.x - 2,
-                        candidate.point.y - 2,
-                        candidate.point.x + 93,
-                        candidate.point.y + 93,
-                    ),
-                    fill=(0, 0, 0),
-                )
-
-                after = detect_login_surfaces(occluded)
-
-                self.assertEqual(1, len(after))
-                self.assertEqual(name, after[0].name)
-                self.assertTrue(
-                    LoginPromptHelper._same_candidate(candidate, after[0])
-                )
+                    self.assertEqual(1, len(after))
+                    self.assertEqual(name, after[0].name)
+                    self.assertTrue(
+                        LoginPromptHelper._same_candidate(candidate, after[0])
+                    )
 
     def test_unknown_or_credential_like_surface_is_never_a_candidate(self) -> None:
         screenshot = Image.new("RGB", (1200, 800), (25, 25, 25))
@@ -704,6 +713,45 @@ class LoginDetectionTests(unittest.TestCase):
         candidates = detect_login_surfaces(screenshot)
 
         self.assertEqual([candidate.name for candidate in candidates], ["disconnected_ok"])
+        candidate = candidates[0]
+        self.assertLess(
+            candidate.point.x,
+            candidate.match_bounds.x + candidate.match_bounds.width // 4,
+        )
+        self.assertGreater(candidate.point.y, center_y - 30)
+        self.assertLess(candidate.point.y, center_y + 30)
+
+        occluded = screenshot.copy()
+        cursor = ImageDraw.Draw(occluded)
+        x, y = candidate.point.x, candidate.point.y
+        cursor.polygon(
+            (
+                (x, y),
+                (x + 2, y + 48),
+                (x + 13, y + 36),
+                (x + 27, y + 62),
+                (x + 38, y + 56),
+                (x + 24, y + 31),
+                (x + 42, y + 30),
+            ),
+            fill=(245, 245, 245),
+        )
+        cursor.polygon(
+            (
+                (x + 4, y + 7),
+                (x + 5, y + 39),
+                (x + 14, y + 29),
+                (x + 28, y + 54),
+                (x + 32, y + 52),
+                (x + 18, y + 26),
+                (x + 34, y + 26),
+            ),
+            fill=(15, 15, 15),
+        )
+        after = detect_login_surfaces(occluded)
+
+        self.assertEqual(1, len(after))
+        self.assertTrue(LoginPromptHelper._same_candidate(candidate, after[0]))
 
     def test_loaded_scene_fallback_excludes_login_screen_disconnect_heuristic(self) -> None:
         screenshot = Image.new("RGB", (1000, 700), (55, 18, 14))
@@ -731,6 +779,26 @@ class LoginDetectionTests(unittest.TestCase):
 
     def test_flat_login_surface_is_not_a_disconnect_dialog(self) -> None:
         screenshot = Image.new("RGB", (1000, 700), (55, 38, 32))
+        self.assertEqual(detect_login_surfaces(screenshot), ())
+
+    def test_asymmetric_welcome_panel_is_not_a_disconnect_dialog(self) -> None:
+        screenshot = Image.new("RGB", (1000, 700), (55, 18, 14))
+        for x in range(250, 750):
+            for y in range(238, 483):
+                screenshot.putpixel((x, y), (60, 38, 32))
+        center_x, center_y = 500, 427
+        for x in range(center_x - 120, center_x + 120):
+            for y in range(center_y - 45, center_y + 45):
+                screenshot.putpixel((x, y), (55, 42, 35))
+        for x in range(center_x - 120, center_x + 120):
+            for y in range(center_y - 45, center_y - 30):
+                screenshot.putpixel((x, y), (5, 5, 5))
+            for y in range(center_y + 30, center_y + 45):
+                screenshot.putpixel((x, y), (68, 62, 56))
+        for x in range(center_x - 12, center_x + 13, 4):
+            for y in range(center_y - 10, center_y + 11):
+                screenshot.putpixel((x, y), (235, 220, 185))
+
         self.assertEqual(detect_login_surfaces(screenshot), ())
 
     def test_detects_play_now_at_the_live_high_dpi_scale(self) -> None:

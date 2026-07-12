@@ -50,6 +50,7 @@ _SEARCH_ZONES = {
 }
 _TEMPLATE_ACTIVATION_X_RATIO = 0.12
 _TEMPLATE_ACTIVATION_BOTTOM_INSET_RATIO = 0.08
+_DISCONNECTED_ACTIVATION_ABOVE_CENTER_PX = 20
 _DPI_AWARENESS_SET = False
 
 
@@ -370,6 +371,20 @@ def _mean_luma(image: Image.Image) -> float:
     return float(ImageStat.Stat(image.convert("L")).mean[0])
 
 
+def _label_preserving_activation_point(bounds: ScreenBounds) -> ScreenPoint:
+    """Keep the cursor image below the label used for fresh prompt proof."""
+
+    inset_x = max(1, round(bounds.width * _TEMPLATE_ACTIVATION_X_RATIO))
+    bottom_inset = max(
+        1,
+        round(bounds.height * _TEMPLATE_ACTIVATION_BOTTOM_INSET_RATIO),
+    )
+    return ScreenPoint(
+        bounds.x + min(bounds.width - 1, inset_x),
+        bounds.y + max(0, bounds.height - 1 - bottom_inset),
+    )
+
+
 def _disconnected_dialog_candidate(
     screenshot: Image.Image,
 ) -> LoginCandidate | None:
@@ -396,46 +411,58 @@ def _disconnected_dialog_candidate(
 
     dialog_luma = _mean_luma(dialog)
     button_luma = _mean_luma(button)
-    border_luma = min(_mean_luma(top_border), _mean_luma(bottom_border))
+    top_border_luma = _mean_luma(top_border)
+    bottom_border_luma = _mean_luma(bottom_border)
     button_gray = button.convert("L")
-    stats = ImageStat.Stat(button_gray)
     histogram = button_gray.histogram()
     bright_ratio = sum(histogram[165:]) / max(1, sum(histogram))
     detected = (
         28.0 <= dialog_luma <= 120.0
         and 20.0 <= button_luma <= 115.0
-        and border_luma < button_luma + 10.0
-        and (float(stats.stddev[0]) >= 12.0 or bright_ratio >= 0.004)
+        and top_border_luma < button_luma + 10.0
+        and bottom_border_luma < button_luma + 10.0
+        and abs(top_border_luma - bottom_border_luma) <= 20.0
+        and bright_ratio >= 0.004
     )
     if not detected:
         return None
+    coarse_bounds = ScreenBounds(
+        round(width * 0.40),
+        round(height * 0.565),
+        round(width * 0.20),
+        round(height * 0.09),
+    )
+    match_left = max(coarse_bounds.x, center_x - 120)
+    match_top = max(coarse_bounds.y, center_y - 45)
+    match_right = min(
+        coarse_bounds.x + coarse_bounds.width,
+        center_x + 120,
+    )
+    match_bottom = min(
+        coarse_bounds.y + coarse_bounds.height,
+        center_y + 45,
+    )
+    if match_right <= match_left or match_bottom <= match_top:
+        return None
+    match_bounds = ScreenBounds(
+        match_left,
+        match_top,
+        match_right - match_left,
+        match_bottom - match_top,
+    )
+    background_point = _label_preserving_activation_point(match_bounds)
+    activation_y = min(
+        match_bottom - 1,
+        max(
+            match_top,
+            center_y - _DISCONNECTED_ACTIVATION_ABOVE_CENTER_PX,
+        ),
+    )
     return LoginCandidate(
         name="disconnected_ok",
-        point=ScreenPoint(center_x, center_y),
-        match_bounds=ScreenBounds(
-            round(width * 0.40), round(height * 0.565),
-            round(width * 0.20), round(height * 0.09),
-        ),
+        point=ScreenPoint(background_point.x, activation_y),
+        match_bounds=match_bounds,
         confidence=0.92,
-    )
-
-
-def _template_activation_point(
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-) -> ScreenPoint:
-    """Keep the cursor image below the label used for fresh prompt proof."""
-
-    inset_x = max(1, round(width * _TEMPLATE_ACTIVATION_X_RATIO))
-    bottom_inset = max(
-        1,
-        round(height * _TEMPLATE_ACTIVATION_BOTTOM_INSET_RATIO),
-    )
-    return ScreenPoint(
-        x + min(width - 1, inset_x),
-        y + max(0, height - 1 - bottom_inset),
     )
 
 
@@ -479,11 +506,12 @@ def _detect_login_surfaces_with_limits(
         if match is None:
             continue
         x, y, width, height, confidence = match
+        match_bounds = ScreenBounds(x, y, width, height)
         candidates.append(
             LoginCandidate(
                 name=name,
-                point=_template_activation_point(x, y, width, height),
-                match_bounds=ScreenBounds(x, y, width, height),
+                point=_label_preserving_activation_point(match_bounds),
+                match_bounds=match_bounds,
                 confidence=confidence,
             )
         )
