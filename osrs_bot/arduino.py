@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .input_integrity import build_input_integrity_status, input_integrity_delta, read_status_payload
+from .observability import MAX_DURATION_MILLIS
 
 
 ACK_TOKENS = {"ACK", "OK", "PONG", "READY"}
 REQUIRED_PROTOCOL = "arduino_hid.v1"
+SUPPORTED_PROTOCOLS = frozenset({"arduino_hid.v1", "arduino_hid.v2"})
 REQUIRED_CAPS = ("mouse", "keyboard", "stopAll", "watchdog", "resetSafe")
 ENDPOINT_CORRECTION_TOLERANCE_PX = 1
 ENDPOINT_CORRECTION_ATTEMPTS = 3
@@ -33,6 +35,8 @@ DEFAULT_MOVE_RETRY_SCALE = 1.25
 DEFAULT_MOVE_MAX_CONSECUTIVE_NOEFFECT = 3
 DEFAULT_CURSOR_START_REGION_TOLERANCE_PX = 8
 DEFAULT_COMMAND_TIMEOUT_MS = 2000
+CAMERA_HOLD_ACK_MARGIN_MS = 500
+MAX_CAMERA_HOLD_ACK_TIMEOUT_MS = 2_000
 DEFAULT_SERIAL_LOCK_TIMEOUT_MS = 1500
 DEFAULT_SERIAL_LOCK_STALE_MS = 120000
 _GA_ROOT = 2
@@ -48,12 +52,41 @@ _COMMAND_TERMINAL_STATUSES = {
     "REJECTED",
     "UNEXPECTED_RESPONSE",
 }
+_BOOLEAN_WIRE_FIELDS = frozenset(
+    {
+        "armed",
+        "pointer",
+        "mouse",
+        "relativeMove",
+        "buttonDownUp",
+        "click",
+        "keyboard",
+        "keyPress",
+        "holdKeys",
+        "cameraKeyHold",
+        "wheel",
+        "arm",
+        "watchdog",
+        "stopAll",
+        "disarm",
+        "status",
+        "resetSafe",
+    }
+)
 _PROCESS_SERIAL_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_SERIAL_LOCKS_GUARD = threading.Lock()
 
 
 class ArduinoHIDError(RuntimeError):
     pass
+
+
+def _bounded_duration_millis(value: object) -> int | None:
+    """Sanitize one transport duration without retaining its source payload."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return max(0, min(value, MAX_DURATION_MILLIS))
 
 
 @dataclass
@@ -139,7 +172,7 @@ def _fields_from_line(line: str) -> dict[str, Any]:
             continue
         key, value = part.split("=", 1)
         normalized: Any = value
-        if value in {"0", "1"}:
+        if key in _BOOLEAN_WIRE_FIELDS and value in {"0", "1"}:
             normalized = value == "1"
         else:
             try:
@@ -215,8 +248,10 @@ def _command_timeout_classification(command_name: str, *, phase: str) -> str:
         return "serial_timeout_during_move"
     if name in {"CLICK", "MOUSE_DOWN", "MOUSE_UP"}:
         return "serial_timeout_during_click"
-    if name in {"KEY_DOWN", "KEY_UP", "KEY_PRESS", "HOLD_KEYS"}:
+    if name in {"KEY_DOWN", "KEY_UP", "KEY_PRESS", "HOLD_KEYS", "CAMERA_HOLD"}:
         return "serial_timeout_during_key_input"
+    if name == "WHEEL":
+        return "serial_timeout_during_wheel_input"
     if phase == "read":
         return "serial_timeout_waiting_for_ack"
     return "serial_timeout_before_command"
@@ -365,6 +400,8 @@ def _expected_response_token(command: str) -> str | None:
         "KEY_UP": "KEY_UP",
         "KEY_PRESS": "KEY_PRESS",
         "HOLD_KEYS": "HOLD_KEYS",
+        "CAMERA_HOLD": "CAMERA_HOLD",
+        "WHEEL": "WHEEL",
     }
     return mapping.get(name)
 
@@ -1125,6 +1162,7 @@ class _ArduinoHIDTransport:
         self._command_ledger_active = False
         self._command_ledger_order: list[int] = []
         self._command_ledger_records: dict[int, dict[str, Any]] = {}
+        self._negotiated_input_capabilities: Any | None = None
 
     def __del__(self) -> None:
         try:
@@ -1307,6 +1345,16 @@ class _ArduinoHIDTransport:
                 ),
                 "timeoutClassification": raw.get("timeoutClassification"),
                 "retryCount": int(raw.get("retryCount") or 0),
+                # These values are already measured by the authoritative
+                # transport.  Publish only bounded numeric durations: never
+                # the raw command line, ACK line, serial owner, or lease
+                # payload that produced them.
+                "writeDurationMillis": _bounded_duration_millis(
+                    raw.get("writeDurationMs")
+                ),
+                "acknowledgementDurationMillis": _bounded_duration_millis(
+                    raw.get("ackDurationMs")
+                ),
             }
             records.append(record)
         unresolved = sum(
@@ -1327,7 +1375,12 @@ class _ArduinoHIDTransport:
         self._command_ledger_active = False
         return evidence
 
-    def _write_line(self, command: str) -> dict[str, Any]:
+    def _write_line(
+        self,
+        command: str,
+        *,
+        read_timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
         if self._serial is None:
             raise ArduinoHIDError("Arduino serial connection is not open")
         encoded = (command.strip() + "\n").encode("utf-8")
@@ -1340,7 +1393,11 @@ class _ArduinoHIDTransport:
             "port": self.port,
             "baud": self.baud,
             "writeTimeoutMs": self.command_timeout_ms,
-            "readTimeoutMs": self.handshake_timeout_ms,
+            "readTimeoutMs": (
+                self.handshake_timeout_ms
+                if read_timeout_ms is None
+                else read_timeout_ms
+            ),
             "commandName": name,
             "commandBytes": len(encoded),
             "writeDurationMs": None,
@@ -1390,24 +1447,42 @@ class _ArduinoHIDTransport:
             pass
         self._status.armed = False
 
-    def _read_line(self) -> str:
+    def _read_line(self, *, timeout_ms: int | None = None) -> str:
         if self._serial is None:
             raise ArduinoHIDError("Arduino serial connection is not open")
+        prior_timeout = getattr(self._serial, "timeout", None)
+        timeout_changed = timeout_ms is not None and hasattr(self._serial, "timeout")
+        if timeout_changed:
+            self._serial.timeout = timeout_ms / 1000.0
         started = time.monotonic()
         try:
             raw = self._serial.readline()
         except Exception as error:  # noqa: BLE001
+            last = dict(self._status.last_command_trace)
+            if last:
+                last["ackDurationMs"] = int(
+                    round((time.monotonic() - started) * 1000)
+                )
+                self._append_command_trace(last)
             self._status.last_error = f"{type(error).__name__}: {error}"
             self._status.armed = False
             raise ArduinoHIDError(f"Arduino serial read failed: {error}") from error
+        finally:
+            if timeout_changed:
+                self._serial.timeout = prior_timeout
+        ack_duration_millis = int(round((time.monotonic() - started) * 1000))
         if not raw:
+            last = dict(self._status.last_command_trace)
+            if last:
+                last["ackDurationMs"] = ack_duration_millis
+                self._append_command_trace(last)
             self._status.timeouts += 1
             self._status.armed = False
             raise ArduinoHIDError("Arduino command timed out waiting for ACK")
         line = raw.decode("utf-8", errors="replace").strip() if isinstance(raw, bytes) else str(raw).strip()
         last = dict(self._status.last_command_trace)
         if last:
-            last["ackDurationMs"] = int(round((time.monotonic() - started) * 1000))
+            last["ackDurationMs"] = ack_duration_millis
             last["ackLine"] = line
             last["status"] = "ACK_READ"
             self._append_command_trace(last)
@@ -1419,18 +1494,68 @@ class _ArduinoHIDTransport:
         *,
         require_ack: bool = True,
         expected_token: str | None = None,
+        ack_timeout_ms: int | None = None,
     ) -> str:
         if self._serial is None:
             raise ArduinoHIDError(
                 "Arduino serial connection is not open; the input coordinator must connect explicitly"
             )
         name = _command_name(command)
-        write_trace = self._write_line(command)
+        if ack_timeout_ms is not None and (
+            isinstance(ack_timeout_ms, bool)
+            or not isinstance(ack_timeout_ms, int)
+            or not 1 <= ack_timeout_ms <= MAX_CAMERA_HOLD_ACK_TIMEOUT_MS
+        ):
+            raise ArduinoHIDError("ACK timeout must be a bounded positive integer")
+        ack_started = time.monotonic()
+        write_trace = self._write_line(
+            command,
+            read_timeout_ms=ack_timeout_ms,
+        )
+        ack_deadline = (
+            ack_started + (ack_timeout_ms / 1000.0)
+            if ack_timeout_ms is not None
+            else None
+        )
+
+        def raise_overall_ack_deadline() -> None:
+            failed = dict(self._status.last_command_trace or write_trace)
+            failed["status"] = "ACK_TIMEOUT_OR_READ_FAIL"
+            failed["timeoutClassification"] = _command_timeout_classification(
+                name,
+                phase="read",
+            )
+            failed["ackDurationMs"] = int(
+                round((time.monotonic() - ack_started) * 1000)
+            )
+            failed["error"] = "overall ACK deadline exceeded"
+            self._append_command_trace(failed)
+            self._status.timeouts += 1
+            self._status.last_error = "overall ACK deadline exceeded"
+            self._status.armed = False
+            if name != "STOP_ALL":
+                self._best_effort_stop_all()
+            raise ArduinoHIDError(
+                f"Arduino {name} exceeded its overall ACK deadline"
+            )
+
         expected = expected_token or _expected_response_token(command)
         last_line = ""
         for _attempt in range(6):
+            read_timeout_ms = ack_timeout_ms
+            if ack_deadline is not None:
+                remaining_seconds = ack_deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise_overall_ack_deadline()
+                read_timeout_ms = max(
+                    1,
+                    min(
+                        ack_timeout_ms,
+                        int((remaining_seconds * 1000.0) + 0.999),
+                    ),
+                )
             try:
-                line = self._read_line()
+                line = self._read_line(timeout_ms=read_timeout_ms)
             except Exception as error:
                 failed = dict(self._status.last_command_trace or write_trace)
                 failed["status"] = "ACK_TIMEOUT_OR_READ_FAIL"
@@ -1440,6 +1565,8 @@ class _ArduinoHIDTransport:
                 if str(command).strip().split(" ", 1)[0].upper() != "STOP_ALL":
                     self._best_effort_stop_all()
                 raise
+            if ack_deadline is not None and time.monotonic() > ack_deadline:
+                raise_overall_ack_deadline()
             last_line = line
             token = _line_token(line)
             payload_token = _line_payload_token(line)
@@ -1475,6 +1602,8 @@ class _ArduinoHIDTransport:
                 self._status.last_error = None
                 return line
             if token == "OK" and payload_token in {"BOOT", "WATCHDOG_STOP"}:
+                if name in {"CAMERA_HOLD", "WHEEL"}:
+                    break
                 continue
         self._status.ack_failures += 1
         unexpected_token = _line_token(last_line)
@@ -1496,12 +1625,20 @@ class _ArduinoHIDTransport:
             f"(response={unexpected_token}, payload={unexpected_payload})"
         )
 
-    def _send_armed(self, command: str, *, require_ack: bool = True, expected_token: str | None = None) -> str:
+    def _send_armed(
+        self,
+        command: str,
+        *,
+        require_ack: bool = True,
+        expected_token: str | None = None,
+        ack_timeout_ms: int | None = None,
+    ) -> str:
         self._require_armed()
         return self._send(
             command,
             require_ack=require_ack,
             expected_token=expected_token,
+            ack_timeout_ms=ack_timeout_ms,
         )
 
     def _move_relative(self, dx: int, dy: int) -> dict[str, Any]:
@@ -1609,10 +1746,11 @@ class _ArduinoHIDTransport:
 
     def _verify_protocol(self) -> None:
         protocol = str(self._status.identity.get("protocol") or "")
-        if protocol != REQUIRED_PROTOCOL:
+        if protocol not in SUPPORTED_PROTOCOLS:
             self._status.last_error = f"unsupported protocol: {protocol or 'missing'}"
             raise ArduinoHIDError(
-                f"Arduino firmware protocol mismatch: expected {REQUIRED_PROTOCOL}, got {protocol or 'missing'}. "
+                "Arduino firmware protocol mismatch: expected one of "
+                f"{', '.join(sorted(SUPPORTED_PROTOCOLS))}, got {protocol or 'missing'}. "
                 "Flash arduino/ArduinoHIDBridge/ArduinoHIDBridge.ino."
             )
         missing = []
@@ -1630,10 +1768,31 @@ class _ArduinoHIDTransport:
                     raise ValueError
             except (TypeError, ValueError):
                 raise ArduinoHIDError(f"Arduino firmware reported invalid watchdogMs={watchdog!r}") from None
+        try:
+            from .input_capabilities import InputCapabilities
+
+            self._negotiated_input_capabilities = InputCapabilities.from_negotiation(
+                self._status.identity,
+                self._status.capabilities,
+                self._status.firmware_status,
+            )
+        except Exception as error:
+            self._status.last_error = (
+                "invalid negotiated input capabilities: "
+                f"{type(error).__name__}: {error}"
+            )
+            raise ArduinoHIDError(self._status.last_error) from error
+
+    def _input_capabilities(self) -> Any:
+        capabilities = self._negotiated_input_capabilities
+        if capabilities is None:
+            raise ArduinoHIDError("input capabilities have not been negotiated")
+        return capabilities
 
     def _arm(self, session_token: str | None = None) -> dict[str, Any]:
         token = session_token or self.session_token
         self.session_token = token
+        self._negotiated_input_capabilities = None
         self._status.session_token_hash = _token_hash(token)
         try:
             self._stop_all()
@@ -2242,6 +2401,81 @@ class _ArduinoHIDTransport:
             f"KEY_PRESS {str(key).strip().lower()} {hold_millis}",
             require_ack=True,
         )
+
+    def _camera_hold(self, direction: str, hold_millis: int) -> dict[str, Any]:
+        """Execute one negotiated atomic camera-direction hold."""
+
+        from .input_capabilities import RequiredInputCapabilities
+
+        normalized = str(direction).strip().lower()
+        requirement = RequiredInputCapabilities.camera_hold(
+            normalized,
+            hold_millis,
+        )
+        requirement.require(self._input_capabilities())
+        ack_timeout_ms = hold_millis + CAMERA_HOLD_ACK_MARGIN_MS
+        if ack_timeout_ms > MAX_CAMERA_HOLD_ACK_TIMEOUT_MS:
+            raise ArduinoHIDError("camera hold ACK timeout exceeds its bounded limit")
+        line = self._send_armed(
+            f"CAMERA_HOLD {normalized} {hold_millis}",
+            require_ack=True,
+            expected_token="CAMERA_HOLD",
+            ack_timeout_ms=ack_timeout_ms,
+        )
+        fields = _fields_from_line(line)
+        requested = fields.get("requestedDurationMs")
+        applied = fields.get("appliedDurationMs")
+        if (
+            fields.get("direction") != normalized
+            or isinstance(requested, bool)
+            or not isinstance(requested, int)
+            or isinstance(applied, bool)
+            or not isinstance(applied, int)
+            or requested != hold_millis
+            or applied != hold_millis
+        ):
+            self._status.armed = False
+            self._best_effort_stop_all()
+            raise ArduinoHIDError("CAMERA_HOLD acknowledgement did not exactly match")
+        return {
+            "schema": "camera_key_hold_ack.v1",
+            "direction": normalized,
+            "requestedDurationMs": requested,
+            "appliedDurationMs": applied,
+            "ackTimeoutMs": ack_timeout_ms,
+        }
+
+    def _wheel(self, amount: int) -> dict[str, Any]:
+        """Execute one negotiated nonzero bounded wheel step."""
+
+        from .input_capabilities import RequiredInputCapabilities
+
+        requirement = RequiredInputCapabilities.camera_zoom(amount)
+        requirement.require(self._input_capabilities())
+        line = self._send_armed(
+            f"WHEEL {amount}",
+            require_ack=True,
+            expected_token="WHEEL",
+        )
+        fields = _fields_from_line(line)
+        requested = fields.get("requestedAmount")
+        applied = fields.get("appliedAmount")
+        if (
+            isinstance(requested, bool)
+            or not isinstance(requested, int)
+            or isinstance(applied, bool)
+            or not isinstance(applied, int)
+            or requested != amount
+            or applied != amount
+        ):
+            self._status.armed = False
+            self._best_effort_stop_all()
+            raise ArduinoHIDError("WHEEL acknowledgement did not exactly match")
+        return {
+            "schema": "camera_zoom_ack.v1",
+            "requestedAmount": requested,
+            "appliedAmount": applied,
+        }
 
     def _assert_foreground(
         self,

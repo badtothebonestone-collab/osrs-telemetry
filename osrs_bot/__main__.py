@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 
+from .behavior import BehaviorPolicy
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .observation import ObservationClient
 from .profile import DEFAULT_BINDING
@@ -61,6 +63,12 @@ def _parser() -> argparse.ArgumentParser:
         "--verification-timeout-seconds",
         type=float,
         default=DEFAULT_RUNTIME_CONFIG.verification_timeout_seconds,
+    )
+    task.add_argument(
+        "--behavior-seed",
+        type=int,
+        default=DEFAULT_RUNTIME_CONFIG.behavior.seed,
+        help="reproduce bounded route, aim, pointer, camera, and timing decisions",
     )
     return parser
 
@@ -136,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
             max_actions=args.max_actions,
             max_runtime_seconds=args.max_runtime_seconds,
             verification_timeout_seconds=args.verification_timeout_seconds,
+            behavior=replace(
+                DEFAULT_RUNTIME_CONFIG.behavior,
+                seed=args.behavior_seed,
+            ),
         )
     try:
         configuration = RuntimeConfig(**config_values)
@@ -161,7 +173,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_observation_summary(observation), indent=2))
         return 0 if observation.loaded_scene else 2
 
-    task = WoodcutBankTask(DEFAULT_BINDING)
+    task = WoodcutBankTask(
+        DEFAULT_BINDING,
+        behavior=BehaviorPolicy(
+            configuration.behavior,
+            camera_capabilities=configuration.camera_key_capabilities,
+        ),
+    )
     if args.execute:
         print(
             "Live mode: focus the telemetry-owning RuneLite window within 15 seconds.",

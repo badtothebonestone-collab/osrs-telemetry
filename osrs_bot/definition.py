@@ -170,6 +170,13 @@ class RouteStepKind(str, Enum):
     OBJECT = "object"
 
 
+class RoutePointClassification(str, Enum):
+    MANDATORY_TRANSITION = "mandatory_transition"
+    MANDATORY_TURN = "mandatory_turn"
+    ARRIVAL_POINT = "arrival_point"
+    NORMAL_GUIDANCE = "normal_guidance"
+
+
 @dataclass(frozen=True, slots=True)
 class FixedRouteStep:
     step_id: str
@@ -177,6 +184,7 @@ class FixedRouteStep:
     location: WorldPoint
     arrival_radius: int
     action: str
+    classification: RoutePointClassification = RoutePointClassification.NORMAL_GUIDANCE
     object_id: int | None = None
     object_name: str | None = None
     alternate_actions: tuple[str, ...] = ()
@@ -190,6 +198,8 @@ class FixedRouteStep:
         _require_positive_int("arrival_radius", self.arrival_radius)
         _require_text("action", self.action)
         _require_text_tuple("alternate_actions", self.alternate_actions)
+        if not isinstance(self.classification, RoutePointClassification):
+            raise ValueError("classification must be a RoutePointClassification")
 
         if self.kind is RouteStepKind.WALK:
             if self.action != "Walk here":
@@ -201,7 +211,12 @@ class FixedRouteStep:
                 or self.expected_plane is not None
             ):
                 raise ValueError("walk route steps cannot carry object transition facts")
+            if self.classification is RoutePointClassification.MANDATORY_TRANSITION:
+                raise ValueError("walk route steps cannot be mandatory transitions")
             return
+
+        if self.classification is not RoutePointClassification.MANDATORY_TRANSITION:
+            raise ValueError("object route steps must be mandatory transitions")
 
         _require_positive_int("object_id", self.object_id)
         _require_text("object_name", self.object_name)
@@ -261,6 +276,13 @@ class FixedRoute:
 
         if self.steps[-1].location != self.destination_anchor:
             raise ValueError("the final route step must equal the destination anchor")
+        if self.steps[-1].classification is not RoutePointClassification.ARRIVAL_POINT:
+            raise ValueError("the final route step must be classified as an arrival point")
+        if any(
+            step.classification is RoutePointClassification.ARRIVAL_POINT
+            for step in self.steps[:-1]
+        ):
+            raise ValueError("only the final route step may be an arrival point")
         if current_plane != self.destination_anchor.plane:
             raise ValueError("the route's final transition plane must match its destination")
 
@@ -371,6 +393,7 @@ def _walk(
     y: int,
     plane: int,
     arrival_radius: int,
+    classification: RoutePointClassification = RoutePointClassification.NORMAL_GUIDANCE,
 ) -> FixedRouteStep:
     return FixedRouteStep(
         step_id=step_id,
@@ -378,6 +401,7 @@ def _walk(
         location=WorldPoint(x, y, plane),
         arrival_radius=arrival_radius,
         action="Walk here",
+        classification=classification,
     )
 
 
@@ -397,6 +421,7 @@ def _transition(
         location=WorldPoint(x, y, plane),
         arrival_radius=arrival_radius,
         action=action,
+        classification=RoutePointClassification.MANDATORY_TRANSITION,
         object_id=object_id,
         object_name="Staircase",
         alternate_actions=("Climb",),
@@ -404,7 +429,7 @@ def _transition(
     )
 
 
-_TREE_ANCHOR = WorldPoint(3196, 3240, 0)
+_TREE_ANCHOR = WorldPoint(3196, 3244, 0)
 _BANK_ANCHOR = WorldPoint(3208, 3221, 2)
 
 
@@ -427,25 +452,68 @@ LUMBRIDGE_WEST_TREES_V1 = TaskSiteDefinition(
         start_anchor=_TREE_ANCHOR,
         destination_anchor=_BANK_ANCHOR,
         steps=(
-            _walk("west_approach_bridge", 3200, 3238, 0, 2),
+            _walk("tree_lane_exit", 3196, 3244, 0, 1),
+            _walk(
+                "west_approach_bridge",
+                3200,
+                3238,
+                0,
+                2,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _walk("west_corridor_north", 3196, 3237, 0, 2),
-            _walk("west_wall_corner", 3196, 3234, 0, 1),
+            _walk(
+                "west_wall_corner",
+                3196,
+                3234,
+                0,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _walk("west_wall_descent_1", 3197, 3231, 0, 1),
             _walk("west_wall_descent_2", 3198, 3228, 0, 1),
             _walk("west_wall_descent_3", 3197, 3225, 0, 1),
             _walk("west_wall_descent_4", 3197, 3222, 0, 1),
             _walk("west_corridor_south", 3197, 3221, 0, 2),
-            _walk("south_corridor_entry", 3199, 3218, 0, 1),
+            _walk(
+                "south_corridor_entry",
+                3199,
+                3218,
+                0,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _walk("south_corridor_west", 3202, 3215, 0, 2),
             _walk("south_corridor_bridge", 3205, 3214, 0, 1),
-            _walk("south_corridor_safe", 3208, 3212, 0, 2),
-            _walk("south_stairs_approach", 3205, 3209, 0, 2),
+            _walk(
+                "south_corridor_safe",
+                3208,
+                3212,
+                0,
+                2,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
+            _walk(
+                "south_stairs_approach",
+                3205,
+                3209,
+                0,
+                2,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _transition("ground_floor_stairs_up", 3204, 3207, 0, 4, 56230, "Climb-up", 1),
             _transition("first_floor_stairs_up", 3204, 3207, 1, 4, 16672, "Climb-up", 2),
             _walk("bank_floor_south_1", 3205, 3211, 2, 2),
             _walk("bank_floor_south_2", 3205, 3215, 2, 2),
             _walk("bank_floor_north", 3207, 3218, 2, 2),
-            _walk("bank_booth_approach", 3208, 3221, 2, 2),
+            _walk(
+                "bank_booth_approach",
+                3208,
+                3221,
+                2,
+                2,
+                RoutePointClassification.ARRIVAL_POINT,
+            ),
         ),
     ),
     route_to_resource=FixedRoute(
@@ -453,21 +521,93 @@ LUMBRIDGE_WEST_TREES_V1 = TaskSiteDefinition(
         start_anchor=_BANK_ANCHOR,
         destination_anchor=_TREE_ANCHOR,
         steps=(
+            _walk(
+                "bank_booth_exit_turn",
+                3206,
+                3222,
+                2,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _walk("bank_floor_return_1", 3206, 3226, 2, 2),
             _walk("bank_floor_return_2", 3206, 3228, 2, 1),
             _transition("bank_floor_bottom", 3205, 3229, 2, 3, 56231, "Bottom-floor", 0),
             _walk("ground_corridor_east_1", 3210, 3228, 0, 2),
-            _walk("ground_corridor_east_2", 3215, 3228, 0, 2),
+            _walk("ground_corridor_east_mid", 3213, 3228, 0, 1),
+            _walk(
+                "ground_corridor_east_2",
+                3215,
+                3228,
+                0,
+                2,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _walk("ground_corridor_south_1", 3215, 3225, 0, 2),
             _walk("ground_corridor_south_2", 3215, 3222, 0, 2),
-            _walk("ground_corridor_south_3", 3215, 3219, 0, 2),
+            _walk(
+                "ground_corridor_south_3",
+                3215,
+                3219,
+                0,
+                2,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
+            _walk("ground_corridor_west_mid", 3213, 3219, 0, 1),
             _walk("ground_corridor_west", 3211, 3219, 0, 2),
+            _walk(
+                "ground_corridor_west_turn",
+                3210,
+                3216,
+                0,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
             _walk("ground_corridor_west_2", 3207, 3214, 0, 2),
-            _walk("south_corridor_return", 3203, 3214, 0, 2),
-            _walk("west_corridor_return_1", 3198, 3222, 0, 2),
-            _walk("west_corridor_return_2", 3199, 3234, 0, 2),
+            _walk(
+                "south_corridor_return",
+                3203,
+                3214,
+                0,
+                2,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
+            _walk(
+                "south_corridor_entry_return",
+                3199,
+                3218,
+                0,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
+            _walk(
+                "west_corridor_return_1",
+                3197,
+                3221,
+                0,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
+            _walk("west_wall_ascent_1", 3197, 3225, 0, 1),
+            _walk("west_wall_ascent_2", 3198, 3228, 0, 1),
+            _walk("west_wall_ascent_3", 3197, 3231, 0, 1),
+            _walk(
+                "west_wall_corner_return",
+                3196,
+                3234,
+                0,
+                1,
+                RoutePointClassification.MANDATORY_TURN,
+            ),
+            _walk("west_corridor_north_return", 3196, 3237, 0, 2),
             _walk("tree_lane_return", 3196, 3240, 0, 2),
-            _walk("west_trees", 3196, 3240, 0, 2),
+            _walk(
+                "west_trees",
+                3196,
+                3244,
+                0,
+                2,
+                RoutePointClassification.ARRIVAL_POINT,
+            ),
         ),
     ),
     inventory=InventoryPredicate(
@@ -490,17 +630,27 @@ LUMBRIDGE_WEST_TREES_V1 = TaskSiteDefinition(
     provenance=DefinitionProvenance(
         fixture_schema="osrs_bot.golden_cycle.v1",
         fixture_id="woodcut-lumbridge-west-castle-bank-return",
-        description="Sanitized deterministic semantic replay of the proven ordinary-log cycle.",
-        evidence_date="2026-07-10",
+        description=(
+            "Sanitized deterministic semantic replay of the proven ordinary-log cycle "
+            "with a live-evidenced tree-lane route anchor."
+        ),
+        evidence_date="2026-07-13",
         baseline_parent="a843915c68b1c8ab2bcc0661ad467ec7bfa231b1",
-        proof_root="_run_proofs/vertical_slice",
-        evidence_kind="stitched bounded live component traces",
+        proof_root="_run_proofs",
+        evidence_kind=(
+            "stitched bounded live component traces plus current live "
+            "route-recovery evidence"
+        ),
         limitations=(
-            "The ignored live traces were resumed across bounded runs while source was changing. "
-            "They prove the component interactions and terminal COMPLETE state, but are not one "
-            "uninterrupted raw Observation or SafetyGate replay. This committed fixture freezes "
-            "the final semantic FSM and typed verification sequence without retaining process "
-            "IDs, session IDs, screen coordinates, or local paths."
+            "The earlier ignored live traces were resumed across bounded runs while source "
+            "was changing. They prove the component interactions and terminal COMPLETE state, "
+            "but are not one uninterrupted raw Observation or SafetyGate replay. The "
+            "2026-07-13 production receipt additionally proves a full inventory at "
+            "(3194,3248,0), a safe terminal cleanup, and the missing tree-lane reentry that "
+            "motivated the corrected anchor; its stopped run did not reach the bank. This "
+            "committed fixture freezes the semantic FSM, corrected definition facts, and "
+            "typed verification sequence without retaining process IDs, session IDs, or "
+            "screen coordinates."
         ),
         evidence=(
             ProvenanceEvidence(
@@ -547,6 +697,13 @@ LUMBRIDGE_WEST_TREES_V1 = TaskSiteDefinition(
                 "_run_proofs/vertical_slice/20260710_170849/trace.jsonl",
                 "86df453ec2470cb8acf744ea87b7c9f7cabb99309e4846d4397e7177bd7a7f9a",
                 "terminal COMPLETE state and acknowledged STOP_ALL/DISARM cleanup",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/movement_targeting_quality/"
+                "20260713T055558.877889Z/run_receipt.json",
+                "4f04d7b784321d51d43c8dc913e3cf48bc4990f5faeab0d155a201f465c0326f",
+                "full inventory north of the historical tree anchor, missing route "
+                "reentry, and acknowledged safe-stop cleanup",
             ),
         ),
     ),

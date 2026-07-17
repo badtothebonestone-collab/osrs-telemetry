@@ -4,6 +4,8 @@ from dataclasses import FrozenInstanceError, fields
 import math
 import unittest
 
+from osrs_bot.behavior import BehaviorConfig
+from osrs_bot.camera import CameraKeyCapabilities
 from osrs_bot.configuration import (
     DEFAULT_RUNTIME_CONFIG,
     MAX_ACTIONS,
@@ -27,6 +29,14 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(config.max_actions, 100)
         self.assertEqual(config.max_runtime_seconds, 1_200.0)
         self.assertEqual(config.verification_timeout_seconds, 75.0)
+        self.assertEqual(BehaviorConfig(), config.behavior)
+        self.assertEqual(
+            CameraKeyCapabilities(
+                max_hold_millis=600,
+                source="arduino_hid.v2.negotiated_contract",
+            ),
+            config.camera_key_capabilities,
+        )
         self.assertIsNone(config.arduino_port)
         self.assertIs(config.validated_for_mode(execute=False), config)
         self.assertEqual(DEFAULT_RUNTIME_CONFIG, config)
@@ -44,11 +54,17 @@ class RuntimeConfigurationTests(unittest.TestCase):
                 "max_actions",
                 "max_runtime_seconds",
                 "verification_timeout_seconds",
+                "behavior",
+                "camera_key_capabilities",
             ),
         )
         with self.assertRaises(FrozenInstanceError):
             RuntimeConfig().max_actions = 1  # type: ignore[misc]
         self.assertFalse(hasattr(DEFAULT_RUNTIME_CONFIG, "__dict__"))
+        with self.assertRaises(TypeError):
+            RuntimeConfig(behavior={})  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            RuntimeConfig(camera_key_capabilities={})  # type: ignore[arg-type]
 
     def test_execute_mode_requires_an_arduino_port(self) -> None:
         with self.assertRaisesRegex(ValueError, "execute mode requires arduino_port"):

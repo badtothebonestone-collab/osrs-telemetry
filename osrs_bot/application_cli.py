@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 
 from .application import EngineApplication, LifecycleState, SUPPORTED_TASK_ID
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
@@ -42,6 +43,12 @@ def _parser() -> argparse.ArgumentParser:
         "--verification-timeout-seconds",
         type=float,
         default=DEFAULT_RUNTIME_CONFIG.verification_timeout_seconds,
+    )
+    run.add_argument(
+        "--behavior-seed",
+        type=int,
+        default=DEFAULT_RUNTIME_CONFIG.behavior.seed,
+        help="reproduce bounded route, aim, pointer, camera, and timing decisions",
     )
     return parser
 
@@ -93,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
             max_actions=args.max_actions,
             max_runtime_seconds=args.max_runtime_seconds,
             verification_timeout_seconds=args.verification_timeout_seconds,
+            behavior=replace(
+                DEFAULT_RUNTIME_CONFIG.behavior,
+                seed=args.behavior_seed,
+            ),
         )
         application = EngineApplication(configuration=configuration)
         run_id: str | None = None

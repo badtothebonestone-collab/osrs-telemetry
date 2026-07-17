@@ -21,10 +21,16 @@ definitions, while every task retains its own explicit FSM.
 Never introduce a generic or high-level game-agent framework, generic planner,
 task language, task DSL, behavior-tree framework, knowledge fabric, learned
 control policy, automatic learning, MCP surface, compatibility layer for
-deleted architecture, or second telemetry endpoint. Bounded deterministic
-algorithms local to one owning boundary, such as pointer trajectories, are
+deleted architecture, or second telemetry endpoint. Bounded algorithms local
+to one owning boundary, such as route selection and pointer trajectories, are
 allowed and may not bypass the explicit task FSM. Do not add another task or
 site during the active mission.
+
+Controlled behavioral variation is an intentional engine capability. It must
+be bounded, geometry-aware, context-aware, observable, reproducible when a
+recorded seed is supplied, and tunable through one engine-owned configuration
+rather than duplicated through task code. Variation never weakens identity,
+freshness, geometry, menu, verification, Arduino-only input, or cleanup gates.
 
 Anti-detection, stealth, evasion, and randomization intended to avoid detection
 are not project goals.
@@ -118,8 +124,19 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   requires a later typed verification.
 - An object aim point is authorized only inside the first present RuneLite API
   shape in clickbox -> convex hull -> canvas tile order and inside the viewport.
-  `canvasLocation` is diagnostic evidence unless that authoritative shape also
-  contains it. Exact post-move hover/menu evidence remains the final veto.
+  Fully visible shapes use an inset interior region. A clipped or oversized
+  authoritative shape may use only a bounded visible overlap that still contains
+  a safe interior aim; clipping never permits fallthrough to, or broadening with,
+  weaker geometry. UI and competing-object exclusions still apply,
+  `canvasLocation` is diagnostic unless the authoritative shape also contains
+  it, and exact post-move hover/menu evidence remains the final veto.
+- Camera corrections require a fresh signed target projection. Every camera hold
+  must produce a typed verified pose/geometry result before any projection is
+  reused. Bounded repeated non-improvement may select only an exact eligible
+  alternate or mandatory route fallback; otherwise the task blocks.
+- Definition-owned priority object IDs are ordering hints only. They never filter
+  the scene census or grant target meaning, and competing objects remain present
+  for selection, overlap, and occlusion decisions.
 - Every connected attempt must end with confirmed `STOP_ALL`, `DISARM`, and
   authoritative wire `STATUS` proving disarmed, zero held keys, zero held mouse
   buttons, and no unresolved command evidence.

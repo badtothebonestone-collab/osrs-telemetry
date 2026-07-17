@@ -6,14 +6,236 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.google.gson.Gson;
+import java.awt.Polygon;
 import java.awt.Rectangle;
 import java.awt.geom.AffineTransform;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import net.runelite.api.CollisionDataFlag;
+import net.runelite.api.Point;
+import net.runelite.api.coords.WorldPoint;
 import org.junit.Test;
 
 public class TelemetryPluginSensorContractTest
 {
+	@Test
+	public void baselineCameraViewportIncludesAuthoritativeZoomState()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.cameraYaw = 512;
+		snapshot.cameraPitch = 1_024;
+		snapshot.zoom3d = 384;
+
+		Map<String, Object> payload = TelemetryPlugin.cameraViewportPayload(snapshot);
+
+		assertEquals(512, payload.get("cameraYaw"));
+		assertEquals(1_024, payload.get("cameraPitch"));
+		assertEquals(384, payload.get("zoom3d"));
+	}
+
+	@Test
+	public void baselinePublishesAuthoritativeTextInputState()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.textInputActive = true;
+
+		Map<String, Object> payload = TelemetryPlugin.baselinePayload(snapshot);
+
+		assertEquals(Boolean.TRUE, payload.get("textInputActive"));
+		snapshot.textInputActive = false;
+		assertEquals(Boolean.FALSE,
+				TelemetryPlugin.baselinePayload(snapshot).get("textInputActive"));
+		snapshot.textInputActive = null;
+		assertNull(TelemetryPlugin.baselinePayload(snapshot).get("textInputActive"));
+	}
+
+	@Test
+	public void textInputStateMatchesFocusedFieldOrClientInputMode()
+	{
+		assertFalse(TelemetryPlugin.textInputActive(false, 0));
+		assertTrue(TelemetryPlugin.textInputActive(true, 0));
+		assertTrue(TelemetryPlugin.textInputActive(false, 1));
+		assertTrue(TelemetryPlugin.textInputActive(false, -1));
+	}
+
+	@Test
+	public void localPlayerCanvasCenterUsesUsableTilePolygon()
+	{
+		Polygon polygon = new Polygon(
+				new int[]{100, 140, 140, 100},
+				new int[]{200, 200, 240, 240},
+				4);
+
+		assertEquals(new Point(120, 220), TelemetryPlugin.playerCanvasCenter(polygon));
+		assertNull(TelemetryPlugin.playerCanvasCenter(null));
+		assertNull(TelemetryPlugin.playerCanvasCenter(
+				new Polygon(new int[]{10, 10, 10}, new int[]{20, 20, 20}, 3)));
+	}
+
+	@Test
+	public void baselinePlayerPayloadIncludesOptionalCanvasPointAsOnePair()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.localPlayer = new TickSnapshot.LocalPlayer();
+		snapshot.localPlayer.canvasX = 120;
+		snapshot.localPlayer.canvasY = 220;
+
+		Map<String, Object> payload = TelemetryPlugin.playerPayload(snapshot);
+
+		assertEquals(120, payload.get("canvasX"));
+		assertEquals(220, payload.get("canvasY"));
+		snapshot.localPlayer.canvasY = null;
+		payload = TelemetryPlugin.playerPayload(snapshot);
+		assertFalse(payload.containsKey("canvasX"));
+		assertFalse(payload.containsKey("canvasY"));
+	}
+
+	@Test
+	public void requestedTileCollisionLineAcceptsClearOpenTerrain()
+	{
+		int[][] flags = new int[8][8];
+
+		assertTrue(TelemetryPlugin.collisionLineClear(flags, 1, 1, 6, 5));
+		assertTrue(TelemetryPlugin.collisionLineClear(flags, 6, 5, 1, 1));
+	}
+
+	@Test
+	public void requestedTileCollisionLineRejectsBlockedTileAndWallShortcut()
+	{
+		int[][] blockedTile = new int[8][8];
+		blockedTile[4][3] = CollisionDataFlag.BLOCK_MOVEMENT_OBJECT;
+		assertFalse(TelemetryPlugin.collisionLineClear(blockedTile, 1, 1, 6, 5));
+
+		int[][] blockedWall = new int[8][8];
+		blockedWall[2][2] = CollisionDataFlag.BLOCK_MOVEMENT_EAST;
+		blockedWall[3][2] = CollisionDataFlag.BLOCK_MOVEMENT_WEST;
+		assertFalse(TelemetryPlugin.collisionLineClear(blockedWall, 1, 2, 6, 2));
+	}
+
+	@Test
+	public void requestedTileCollisionReachabilityCanRouteAroundBlockedShortcut()
+	{
+		int[][] aroundObject = new int[8][8];
+		aroundObject[3][2] = CollisionDataFlag.BLOCK_MOVEMENT_OBJECT;
+		assertFalse(TelemetryPlugin.collisionLineClear(aroundObject, 1, 2, 5, 2));
+		assertTrue(TelemetryPlugin.collisionPathReachable(aroundObject, 1, 2, 5, 2));
+
+		int[][] sealedWall = new int[8][8];
+		for (int y = 0; y < sealedWall[3].length; y++)
+		{
+			sealedWall[3][y] = CollisionDataFlag.BLOCK_MOVEMENT_FULL;
+		}
+		assertFalse(TelemetryPlugin.collisionPathReachable(sealedWall, 1, 2, 5, 2));
+	}
+
+	@Test
+	public void menuSceneFootprintContainmentIsInclusiveAndOrderIndependent()
+	{
+		assertTrue(TelemetryPlugin.sceneFootprintContains(50, 51, 49, 50, 51, 52));
+		assertTrue(TelemetryPlugin.sceneFootprintContains(49, 52, 51, 52, 49, 50));
+		assertFalse(TelemetryPlugin.sceneFootprintContains(48, 51, 49, 50, 51, 52));
+		assertFalse(TelemetryPlugin.sceneFootprintContains(50, 53, 49, 50, 51, 52));
+	}
+
+	@Test
+	public void freshOpenMenuTupleRequiresExactCurrentRowEvidence()
+	{
+		Map<String, Object> entry = new LinkedHashMap<>();
+		entry.put("option", "Bank");
+		entry.put("target", "<col=ffff>Bank booth");
+		entry.put("type", "GAME_OBJECT_FIRST_OPTION");
+		entry.put("identifier", 18491);
+		entry.put("param0", 54);
+		entry.put("param1", 63);
+		entry.put("worldViewId", -1);
+
+		Map<String, Object> bounds = new LinkedHashMap<>();
+		bounds.put("x", 100);
+		bounds.put("y", 200);
+		bounds.put("width", 180);
+		bounds.put("height", 120);
+
+		Map<String, Object> menu = new LinkedHashMap<>();
+		menu.put("menuOpen", true);
+		menu.put("gameState", "LOGGED_IN");
+		menu.put("sessionId", "plugin-session");
+		menu.put("clientProcessId", 4321L);
+		menu.put("clientTick", 100L);
+		menu.put("wallTimeMillis", 10_000L);
+		menu.put("menuBounds", bounds);
+		menu.put("entries", List.of(entry));
+
+		assertTrue(TelemetryPlugin.freshOpenMenuTupleMatches(
+				menu,
+				101L,
+				10_020L,
+				"plugin-session",
+				4321L,
+				new Point(150, 250),
+				"Bank",
+				"<col=ffff>Bank booth",
+				"GAME_OBJECT_FIRST_OPTION",
+				18491,
+				54,
+				63,
+				-1));
+
+		assertFalse(TelemetryPlugin.freshOpenMenuTupleMatches(
+				menu,
+				101L,
+				10_020L,
+				"plugin-session",
+				4321L,
+				new Point(99, 250),
+				"Bank",
+				"<col=ffff>Bank booth",
+				"GAME_OBJECT_FIRST_OPTION",
+				18491,
+				54,
+				63,
+				-1));
+
+		assertFalse(TelemetryPlugin.freshOpenMenuTupleMatches(
+				menu,
+				103L,
+				10_020L,
+				"plugin-session",
+				4321L,
+				new Point(150, 250),
+				"Bank",
+				"<col=ffff>Bank booth",
+				"GAME_OBJECT_FIRST_OPTION",
+				18491,
+				54,
+				63,
+				-1));
+
+		assertFalse(TelemetryPlugin.freshOpenMenuTupleMatches(
+				menu,
+				101L,
+				10_020L,
+				"plugin-session",
+				4321L,
+				new Point(150, 250),
+				"Top-floor",
+				"<col=ffff>Bank booth",
+				"GAME_OBJECT_FIRST_OPTION",
+				18491,
+				54,
+				63,
+				-1));
+	}
+
+	@Test
+	public void freshContextMenuRowTakesPrecedenceOverOverlappingObjectGeometry()
+	{
+		assertEquals("context_menu_row", TelemetryPlugin.tileObjectActivationKind(true, true));
+		assertEquals("context_menu_row", TelemetryPlugin.tileObjectActivationKind(false, true));
+		assertEquals("object_geometry", TelemetryPlugin.tileObjectActivationKind(true, false));
+		assertEquals("unverified", TelemetryPlugin.tileObjectActivationKind(false, false));
+	}
+
 	@Test
 	public void sensorFramePublishesDirectlyToLiveCache()
 	{
@@ -378,6 +600,7 @@ public class TelemetryPluginSensorContractTest
 		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("gameState")));
 		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("cameraViewport")));
 		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("welcomeScreen")));
+		assertTrue(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("textInputState")));
 		snapshot.gameState = null;
 		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of()));
 	}
@@ -403,5 +626,39 @@ public class TelemetryPluginSensorContractTest
 		aimPoint.x = 40;
 		assertFalse(TelemetryPlugin.tileProjectionActionable(true, true, true, polygon, aimPoint));
 		assertFalse(TelemetryPlugin.tileProjectionActionable(true, false, true, polygon, aimPoint));
+	}
+
+	@Test
+	public void walkClickPrefersSelectedSceneTileCorrelatedWithMenuParameters()
+	{
+		WorldPoint menu = new WorldPoint(3200, 3201, 0);
+		WorldPoint selected = new WorldPoint(3200, 3201, 0);
+		WorldPoint oldDestination = new WorldPoint(3198, 3198, 0);
+
+		Map<String, Object> payload = TelemetryPlugin.walkTargetPayload(
+				-1, 50, 51, menu, selected, new Point(50, 51), oldDestination);
+
+		assertEquals("walk_tile", payload.get("actionFamily"));
+		assertEquals("resolved", payload.get("resolution"));
+		assertEquals("exact", payload.get("confidence"));
+		assertEquals("selected_scene_tile_correlated_with_menu_params", payload.get("source"));
+		assertEquals(Boolean.TRUE, payload.get("selectedSceneTileMatchesMenuParams"));
+		assertEquals(3200, ((Map<?, ?>) payload.get("worldTile")).get("worldX"));
+	}
+
+	@Test
+	public void walkClickDoesNotMistakeStaleLocalDestinationForExactTarget()
+	{
+		WorldPoint menu = new WorldPoint(3205, 3206, 0);
+		WorldPoint staleSelected = new WorldPoint(3190, 3190, 0);
+		WorldPoint staleDestination = new WorldPoint(3191, 3191, 0);
+
+		Map<String, Object> payload = TelemetryPlugin.walkTargetPayload(
+				-1, 55, 56, menu, staleSelected, new Point(40, 40), staleDestination);
+
+		assertEquals("high", payload.get("confidence"));
+		assertEquals("menu_params", payload.get("source"));
+		assertEquals(Boolean.FALSE, payload.get("selectedSceneTileMatchesMenuParams"));
+		assertEquals(3205, ((Map<?, ?>) payload.get("worldTile")).get("worldX"));
 	}
 }

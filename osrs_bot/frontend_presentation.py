@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from .application import LifecycleState
 from .engine_frame import CleanupEvidence, EngineFrame
+from .observability import MAX_DURATION_MILLIS, WaitState
 
 if TYPE_CHECKING:
     from .operator_services import ConnectionSnapshot
@@ -24,7 +26,14 @@ class PresentationState(str, Enum):
     BLOCKED = "BLOCKED"
     SAFE_STOPPED = "SAFE_STOPPED"
     DISCONNECTED = "DISCONNECTED"
-    STALE = "STALE"
+    WAITING_FOR_NEXT_SCENE_UPDATE = WaitState.WAITING_FOR_NEXT_SCENE_UPDATE.value
+    WAITING_FOR_SOURCE_COHERENCE = WaitState.WAITING_FOR_SOURCE_COHERENCE.value
+    INPUT_TRANSACTION_BUSY = WaitState.INPUT_TRANSACTION_BUSY.value
+    CURSOR_FEEDBACK_SETTLING = WaitState.CURSOR_FEEDBACK_SETTLING.value
+    ARDUINO_HEALTH_STALE = WaitState.ARDUINO_HEALTH_STALE.value
+    ARDUINO_COMMAND_FAILED = WaitState.ARDUINO_COMMAND_FAILED.value
+    SENSOR_STALE = WaitState.SENSOR_STALE.value
+    PRESENTATION_FRAME_STALE = WaitState.PRESENTATION_FRAME_STALE.value
     ERROR = "ERROR"
 
 
@@ -68,6 +77,28 @@ class FrontendPresentation:
     terminal_outcome: object | None
     cleanup: CleanupEvidence | None
     reconnect_guidance: str | None
+    wait_elapsed_millis: int | None = None
+    display_state: PresentationState | None = None
+
+
+PRESENTATION_HYSTERESIS_MILLIS = 500
+_DEBOUNCED_DISPLAY_STATES = frozenset(
+    {
+        PresentationState.ARDUINO_HEALTH_STALE,
+        PresentationState.SENSOR_STALE,
+        PresentationState.PRESENTATION_FRAME_STALE,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PresentationHysteresisState:
+    """Immutable GUI-only debounce memory with no engine authority."""
+
+    run_id: str | None = None
+    displayed_state: PresentationState | None = None
+    pending_state: PresentationState | None = None
+    pending_since_monotonic: float | None = None
 
 
 _ACTIVE_LIFECYCLES = {
@@ -82,6 +113,138 @@ _TERMINAL_STATES = {
     PresentationState.BLOCKED,
     PresentationState.SAFE_STOPPED,
 }
+_CURRENT_SOURCE_WAIT_STATES = {
+    PresentationState.INPUT_TRANSACTION_BUSY,
+    PresentationState.CURSOR_FEEDBACK_SETTLING,
+    PresentationState.ARDUINO_HEALTH_STALE,
+    PresentationState.ARDUINO_COMMAND_FAILED,
+}
+_ARDUINO_HEALTH_PRESENTABLE_STATES = {
+    PresentationState.CONNECTING,
+    PresentationState.READY,
+    PresentationState.OBSERVING,
+    PresentationState.RUNNING,
+    PresentationState.PAUSED,
+}
+
+
+def apply_arduino_health_age(
+    presentation: FrontendPresentation,
+    readiness: object,
+    *,
+    now: datetime,
+) -> FrontendPresentation:
+    """Apply passive Arduino age from explicit timestamped readiness only.
+
+    This never changes a safety/start/geometry gate and never classifies from a
+    reason string.  Legacy readiness values without ``captured_at`` remain
+    readable and cannot be labeled stale without evidence.
+    """
+
+    if not isinstance(presentation, FrontendPresentation):
+        raise TypeError("presentation must be FrontendPresentation")
+    current_time = _aware_utc(now, "Arduino presentation time")
+    captured_at = getattr(readiness, "captured_at", None)
+    max_age_millis = getattr(readiness, "max_age_millis", None)
+    if captured_at is None or max_age_millis is None:
+        return presentation
+    if not isinstance(captured_at, datetime):
+        return presentation
+    if (
+        not isinstance(max_age_millis, int)
+        or isinstance(max_age_millis, bool)
+        or max_age_millis < 0
+    ):
+        return presentation
+    captured_time = _aware_utc(captured_at, "Arduino readiness timestamp")
+    age_millis = min(
+        MAX_DURATION_MILLIS,
+        int(max(0.0, (current_time - captured_time).total_seconds()) * 1_000),
+    )
+    if (
+        age_millis <= max_age_millis
+        or presentation.state not in _ARDUINO_HEALTH_PRESENTABLE_STATES
+    ):
+        return presentation
+    return replace(
+        presentation,
+        state=PresentationState.ARDUINO_HEALTH_STALE,
+        display_state=PresentationState.ARDUINO_HEALTH_STALE,
+        wait_elapsed_millis=age_millis,
+        reconnect_guidance=_reconnect_guidance(
+            PresentationState.ARDUINO_HEALTH_STALE
+        ),
+    )
+
+
+def apply_presentation_hysteresis(
+    presentation: FrontendPresentation,
+    history: PresentationHysteresisState,
+    *,
+    now_monotonic: float,
+) -> tuple[FrontendPresentation, PresentationHysteresisState]:
+    """Debounce only passive display faults while preserving exact state.
+
+    ``presentation.state`` and every gate remain untouched.  Only
+    ``display_state`` may retain the preceding display classification for a
+    fixed 500 ms.  Command/ACK failures and expected wait states bypass the
+    delay.  A run-ID change drops all prior display memory immediately.
+    """
+
+    if not isinstance(presentation, FrontendPresentation):
+        raise TypeError("presentation must be FrontendPresentation")
+    if not isinstance(history, PresentationHysteresisState):
+        raise TypeError("history must be PresentationHysteresisState")
+    if (
+        isinstance(now_monotonic, bool)
+        or not isinstance(now_monotonic, (int, float))
+        or not math.isfinite(now_monotonic)
+        or now_monotonic < 0
+    ):
+        raise ValueError("now_monotonic must be a finite non-negative number")
+    exact_state = presentation.state
+    now_value = float(now_monotonic)
+
+    if history.run_id != presentation.run_id:
+        updated = PresentationHysteresisState(
+            run_id=presentation.run_id,
+            displayed_state=exact_state,
+        )
+        return replace(presentation, display_state=exact_state), updated
+
+    if exact_state not in _DEBOUNCED_DISPLAY_STATES:
+        updated = PresentationHysteresisState(
+            run_id=presentation.run_id,
+            displayed_state=exact_state,
+        )
+        return replace(presentation, display_state=exact_state), updated
+
+    if history.displayed_state in _DEBOUNCED_DISPLAY_STATES:
+        updated = PresentationHysteresisState(
+            run_id=presentation.run_id,
+            displayed_state=exact_state,
+        )
+        return replace(presentation, display_state=exact_state), updated
+
+    pending_since = history.pending_since_monotonic
+    if pending_since is None:
+        pending_since = now_value
+    elapsed_millis = max(0.0, now_value - pending_since) * 1_000.0
+    if elapsed_millis >= PRESENTATION_HYSTERESIS_MILLIS:
+        updated = PresentationHysteresisState(
+            run_id=presentation.run_id,
+            displayed_state=exact_state,
+        )
+        return replace(presentation, display_state=exact_state), updated
+
+    displayed_state = history.displayed_state or exact_state
+    updated = PresentationHysteresisState(
+        run_id=presentation.run_id,
+        displayed_state=displayed_state,
+        pending_state=exact_state,
+        pending_since_monotonic=pending_since,
+    )
+    return replace(presentation, display_state=displayed_state), updated
 
 
 def classify_frontend_presentation(
@@ -251,6 +414,26 @@ def classify_frontend_presentation(
         else None
     )
     cleanup = frame.cleanup if frame is not None else None
+    observability = getattr(frame, "observability", None)
+    active_wait_state = getattr(observability, "wait_state", None)
+    if not isinstance(active_wait_state, WaitState):
+        active_wait_state = None
+    wait_elapsed_millis = (
+        getattr(observability, "wait_elapsed_millis", None)
+        if active_wait_state is not None
+        else None
+    )
+    if (
+        not isinstance(wait_elapsed_millis, int)
+        or isinstance(wait_elapsed_millis, bool)
+        or wait_elapsed_millis < 0
+    ):
+        wait_elapsed_millis = None
+    receipt = frame.last_execution_receipt if frame is not None else None
+    arduino_command_failed = bool(
+        active_wait_state is WaitState.ARDUINO_COMMAND_FAILED
+        or _receipt_has_command_failure(receipt)
+    )
 
     disconnected = bool(
         (connection_present and not connection_structurally_live)
@@ -273,9 +456,21 @@ def classify_frontend_presentation(
         and not identity_matches
         and lifecycle not in _ACTIVE_LIFECYCLES
     )
-    stale = bool(
-        (connection_structurally_live and connection_loaded and not connection_contract_fresh)
-        or (observation is not None and not frame_contract_fresh)
+    connection_sensor_stale = bool(
+        connection_structurally_live
+        and connection_loaded
+        and not connection_age_within_contract
+    )
+    source_coherence_wait = bool(
+        connection_structurally_live
+        and connection_loaded
+        and connection_age_within_contract
+        and not connection_contract_fresh
+    )
+    presentation_frame_stale = bool(
+        observation is not None
+        and connection_contract_fresh
+        and not frame_contract_fresh
     )
 
     recoverable_terminal_error = bool(
@@ -284,10 +479,12 @@ def classify_frontend_presentation(
         and connection_contract_fresh
     )
 
-    if disconnected:
+    if arduino_command_failed:
+        state = PresentationState.ARDUINO_COMMAND_FAILED
+    elif disconnected:
         state = PresentationState.DISCONNECTED
     elif run_mismatch:
-        state = PresentationState.STALE
+        state = PresentationState.PRESENTATION_FRAME_STALE
     elif (
         historical_identity and connection_contract_fresh
     ) or recoverable_terminal_error:
@@ -296,8 +493,14 @@ def classify_frontend_presentation(
         state = PresentationState.ERROR
     elif terminal_state is not None and not historical_identity:
         state = terminal_state
-    elif stale:
-        state = PresentationState.STALE
+    elif active_wait_state is not None:
+        state = PresentationState[active_wait_state.name]
+    elif connection_sensor_stale:
+        state = PresentationState.SENSOR_STALE
+    elif source_coherence_wait:
+        state = PresentationState.WAITING_FOR_SOURCE_COHERENCE
+    elif presentation_frame_stale:
+        state = PresentationState.PRESENTATION_FRAME_STALE
     elif lifecycle is LifecycleState.STARTING:
         state = PresentationState.CONNECTING
     elif lifecycle in {LifecycleState.PAUSED, LifecycleState.PAUSE_REQUESTED}:
@@ -327,6 +530,7 @@ def classify_frontend_presentation(
             PresentationState.OBSERVING,
             PresentationState.RUNNING,
             PresentationState.PAUSED,
+            *_CURRENT_SOURCE_WAIT_STATES,
         }
     )
     historical = bool(frame is not None and not current)
@@ -342,8 +546,15 @@ def classify_frontend_presentation(
         not in {
             PresentationState.CONNECTING,
             PresentationState.DISCONNECTED,
-            PresentationState.STALE,
             PresentationState.ERROR,
+            PresentationState.WAITING_FOR_NEXT_SCENE_UPDATE,
+            PresentationState.WAITING_FOR_SOURCE_COHERENCE,
+            PresentationState.INPUT_TRANSACTION_BUSY,
+            PresentationState.CURSOR_FEEDBACK_SETTLING,
+            PresentationState.ARDUINO_HEALTH_STALE,
+            PresentationState.ARDUINO_COMMAND_FAILED,
+            PresentationState.SENSOR_STALE,
+            PresentationState.PRESENTATION_FRAME_STALE,
         }
     )
 
@@ -389,6 +600,8 @@ def classify_frontend_presentation(
         terminal_outcome=terminal_outcome,
         cleanup=cleanup,
         reconnect_guidance=reconnect_guidance,
+        wait_elapsed_millis=wait_elapsed_millis,
+        display_state=state,
     )
 
 
@@ -462,17 +675,61 @@ def _dedupe_text(values: tuple[Any, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _receipt_has_command_failure(receipt: object) -> bool:
+    """Use typed receipt/ledger facts only; never classify from message text."""
+
+    if receipt is None:
+        return False
+    receipt_observability = getattr(receipt, "observability", None)
+    if (
+        getattr(receipt_observability, "wait_state", None)
+        is WaitState.ARDUINO_COMMAND_FAILED
+    ):
+        return True
+    for field_name in ("failed_command_count", "ack_missing_count"):
+        value = getattr(receipt, field_name, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return True
+    commands = getattr(receipt, "commands", ())
+    if not isinstance(commands, tuple):
+        return False
+    return any(
+        getattr(command, "status", None)
+        in {
+            "REJECTED",
+            "UNEXPECTED_RESPONSE",
+            "WRITE_FAIL",
+            "ACK_TIMEOUT_OR_READ_FAIL",
+        }
+        for command in commands
+    )
+
+
 def _reconnect_guidance(state: PresentationState) -> str | None:
     if state is PresentationState.DISCONNECTED:
         return (
             "Launch or reconnect RuneLite, then wait for one fresh coherent "
             "loaded Observation bound to the current PID/session."
         )
-    if state is PresentationState.STALE:
+    if state is PresentationState.WAITING_FOR_NEXT_SCENE_UPDATE:
+        return "Wait for the next fresh loaded-scene update from the bound source."
+    if state is PresentationState.WAITING_FOR_SOURCE_COHERENCE:
+        return "Wait for the bound telemetry sources to become coherent."
+    if state is PresentationState.INPUT_TRANSACTION_BUSY:
+        return "The existing input transaction is still in progress."
+    if state is PresentationState.CURSOR_FEEDBACK_SETTLING:
+        return "Wait for bounded cursor feedback settlement to finish."
+    if state is PresentationState.ARDUINO_HEALTH_STALE:
+        return "Refresh Arduino readiness; no command failure has been inferred."
+    if state is PresentationState.ARDUINO_COMMAND_FAILED:
+        return "Review the retained command ledger and acknowledgement failure."
+    if state is PresentationState.SENSOR_STALE:
         return (
-            "Refresh the RuneLite connection and wait for a fresh coherent "
-            "loaded Observation before starting live."
+            "Wait for a fresh coherent loaded Observation from the bound sensor "
+            "before starting live."
         )
+    if state is PresentationState.PRESENTATION_FRAME_STALE:
+        return "Wait for the GUI to receive a current EngineFrame for this run."
     if state is PresentationState.CONNECTING:
         return "Wait for an exact RuneLite PID/session and a fresh loaded Observation."
     if state is PresentationState.ERROR:

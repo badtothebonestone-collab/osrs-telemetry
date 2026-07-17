@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -9,9 +10,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
+from .behavior import BehaviorPolicy
 from .definition import LUMBRIDGE_WEST_TREES_V1
 from .demonstration import InspectionResult, inspect_demonstration, record_live
+from .demonstration_review import build_demonstration_review
 from .engine_frame import EngineFrame, EngineFramePublisher
+from .live_evidence import LiveRunEvidenceRecorder
 from .observation import ObservationClient
 from .operator_services import (
     ArduinoReadiness,
@@ -117,6 +121,8 @@ class DemonstrationReference:
     valid: bool
     status: str
     errors: tuple[str, ...]
+    stop_reason: str | None = None
+    requested_duration_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +130,8 @@ class DemonstrationReference:
             "valid": self.valid,
             "status": self.status,
             "errors": list(self.errors),
+            "stopReason": self.stop_reason,
+            "requestedDurationSeconds": self.requested_duration_seconds,
         }
 
 
@@ -174,6 +182,7 @@ class ApplicationSnapshot:
     recent_demonstration: DemonstrationReference | None
     started_at: datetime | None
     finished_at: datetime | None
+    live_evidence_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +221,11 @@ class ApplicationSnapshot:
             "finishedAtUtc": (
                 self.finished_at.isoformat()
                 if self.finished_at is not None
+                else None
+            ),
+            "liveEvidencePath": (
+                str(self.live_evidence_path)
+                if self.live_evidence_path is not None
                 else None
             ),
         }
@@ -271,7 +285,13 @@ def _default_runtime_factory(
     execute: bool,
     control: RuntimeControl,
 ) -> TaskRuntime:
-    task = WoodcutBankTask(binding)
+    task = WoodcutBankTask(
+        binding,
+        behavior=BehaviorPolicy(
+            configuration.behavior,
+            camera_capabilities=configuration.camera_key_capabilities,
+        ),
+    )
     return build_runtime(
         client,
         task,
@@ -344,6 +364,7 @@ class EngineApplication:
         self._connection_snapshot: ConnectionSnapshot | None = None
         self._run_process_id: int | None = None
         self._run_session_id: str | None = None
+        self._live_evidence: LiveRunEvidenceRecorder | None = None
 
     @staticmethod
     def list_tasks() -> tuple[TaskDescriptor, ...]:
@@ -464,6 +485,12 @@ class EngineApplication:
     def inspect_demonstration(self, path: Path | str) -> InspectionResult:
         return self._demonstration_inspector(path)
 
+    def review_demonstration(self, path: Path | str) -> Mapping[str, object]:
+        """Inspect an artifact and add current-definition review data ephemerally."""
+
+        inspection = self.inspect_demonstration(path)
+        return build_demonstration_review(inspection, LUMBRIDGE_WEST_TREES_V1)
+
     def diagnostics(self) -> OperatorDiagnostics:
         return self._operator_services.collect_diagnostics()
 
@@ -513,11 +540,16 @@ class EngineApplication:
         task_id: str = SUPPORTED_TASK_ID,
         profile_values: Mapping[str, object] | None = None,
         execute: bool = False,
+        live_evidence_root: Path | None = None,
     ) -> ApplicationSnapshot:
         if task_id != SUPPORTED_TASK_ID:
             raise ApplicationError(f"unsupported task_id: {task_id!r}")
         if not isinstance(execute, bool):
             raise TypeError("execute must be bool")
+        if live_evidence_root is not None and not isinstance(live_evidence_root, Path):
+            raise TypeError("live_evidence_root must be Path or None")
+        if live_evidence_root is not None and not execute:
+            raise ValueError("live evidence is available only for production runs")
         values = (
             {
                 "profileId": DEFAULT_PROFILE.profile_id,
@@ -531,11 +563,22 @@ class EngineApplication:
         self._configuration.validated_for_mode(execute=execute)
         with self._lock:
             self._require_idle_unlocked()
+            run_configuration = self._configuration
+            if run_configuration.behavior.seed is None:
+                run_configuration = replace(
+                    run_configuration,
+                    behavior=replace(
+                        run_configuration.behavior,
+                        seed=secrets.randbits(63),
+                    ),
+                )
+            behavior_seed = run_configuration.behavior.seed
+            assert behavior_seed is not None
             control = RuntimeControl()
             runtime = self._runtime_factory(
                 self._client,
                 binding,
-                self._configuration,
+                run_configuration,
                 bool(execute),
                 control,
             )
@@ -564,6 +607,21 @@ class EngineApplication:
                 if connection is not None and connection.exact_process_binding
                 else None
             )
+            recorder = (
+                LiveRunEvidenceRecorder(
+                    output_root=live_evidence_root,
+                    run_id=run_id,
+                    started_at=self._started_at,
+                    profile_id=binding.profile.profile_id,
+                    definition_id=binding.profile.definition_id,
+                    configured_behavior_seed=self._configuration.behavior.seed,
+                    behavior_seed=behavior_seed,
+                    publisher=runtime.frame_publisher,
+                )
+                if live_evidence_root is not None
+                else None
+            )
+            self._live_evidence = recorder
             worker = threading.Thread(
                 target=self._run_worker,
                 args=(
@@ -572,6 +630,7 @@ class EngineApplication:
                     bool(execute),
                     self._run_process_id,
                     self._run_session_id,
+                    recorder,
                 ),
                 name=f"osrs-engine-{run_id}",
                 daemon=False,
@@ -655,7 +714,7 @@ class EngineApplication:
         *,
         output_root: Path = Path("demo_runs"),
         duration_seconds: float = 60.0,
-        poll_seconds: float = 0.05,
+        poll_seconds: float = 0.2,
         annotations: tuple[str, ...] = (),
         screenshots_enabled: bool = True,
     ) -> ApplicationSnapshot:
@@ -794,6 +853,7 @@ class EngineApplication:
         execute: bool,
         expected_process_id: int | None,
         expected_session_id: str | None,
+        recorder: LiveRunEvidenceRecorder | None,
     ) -> None:
         result: RuntimeResult | None = None
         error: str | None = None
@@ -809,11 +869,20 @@ class EngineApplication:
         except BaseException as raised:
             error = f"{type(raised).__name__}: {raised}"
             runtime.record_worker_failure(error)
+        finished_at = datetime.now(timezone.utc)
+        if recorder is not None:
+            recorder.finish(
+                result=result,
+                statistics=runtime.statistics(),
+                worker_error=error,
+                finished_at=finished_at,
+                final_frame=runtime.frame_publisher.latest(),
+            )
         with self._lock:
             if self._run_id == run_id:
                 self._run_result = result
                 self._run_error = error
-                self._finished_at = datetime.now(timezone.utc)
+                self._finished_at = finished_at
 
     def _demo_worker(
         self,
@@ -992,6 +1061,8 @@ class EngineApplication:
                     self._demo_inspection.valid,
                     self._demo_inspection.status,
                     self._demo_inspection.errors,
+                    self._demo_inspection.stop_reason,
+                    self._demo_inspection.requested_duration_seconds,
                 )
                 if self._demo_path is not None
                 and self._demo_inspection is not None
@@ -999,6 +1070,11 @@ class EngineApplication:
             ),
             started_at=self._started_at,
             finished_at=self._finished_at,
+            live_evidence_path=(
+                self._live_evidence.directory
+                if self._live_evidence is not None
+                else None
+            ),
         )
 
     def _lifecycle_unlocked(

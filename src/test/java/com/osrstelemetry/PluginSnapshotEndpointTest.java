@@ -13,6 +13,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 
@@ -47,9 +53,71 @@ public class PluginSnapshotEndpointTest
 		assertEquals(List.of("GET /health", "GET /schema", "POST /snapshot"), schema.get("endpoints"));
 		assertEquals(List.of("hot"), schema.get("snapshotTiers"));
 		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(PluginSnapshotEndpoint.RESPONSE_SCHEMA));
+		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(
+				ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA));
+		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(
+				PluginSnapshotEndpoint.ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA));
 		assertTrue(((List<?>) schema.get("requestControls")).contains("maxClickedSamples"));
+		assertTrue(((List<?>) schema.get("requestControls")).contains("disableCameraInputCapture"));
+		assertEquals(
+				CameraInputCapture.CAPTURE_LEASE_MILLIS,
+				((Map<?, ?>) schema.get("configLimits")).get("cameraInputCaptureLeaseMillis"));
+		assertEquals(
+				PluginSnapshotEndpoint.ENDPOINT_WORKER_LIMIT,
+				((Map<?, ?>) schema.get("configLimits")).get("endpointWorkerLimit"));
+		assertEquals(
+				PluginSnapshotEndpoint.ENDPOINT_PENDING_CAPACITY,
+				((Map<?, ?>) schema.get("configLimits")).get("endpointPendingCapacity"));
 		assertTrue(((List<?>) schema.get("worldModelQueryControls")).contains("worldModel.maxActors"));
+		assertTrue(((List<?>) schema.get("worldModelQueryControls")).contains("worldModel.priorityObjectIds"));
+		assertEquals(
+				ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				schema.get("clientThreadQueryDiagnosticsSchema"));
 		assertTrue(String.valueOf(schema.get("readOnlyStatement")).contains("no configuration"));
+	}
+
+	@Test
+	public void boundedSnapshotEncodesTwiceAndReusesExactFinalBytes()
+	{
+		PluginSnapshotEndpoint.EncodedResponse encoded = endpoint(canonicalCache())
+				.encodedSnapshotResponse(request("baseline"));
+		Map<String, Object> payload = encoded.payload();
+		Map<?, ?> sizing = (Map<?, ?>) payload.get("responseSizing");
+		JsonObject decoded = gson.fromJson(
+				new String(encoded.body(), StandardCharsets.UTF_8),
+				JsonObject.class);
+
+		assertEquals(2, encoded.serializationPasses());
+		assertEquals(200, encoded.httpStatus());
+		assertEquals(encoded.body().length, ((Number) payload.get("estimatedResponseBytes")).intValue());
+		assertEquals(encoded.body().length, ((Number) sizing.get("estimatedResponseBytes")).intValue());
+		assertEquals(2, sizing.get("serializationPasses"));
+		assertEquals(true, sizing.get("serializedBytesReusedForWrite"));
+		assertEquals(gson.toJsonTree(payload), decoded);
+	}
+
+	@Test
+	public void oversizedSnapshotStillUsesOnlyTwoBoundedSerializationPasses()
+	{
+		SensorFrame largeFrame = completeFrame(
+				"large-frame",
+				SOURCE_TICK,
+				SESSION_ID,
+				CLIENT_PROCESS_ID,
+				GEOMETRY_FRAME_ID,
+				Map.of("gameState", "LOGGED_IN", "denseEvidence", "x".repeat(20_000)));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cacheWithFrame(largeFrame), gson, "127.0.0.1", 0, "", 50, 8 * 1024, false);
+
+		PluginSnapshotEndpoint.EncodedResponse encoded = endpoint.encodedSnapshotResponse(request("baseline"));
+		Map<?, ?> sizing = (Map<?, ?>) encoded.payload().get("responseSizing");
+
+		assertEquals(413, encoded.httpStatus());
+		assertEquals(2, encoded.serializationPasses());
+		assertEquals("response_too_large", encoded.payload().get("errorCode"));
+		assertTrue(((Number) encoded.payload().get("estimatedResponseBytes")).intValue() > 8 * 1024);
+		assertEquals(2, sizing.get("serializationPasses"));
+		assertEquals(true, sizing.get("serializedBytesReusedForWrite"));
 	}
 
 	@Test
@@ -215,7 +283,7 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
-	public void clientTickTailNeedReturnsAllThreeBoundedLanesWithDropEvidence()
+	public void clientTickTailNeedReturnsAllFourBoundedLanesWithDropEvidence()
 	{
 		ClientTickHotState hot = new ClientTickHotState(2);
 		for (long tick = 1L; tick <= 3L; tick++)
@@ -223,6 +291,7 @@ public class PluginSnapshotEndpointTest
 			hot.recordClientTick(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK));
 			hot.recordPostMenuSort(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "topOption", "Option " + tick));
 			hot.recordMenuOptionClicked(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "option", "Click " + tick));
+			hot.recordCameraInput(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "control", "W"));
 		}
 		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
 				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false, hot);
@@ -230,6 +299,7 @@ public class PluginSnapshotEndpointTest
 		request.addProperty("maxClientTickSamples", 99);
 		request.addProperty("maxMenuSamples", 99);
 		request.addProperty("maxClickedSamples", 99);
+		request.addProperty("maxCameraInputSamples", 99);
 
 		Map<String, Object> response = endpoint.snapshotPayload(request);
 		JsonObject tail = jsonObject(response.get("payloads")).getAsJsonObject("client_tick_tail");
@@ -238,14 +308,59 @@ public class PluginSnapshotEndpointTest
 		assertEquals(2, tail.getAsJsonArray("clientTickTail").size());
 		assertEquals(2, tail.getAsJsonArray("postMenuSortTail").size());
 		assertEquals(2, tail.getAsJsonArray("clickedTail").size());
-		assertEquals(4L, tail.getAsJsonArray("clientTickTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
-		assertEquals(5L, tail.getAsJsonArray("postMenuSortTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
-		assertEquals(6L, tail.getAsJsonArray("clickedTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(2, tail.getAsJsonArray("cameraInputTail").size());
+		assertEquals(5L, tail.getAsJsonArray("clientTickTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(6L, tail.getAsJsonArray("postMenuSortTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(7L, tail.getAsJsonArray("clickedTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(8L, tail.getAsJsonArray("cameraInputTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
 		JsonObject latency = tail.getAsJsonObject("latency");
-		assertEquals(3L, latency.get("droppedSamples").getAsLong());
+		assertEquals(4L, latency.get("droppedSamples").getAsLong());
 		assertEquals(1L, latency.get("droppedClientTickSamples").getAsLong());
 		assertEquals(1L, latency.get("droppedPostMenuSortSamples").getAsLong());
 		assertEquals(1L, latency.get("droppedClickedSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedCameraInputSamples").getAsLong());
+	}
+
+	@Test
+	public void onlyExplicitCameraSampleRequestsRenewAndExplicitDisableWins()
+	{
+		AtomicInteger renewals = new AtomicInteger();
+		AtomicInteger disables = new AtomicInteger();
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4));
+		endpoint.setCameraInputCaptureLeaseControls(
+				renewals::incrementAndGet,
+				disables::incrementAndGet);
+
+		endpoint.snapshotPayload(request("baseline"));
+		JsonObject zero = request("client_tick_tail");
+		zero.addProperty("maxClientTickSamples", 4);
+		zero.addProperty("maxCameraInputSamples", 0);
+		endpoint.snapshotPayload(zero);
+		JsonObject stringValue = request("client_tick_tail");
+		stringValue.addProperty("maxCameraInputSamples", "4");
+		endpoint.snapshotPayload(stringValue);
+		assertEquals(0, renewals.get());
+		assertEquals(0, disables.get());
+
+		JsonObject enabled = request("client_tick_tail");
+		enabled.addProperty("maxCameraInputSamples", 4);
+		endpoint.snapshotPayload(enabled);
+		endpoint.snapshotPayload(enabled);
+		assertEquals(2, renewals.get());
+
+		JsonObject disabled = request("client_tick_tail");
+		disabled.addProperty("maxCameraInputSamples", 4);
+		disabled.addProperty("disableCameraInputCapture", true);
+		endpoint.snapshotPayload(disabled);
+		assertEquals(2, renewals.get());
+		assertEquals(1, disables.get());
+
+		JsonObject stringDisable = request("baseline");
+		stringDisable.addProperty("disableCameraInputCapture", "true");
+		endpoint.snapshotPayload(stringDisable);
+		assertEquals(1, disables.get());
 	}
 
 	@Test
@@ -269,6 +384,66 @@ public class PluginSnapshotEndpointTest
 		assertEquals(CLIENT_PROCESS_ID, sceneCensus.get("clientProcessId").getAsLong());
 		assertEquals(GEOMETRY_FRAME_ID, sceneCensus.get("geometryFrameId").getAsString());
 		Instant.parse(sceneCensus.get("capturedAtUtc").getAsString());
+	}
+
+	@Test
+	public void compactWorldModelEnvelopeRetainsClientThreadQueryDiagnostics()
+	{
+		PluginLiveCache cache = canonicalCache();
+		Map<String, Object> providerResponse = new java.util.LinkedHashMap<>(worldModelResponse(
+				SOURCE_TICK,
+				GEOMETRY_FRAME_ID,
+				Map.of("scene_object_census", Map.of("objects", List.of()))));
+		providerResponse.put("queryDiagnostics", Map.of(
+				"schema", ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				"requestStatus", "SUCCESS",
+				"activeRequestCount", 0,
+				"pendingRequestCount", 0));
+		providerResponse.put("pipeline", Map.of(
+				"scannedTiles", 81,
+				"discoveredObjects", 14,
+				"enrichedObjects", 6));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cache, gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null, (needs, request) -> providerResponse);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+		JsonObject worldModel = jsonObject(response.get("worldModel"));
+		JsonObject diagnostics = worldModel.getAsJsonObject("queryDiagnostics");
+		JsonObject pipeline = worldModel.getAsJsonObject("pipeline");
+
+		assertEquals(ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA, diagnostics.get("schema").getAsString());
+		assertEquals("SUCCESS", diagnostics.get("requestStatus").getAsString());
+		assertEquals(0, diagnostics.get("activeRequestCount").getAsInt());
+		assertEquals(0, diagnostics.get("pendingRequestCount").getAsInt());
+		assertEquals(81, pipeline.get("scannedTiles").getAsInt());
+		assertEquals(14, pipeline.get("discoveredObjects").getAsInt());
+		assertEquals(6, pipeline.get("enrichedObjects").getAsInt());
+	}
+
+	@Test
+	public void queryDiagnosticsSurviveWorldModelProvenanceRejection()
+	{
+		Map<String, Object> providerResponse = new java.util.LinkedHashMap<>(worldModelResponse(
+				SOURCE_TICK - 1L,
+				GEOMETRY_FRAME_ID,
+				Map.of("scene_object_census", Map.of("objects", List.of()))));
+		providerResponse.put("queryDiagnostics", Map.of(
+				"schema", ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				"requestStatus", "LATE",
+				"lateResultCount", 1L));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null, (needs, request) -> providerResponse);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+		Map<?, ?> sizing = (Map<?, ?>) response.get("responseSizing");
+		Map<?, ?> diagnostics = (Map<?, ?>) sizing.get("worldModelQueryDiagnostics");
+
+		assertFalse(response.containsKey("worldModel"));
+		assertEquals(ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA, diagnostics.get("schema"));
+		assertEquals("LATE", diagnostics.get("requestStatus"));
+		assertEquals(1L, diagnostics.get("lateResultCount"));
 	}
 
 	@Test
@@ -455,6 +630,68 @@ public class PluginSnapshotEndpointTest
 		}
 		finally
 		{
+			endpoint.close();
+		}
+	}
+
+	@Test
+	public void concurrentSnapshotOverloadFailsFastWithBoundedQueueDiagnostics() throws Exception
+	{
+		CountDownLatch providerEntered = new CountDownLatch(1);
+		CountDownLatch releaseProvider = new CountDownLatch(1);
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) ->
+				{
+					providerEntered.countDown();
+					try
+					{
+						if (!releaseProvider.await(2, TimeUnit.SECONDS))
+						{
+							throw new IllegalStateException("test provider release timed out");
+						}
+					}
+					catch (InterruptedException e)
+					{
+						Thread.currentThread().interrupt();
+						throw new IllegalStateException("test provider interrupted", e);
+					}
+					return worldModelResponse(
+							SOURCE_TICK,
+							GEOMETRY_FRAME_ID,
+							Map.of("scene_object_census", Map.of("objects", List.of())));
+				});
+		ExecutorService clients = Executors.newSingleThreadExecutor();
+		endpoint.start();
+		try
+		{
+			Future<Integer> first = clients.submit(() -> httpStatus(
+					endpoint,
+					"POST",
+					"/snapshot",
+					"{\"needs\":[\"scene_object_census\"]}"));
+			assertTrue(providerEntered.await(2, TimeUnit.SECONDS));
+
+			assertEquals(503, httpStatus(
+					endpoint,
+					"POST",
+					"/snapshot",
+					"{\"needs\":[\"scene_object_census\"]}"));
+			Map<String, Object> diagnostics = endpoint.endpointQueueDiagnostics();
+			assertEquals(PluginSnapshotEndpoint.ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA, diagnostics.get("schema"));
+			assertEquals(PluginSnapshotEndpoint.ENDPOINT_WORKER_LIMIT, diagnostics.get("workerLimit"));
+			assertEquals(PluginSnapshotEndpoint.ENDPOINT_PENDING_CAPACITY, diagnostics.get("pendingCapacity"));
+			assertEquals(1L, diagnostics.get("snapshotBusyRejectionCount"));
+			assertTrue((Boolean) diagnostics.get("snapshotRequestActive"));
+
+			releaseProvider.countDown();
+			assertEquals(200, (int) first.get(2, TimeUnit.SECONDS));
+		}
+		finally
+		{
+			releaseProvider.countDown();
+			clients.shutdownNow();
 			endpoint.close();
 		}
 	}

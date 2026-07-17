@@ -15,6 +15,7 @@ from PIL import Image, ImageChops, ImageGrab, ImageMath, ImageStat
 
 from .input_coordinator import (
     ApprovedPointerIntent,
+    CursorInvalidationCause,
     InputCoordinator,
     InputFailureKind,
     InputPurpose,
@@ -1146,6 +1147,14 @@ class LoginPromptHelper:
             receipt.status == "BLOCKED"
             and receipt.failure_kind
             is InputFailureKind.CURSOR_STATE_INVALIDATED
+            and (
+                receipt.cursor_invalidation_cause
+                is CursorInvalidationCause.CURSOR_REACQUIRED
+                or (
+                    receipt.cursor_invalidation_cause is not None
+                    and receipt.cursor_invalidation_cause.recovery_eligible
+                )
+            )
             and receipt.backend_closed
             and (
                 receipt.safely_unsent

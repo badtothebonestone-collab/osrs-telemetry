@@ -12,6 +12,7 @@ from osrs_bot.arduino import (
     ArduinoHIDError,
     _ArduinoHIDTransport,
 )
+from osrs_bot.input_capabilities import InputCapabilities
 
 
 class _FakeSerial:
@@ -21,11 +22,13 @@ class _FakeSerial:
         *,
         write_error: Exception | None = None,
         close_error: Exception | None = None,
+        timeout: float = 2.0,
     ) -> None:
         self.responses = list(responses or [])
         self.write_error = write_error
         self.close_error = close_error
         self.writes: list[bytes] = []
+        self.timeout = timeout
 
     def write(self, value: bytes) -> None:
         if self.write_error is not None:
@@ -47,6 +50,72 @@ def _backend(serial: _FakeSerial | None = None) -> _ArduinoHIDTransport:
     backend = _ArduinoHIDTransport(port="COM-test", serial_lock_enabled=False)
     backend._serial = serial
     return backend
+
+
+def _expanded_capabilities() -> InputCapabilities:
+    return InputCapabilities.from_negotiation(
+        {"protocol": "arduino_hid.v2", "version": "2.0.0"},
+        {
+            "schema": "input_capabilities.v2",
+            "protocol": "arduino_hid.v2",
+            "firmwareVersion": "2.0.0",
+            "pointer": True,
+            "mouse": True,
+            "relativeMove": True,
+            "maxMoveDelta": 20,
+            "buttons": "left,right,middle",
+            "buttonDownUp": True,
+            "click": True,
+            "maxClickHoldMs": 250,
+            "keyboard": True,
+            "keys": "basic",
+            "keyPress": True,
+            "maxKeyPressMs": 250,
+            "holdKeys": True,
+            "maxHoldKeysMs": 250,
+            "cameraKeyHold": True,
+            "cameraKeys": "left,right,up,down",
+            "maxCameraHoldMs": 600,
+            "wheel": True,
+            "maxWheelStep": 3,
+            "arm": True,
+            "watchdog": True,
+            "watchdogMs": 1000,
+            "stopAll": True,
+            "disarm": True,
+            "status": True,
+            "resetSafe": True,
+        },
+        {
+            "armed": False,
+            "keysDown": 0,
+            "mouseButtonsDown": 0,
+            "watchdogMs": 1000,
+        },
+    )
+
+
+def _legacy_capabilities() -> InputCapabilities:
+    return InputCapabilities.from_negotiation(
+        {"protocol": "arduino_hid.v1", "version": "1.0.0"},
+        {
+            "mouse": True,
+            "keyboard": True,
+            "relativeMove": True,
+            "buttons": "left,right,middle",
+            "keys": "basic",
+            "holdKeys": True,
+            "watchdog": True,
+            "stopAll": True,
+            "resetSafe": True,
+        },
+        {
+            "armed": False,
+            "keysDown": 0,
+            "mouseButtonsDown": 0,
+            "watchdogMs": 1000,
+        },
+    )
 
 
 class _FakeWinFunction:
@@ -1178,6 +1247,36 @@ class ArduinoCommandLedgerTests(unittest.TestCase):
             {"responseToken": "PONG", "payloadToken": "PONG"},
             record["firmwareAck"],
         )
+        self.assertIsInstance(record["writeDurationMillis"], int)
+        self.assertIsInstance(record["acknowledgementDurationMillis"], int)
+        self.assertGreaterEqual(record["writeDurationMillis"], 0)
+        self.assertGreaterEqual(record["acknowledgementDurationMillis"], 0)
+        self.assertLessEqual(record["writeDurationMillis"], 86_400_000)
+        self.assertLessEqual(
+            record["acknowledgementDurationMillis"], 86_400_000
+        )
+        encoded = json.dumps(record, sort_keys=True)
+        for private_field in (
+            "ackLine",
+            "serialOwner",
+            "sessionToken",
+            "lockPayload",
+            "commandBytes",
+        ):
+            self.assertNotIn(private_field, encoded)
+
+    def test_public_command_durations_are_bounded_without_raw_payloads(self) -> None:
+        backend = _backend(_FakeSerial([b"PONG\n"]))
+        backend._begin_command_ledger()
+        backend._send("PING", expected_token="PONG")
+        backend._command_ledger_records[1]["writeDurationMs"] = -50
+        backend._command_ledger_records[1]["ackDurationMs"] = 999_999_999
+
+        record = backend._end_command_ledger()["records"][0]
+
+        self.assertEqual(0, record["writeDurationMillis"])
+        self.assertEqual(86_400_000, record["acknowledgementDurationMillis"])
+        self.assertNotIn("PONG\n", json.dumps(record, sort_keys=True))
 
     def test_transaction_ledger_does_not_truncate_long_command_sequences(self) -> None:
         backend = _backend(_FakeSerial([b"PONG\n"] * 40))
@@ -1215,6 +1314,12 @@ class ArduinoCommandLedgerTests(unittest.TestCase):
 
         self.assertEqual("ACK_TIMEOUT_OR_READ_FAIL", evidence["records"][0]["status"])
         self.assertFalse(evidence["records"][0]["ackReceived"])
+        self.assertIsInstance(
+            evidence["records"][0]["acknowledgementDurationMillis"], int
+        )
+        self.assertGreaterEqual(
+            evidence["records"][0]["acknowledgementDurationMillis"], 0
+        )
         self.assertEqual("STOP_ALL", evidence["records"][1]["command"])
         self.assertEqual("PASS", evidence["records"][1]["status"])
         self.assertEqual(
@@ -1328,6 +1433,175 @@ class ArduinoCommandLedgerTests(unittest.TestCase):
         evidence = backend._end_command_ledger()
         self.assertEqual([], evidence["records"])
         self.assertEqual(evidence, backend._command_evidence())
+
+    def test_camera_hold_uses_duration_aware_timeout_and_exact_ack(self) -> None:
+        serial = _FakeSerial(
+            [
+                b"OK CAMERA_HOLD direction=left requestedDurationMs=600 "
+                b"appliedDurationMs=600\n"
+            ],
+            timeout=2.0,
+        )
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _expanded_capabilities()
+        backend._begin_command_ledger()
+
+        result = backend._camera_hold("left", 600)
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual([b"CAMERA_HOLD left 600\n"], serial.writes)
+        self.assertEqual(600, result["requestedDurationMs"])
+        self.assertEqual(600, result["appliedDurationMs"])
+        self.assertEqual(1100, result["ackTimeoutMs"])
+        self.assertEqual(2.0, serial.timeout)
+        self.assertEqual("PASS", evidence["records"][0]["status"])
+        self.assertEqual(1100, backend._status.last_command_trace["readTimeoutMs"])
+
+    def test_camera_hold_mismatched_ack_fails_closed_and_stops_all(self) -> None:
+        serial = _FakeSerial(
+            [
+                b"OK CAMERA_HOLD direction=right requestedDurationMs=400 "
+                b"appliedDurationMs=399\n",
+                b"OK STOP_ALL\n",
+            ]
+        )
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _expanded_capabilities()
+        backend._begin_command_ledger()
+
+        with self.assertRaisesRegex(ArduinoHIDError, "did not exactly match"):
+            backend._camera_hold("right", 400)
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual(
+            [b"CAMERA_HOLD right 400\n", b"STOP_ALL\n"],
+            serial.writes,
+        )
+        self.assertFalse(backend._status.armed)
+        self.assertEqual(
+            ["CAMERA_HOLD", "STOP_ALL"],
+            [record["command"] for record in evidence["records"]],
+        )
+
+    def test_camera_hold_has_one_overall_ack_deadline_across_noise(self) -> None:
+        now = [0.0]
+
+        class SlowNoiseSerial(_FakeSerial):
+            def readline(inner_self) -> bytes:
+                raw = super(SlowNoiseSerial, inner_self).readline()
+                if raw.startswith(b"OK BOOT"):
+                    now[0] += 1.101
+                return raw
+
+        serial = SlowNoiseSerial(
+            [
+                b"OK BOOT armed=0 released=1 protocol=arduino_hid.v2\n",
+                b"OK STOP_ALL\n",
+            ]
+        )
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _expanded_capabilities()
+        backend._begin_command_ledger()
+
+        with (
+            patch.object(arduino_module.time, "monotonic", lambda: now[0]),
+            self.assertRaisesRegex(ArduinoHIDError, "overall ACK deadline"),
+        ):
+            backend._camera_hold("left", 600)
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual(
+            [b"CAMERA_HOLD left 600\n", b"STOP_ALL\n"],
+            serial.writes,
+        )
+        self.assertFalse(backend._status.armed)
+        self.assertEqual(1, backend._status.timeouts)
+        self.assertEqual(
+            ["CAMERA_HOLD", "STOP_ALL"],
+            [record["command"] for record in evidence["records"]],
+        )
+
+    def test_watchdog_stop_before_camera_ack_is_terminal(self) -> None:
+        serial = _FakeSerial(
+            [
+                b"OK WATCHDOG_STOP armed=0 released=1\n",
+                b"OK STOP_ALL\n",
+            ]
+        )
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _expanded_capabilities()
+        backend._begin_command_ledger()
+
+        with self.assertRaisesRegex(ArduinoHIDError, "unexpected response"):
+            backend._camera_hold("up", 100)
+        evidence = backend._end_command_ledger()
+
+        self.assertFalse(backend._status.armed)
+        self.assertEqual(
+            [b"CAMERA_HOLD up 100\n", b"STOP_ALL\n"],
+            serial.writes,
+        )
+        self.assertEqual("UNEXPECTED_RESPONSE", evidence["records"][0]["status"])
+
+    def test_signed_wheel_uses_exact_requested_and_applied_ack(self) -> None:
+        serial = _FakeSerial(
+            [b"OK WHEEL requestedAmount=-3 appliedAmount=-3\n"]
+        )
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _expanded_capabilities()
+        backend._begin_command_ledger()
+
+        result = backend._wheel(-3)
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual([b"WHEEL -3\n"], serial.writes)
+        self.assertEqual(-3, result["requestedAmount"])
+        self.assertEqual(-3, result["appliedAmount"])
+        self.assertEqual("PASS", evidence["records"][0]["status"])
+
+    def test_mismatched_wheel_ack_fails_closed_and_stops_all(self) -> None:
+        serial = _FakeSerial(
+            [
+                b"OK WHEEL requestedAmount=2 appliedAmount=1\n",
+                b"OK STOP_ALL\n",
+            ]
+        )
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _expanded_capabilities()
+        backend._begin_command_ledger()
+
+        with self.assertRaisesRegex(ArduinoHIDError, "did not exactly match"):
+            backend._wheel(2)
+        evidence = backend._end_command_ledger()
+
+        self.assertFalse(backend._status.armed)
+        self.assertEqual(
+            [b"WHEEL 2\n", b"STOP_ALL\n"],
+            serial.writes,
+        )
+        self.assertEqual(
+            ["WHEEL", "STOP_ALL"],
+            [record["command"] for record in evidence["records"]],
+        )
+
+    def test_new_host_with_legacy_firmware_blocks_new_operations_without_write(self) -> None:
+        serial = _FakeSerial()
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._negotiated_input_capabilities = _legacy_capabilities()
+
+        with self.assertRaisesRegex(ValueError, "camera_key_hold"):
+            backend._camera_hold("left", 100)
+        with self.assertRaisesRegex(ValueError, "wheel"):
+            backend._wheel(1)
+
+        self.assertEqual([], serial.writes)
 
 
 if __name__ == "__main__":

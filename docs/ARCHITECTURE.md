@@ -45,10 +45,10 @@ current column is implemented; the target column now names preservation rules.
 | Task | minimal `Task` protocol plus definition-bound concrete `WoodcutBankTask` FSM | preserve the protocol and explicit task-specific transitions |
 | Decision | opaque state/action plus immutable selected/eligible/rejected evidence from the actual task path | preserve this task-neutral evidence contract for frontends |
 | Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
-| Runtime configuration | immutable endpoint/Arduino/poll/bound values with engine caps | same contract consumed by every frontend |
-| Input | one `InputCoordinator`, deterministic pointer policy, private Arduino transport, immutable wire receipts | preserve the sole-owner boundary for every future caller |
+| Runtime configuration | immutable endpoint/Arduino/poll/bound values plus one bounded behavior policy and run seed | same contract consumed by every frontend |
+| Input | one `InputCoordinator`, seed-reproducible bounded pointer policy, private Arduino transport, immutable wire receipts | preserve the sole-owner boundary for every future caller |
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
-| Diagnostics | one immutable latest `EngineFrame` plus optional passive click-through overlay | preserve one no-authority status contract for recorder/frontend readers |
+| Diagnostics | one immutable latest `EngineFrame` with route/camera/target/pointer/timing evidence plus optional passive click-through overlay | preserve one no-authority status contract for recorder/frontend readers |
 | Demonstration evidence | bounded read-only recorder plus tamper-verifying semantic inspector | preserve append-only, no-replay, review-only evidence |
 | Frontend | tokenized `EngineApplication`, facade-only async GUI controller, Tkinter operator GUI, and diagnostic CLI | preserve one in-process facade with no GUI-owned domain or input authority |
 
@@ -61,12 +61,18 @@ blob:
 |---|---|---|
 | Profile | selected definition, bounded goals, supported preferences | engine safety switches, raw IDs/routes, endpoint or serial internals |
 | Task/site definition | versioned OSRS IDs, actions, areas, bank, route, transitions, predicates, provenance | mutable task state, hardware, runtime lifecycle |
-| Runtime configuration | endpoint, Arduino port, poll rate, hard limits | task meaning or weaker safety rules |
+| Runtime configuration | endpoint, Arduino port, poll rate, hard limits, behavior bounds and seed | task meaning or weaker safety rules |
 | Engine invariants | freshness, binding, focus, geometry, menu proof, PIN refusal, verification, cleanup | user-overridable options |
 
 The first implementation contains exactly one built-in Lumbridge definition and
 one default profile. Adding a definition does not create a generic planner: it
 provides validated facts to a still-explicit task FSM.
+
+`BehaviorConfig` and one run-scoped `BehaviorPolicy` own bounded route, camera,
+aim, pointer, and timing choices. A run seed plus stable decision IDs make those
+choices reproducible without global random state. Context-sensitive delays may
+vary pointer/click/camera pacing, but observations and typed game outcomes remain
+the primary waiting signals; arbitrary sleeps never replace state verification.
 
 ## Current implementation
 
@@ -91,10 +97,12 @@ stamped from its real post-menu-sort sample.
 The canonical adapter requests one neutral `scene_object_census`; the endpoint
 does not expose resource/route/service classifiers and Python ignores those
 retired payload names. Scene rows contain factual identity, actions, location,
-and projection only. Projection selection uses the explicit request, factual
-distance, and stable object key. Selected definitions assign resource, route,
-and bank meaning downstream. Dialogue capture is also structural: pinned
-RuneLite widget identities expose raw prompt/option facts, while exact
+and projection only. Optional definition-owned priority object IDs are ordering
+hints for projection work, never filters or classifiers; the census retains
+competing objects. Projection selection otherwise uses the explicit request,
+factual distance, and stable object key. Selected definitions assign resource,
+route, and bank meaning downstream. Dialogue capture is also structural:
+pinned RuneLite widget identities expose raw prompt/option facts, while exact
 staircase wording remains definition/task-owned.
 
 The same endpoint exposes demonstration-only bounded `client_tick_tail`,
@@ -134,15 +142,72 @@ the input preflight requires its exact `GetWindowRect` size, permits only a
 one-device-pixel AWT/native origin reconciliation for gameplay, and separately
 proves the exact canvas inside the actual Win32 client. Object aim points are
 likewise paired to authoritative geometry: the point must be inside the viewport
-and the first present API shape in clickbox -> convex hull -> canvas tile order. A present
-shape never falls through to weaker geometry, and `canvasLocation` alone is
-diagnostic unless that shape contains it.
+and the first present API shape in clickbox -> convex hull -> canvas tile order.
+The engine insets a fully visible shape. For a clipped or oversized authoritative
+shape it instead requires bounded visible overlap plus a safe interior aim that
+remains inside that same shape. Clipping never permits weaker-geometry fallthrough
+or broadening. UI-overlapped and competing regions remain excluded; the engine
+scores bounded interior candidates and selects among strong points with
+recorded-seed variation. `canvasLocation` alone is diagnostic unless the
+authoritative shape contains it. Fresh exact hover/menu evidence still vetoes
+the selected point before activation.
 
 `LOGGED_IN` alone is not loaded-scene proof. The plugin requires a local player
 and an explicitly absent Welcome to Gielinor panel before publishing
 `scenePlayable=true`; `Observation.loaded_scene` requires that bit as well.
 
 No downstream module reads raw JSON or a plugin cache.
+
+### Bounded telemetry and observation pipeline
+
+The scene path is a staged, bounded extension of the single sensor/Observation
+authority. Its full contract, benchmark method, and current limitations are in
+[`TELEMETRY_PIPELINE.md`](TELEMETRY_PIPELINE.md).
+
+```text
+phase-specific ObservationRequest
+  -> bounded endpoint admission
+  -> one-active / one-newest-pending client-thread scheduler
+  -> exact-source and raw-request-shape cache
+  -> player-centered or explicit-anchor tile window
+  -> definition-free identity census and deterministic duplicate quarantine
+  -> bounded selected-row definition/action enrichment
+  -> bounded returned-row projection
+  -> two-pass exact-size serialization
+  -> bounded host read, parse, and immutable SceneIndex
+  -> one Observation with census/pipeline evidence
+  -> task decision -> SafetyGate -> InputCoordinator
+```
+
+`WorldModelCache` retains at most four exact-source raw snapshots, 256 enriched
+rows and 128 projections per snapshot. Raw identity includes source tick,
+session, process, geometry frame, plane, scene base, dirty sequence, anchor,
+radius, and requested raw capabilities. Same-source requests with different
+priority ordering or smaller enrichment/projection budgets can reuse the raw
+census; any identity or raw-shape change refreshes it. No wall-clock TTL can
+force a redundant scan within the same source identity.
+
+RuneLite client-thread admission is globally bounded to one active and one
+newest pending query. Identical keys coalesce, newer distinct pending work
+supersedes the older request, expired work is discarded before execution, and a
+result arriving after its deadline is not accepted. The HTTP executor has four
+workers and eight pending slots, while only one expensive snapshot may be
+active; overlap returns retryable `503 endpoint_busy`. JSON encoding is exactly
+two passes and the final byte array is reused for the response write.
+
+Scene discovery captures immutable identity and location before it consults
+definitions, actions, or projection. Exact duplicate keys resolve
+deterministically. Contradictory identity signatures are quarantined whole, so
+no row can borrow geometry, actions, or projection from another object. Python
+performs a bounded read/parse and constructs one immutable `SceneIndex` for
+constant-time stable-key and preindexed object-ID lookup.
+
+Raw coverage completeness is distinct from response-row capping. Ordinary
+absence requires a complete raw census, no response omission, and no relevant
+contradiction. An exact requested priority key may prove its own absence from a
+complete raw census even when unrelated rows were capped. Incomplete, malformed,
+or contradictory evidence remains fail-closed; performance counters and timing
+are diagnostic only and never authorize activation.
 
 ### Task
 
@@ -175,13 +240,65 @@ predicates, tick expectations, and evidence provenance. The profile owns only
 the selected definition and one-cycle goal. Neither owns mutable FSM state or
 engine safety controls.
 
-The two definition routes are fixed tuples of walk targets and staircase
-interactions. Only the current walk target is requested from RuneLite. Missing
-projection evidence waits without input, and a present labeled projection with
-contradictory identity blocks. A stable exact target whose projection remains
-non-actionable may enter the definition-owned camera-recovery lane: shortest
-fixed-point yaw direction, 250 ms key hold, at most eight typed and verified
-camera-pose changes. No planner substitutes a route or camera strategy.
+The two definition routes remain exact tuples of classified guidance, mandatory
+turn/transition, and arrival evidence. The task projects a bounded lookahead and
+uses polyline progress, corridor deviation, turns, collision/scene support, and
+visibility to select the farthest useful supported point. Normal guidance may
+be skipped; mandatory turns, stair/door/plane transitions, and arrivals may not.
+Missing projection evidence waits without input, and a present labeled
+projection with contradictory identity blocks.
+
+The definition-owned camera lane is one task-owned, target-locked acquisition
+episode rather than a series of independent reactive pulses. It pins the exact
+object/tile/route identity, route index where applicable, session/PID, and client,
+canvas, and viewport rectangles. Normal candidate ranking cannot switch targets
+during that episode. Release requires invalid/depleted target state, lost
+authoritative identity, unsafe evidence, or exhaustion of the bounded non-
+improvement budget; a pinned-rectangle or process/session change invalidates
+instead of silently replanning against a different environment.
+
+The episode's final goal is a range: sufficient visible/clickbox ratio, target
+inside the configurable central region, required viewport-edge clearance,
+route-direction bias, valid pitch, and desired zoom class. Route framing keeps a
+controlled leading-edge allowance for supported long targets, while interaction
+framing remains stricter about clickbox clearance. World player-to-target bearing
+provides wrap-safe desired yaw even while the target is off-screen; current
+projection supplies yaw/pitch screen correction. An exact definition-owned Tree,
+bank booth, or route-transition may therefore enter acquisition before it is
+actionable, but activation still requires fresh authoritative final geometry and
+exact hover/menu proof.
+
+The default episode sends one coarse correction and at most one fine correction.
+Every typed key hold receives an acknowledged typed pose result, records its
+actual yaw/pitch delta and changed geometry-frame identity, and invalidates the
+prior projection. The task-retained bounded response model relates direction and
+requested duration to observed delta, no-effect/pose-limit, and overshoot, then
+selects the next hold from remaining error and measured rate. Left/right cannot
+reverse unless a fresh changed-geometry result proves overshoot. An unchanged-
+pose UP/DOWN limit suppresses that direction until pose changes. Materially
+unsatisfied zoom that prevents safe framing produces
+`zoom_required_but_unavailable` when no negotiated wheel capability exists and
+no compensating key loop.
+
+`CameraKeyCapabilities` is injected at runtime composition, while the sole
+coordinator independently requires the immutable capability negotiated from the
+device. Protocol `arduino_hid.v2` advertises a numeric 600 ms camera-only maximum
+under `cameraKeyHold`; the task response model may choose a duration only within
+that bound. Generic dialogue/interface key presses and retained multi-key
+transport behavior remain bounded to 250 ms. A legacy v1 device remains usable
+for pointer and short-key actions, but the new camera hold fails before
+activation because v1 cannot advertise it.
+
+When safe framing specifically requires zoom and v2 advertises `wheel=1`, the
+locked episode may request one semantic signed wheel step of magnitude at most
+three. This is not a generic wheel surface: the action retains the same locked
+target and pre-action pose/zoom/geometry, and `SafetyGate` must prove that the
+requested sign moves toward the configured desired zoom range. Unsafe or
+unknown interface/text-input state, missing geometry, absent capability, or a
+second still-required attempt returns the typed unavailable/blocking state.
+Camera framing does not randomize direction or safety bounds; downstream bounded
+aim variance remains inside geometry already accepted as safe. No planner
+substitutes a route or camera strategy outside the explicit task FSM.
 
 Staircases accept a live direct `Climb-up`/`Climb-down` action when it is the
 default. If the live default is generic `Climb`, the explicit `STAIR_DIALOGUE`
@@ -202,7 +319,8 @@ and never inspects mutable FSM progress.
 
 `SafetyGate` first checks non-overridable engine invariants: coherent/fresh
 source evidence, loaded scene, session/process/focus binding, source tick, PIN
-refusal, exact identity, geometry, canvas bounds, and menu provenance. It then
+refusal, exact identity, geometry, canvas bounds, the fixed 16-device-pixel
+gameplay pointer-safe viewport inset, and menu provenance. It then
 checks immutable task constraints carried by the action: expected interface
 state/plane/readability, exact dialogue choice, and permitted inventory. These
 constraints can only narrow an action. Bank plane and staircase wording are not
@@ -234,88 +352,133 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    `GetWindowRect`, bounds gameplay-only AWT/native origin quantization to one
    device pixel, and retains exact native outer/client plus telemetry-canvas
    geometry;
-4. if the cursor is outside the canvas, derives a neutral inset region inside
-   that canvas, opens and arms the same private Arduino transport, and performs
-   one movement-only cursor-reacquisition transaction. Protocol-safe ARM proves
-   zero firmware-held keys/buttons before its first MOVE. RuneLite never moves
-   or resizes, and no software cursor API, click, mouse button, or key is sent;
-5. during reacquisition, preserves the PMv2 virtual desktop, exact PID/root HWND,
+4. confines every ordinary gameplay waypoint, actual feedback/correction point,
+   transit point, settled point, and activation point to one engine-owned fixed
+   16-device-pixel inset of the authoritative viewport. The inset is already in
+   device pixels and is not scaled again for DPI. Ordinary gameplay receives one
+   initial trajectory plus at most two feedback-correction replans;
+5. exposes cursor reacquisition only as a separate geometry-only transaction.
+   That lane derives a neutral region inside the inset, opens and arms the same
+   private Arduino transport, and uses its distinct bounded movement allowance.
+   Protocol-safe ARM proves zero firmware-held keys/buttons before its first
+   MOVE. RuneLite never moves or resizes, and no software cursor API, click,
+   mouse button, or key is sent;
+6. during reacquisition, preserves the PMv2 virtual desktop, exact PID/root HWND,
    foreground ownership, unchanged outer/client/canvas geometry, physical-
    button release, direction/gain, and bounded velocity/acceleration on every
    sample. Foreign-surface transit is allowed only before canvas entry; every
    later point remains in the canvas and belongs to the pinned root;
-6. settles at the neutral canvas point, retains `cursorReacquisition` before/
+7. settles at the neutral canvas point, retains `cursorReacquisition` before/
    after cursor and geometry evidence, then always performs authoritative
    `STOP_ALL -> DISARM -> STATUS` cleanup and returns typed invalidation. The old
    action or login intent is discarded and can never activate merely because
    reacquisition succeeded;
-7. requires gameplay to obtain a strictly newer tick from the same PID/session
-   whose source is fresh, wall-clock-fresh, and coherent, with exact unchanged
-   geometry, or login to refetch telemetry, re-find the exact window, and
-   re-screen the full client. Target/prompt recognition and
-   normal SafetyGate validation run again. Login permits only two total cursor-
-   recovery attempts before an explicit manual-attention result;
-8. for every first MOVE, requires two identical PMv2 cursor samples one timestep
+8. permits this cycle only for a first typed `unexpected_direction`,
+   `unsupported_transfer_gain`, `unexpected_cross_axis`,
+   `outside_padded_viewport`, or `point_owner_mismatch`. It requires gameplay to
+   obtain a strictly newer tick from the same PID/session whose source is fresh,
+   wall-clock-fresh, and coherent, with exact unchanged geometry, then reruns
+   recognition and normal SafetyGate validation. The first executable retry
+   must be a pointer action. A repeated invalidation, changed PID/HWND or
+   geometry, physical input, cleanup failure, or unsent/non-pointer retry is
+   terminal. Login retains its separately bounded helper policy;
+9. for every first MOVE, requires two identical PMv2 cursor samples one timestep
    apart, then a fresh physical-button quiet proof and a final unchanged cursor/
    foreground sample, accepting a stationary manual position as current truth
    while typing continued motion or a late prior report as cursor invalidation;
-9. retains the canonical action identity/aim separately from the actual settled
-   cursor, selects bounded command-space waypoints toward the exact observed
-   screen point, runs the pure exact planner for each waypoint with bounded velocity,
-   acceleration, braking, four-sided transfer headroom, transaction-wide plan
-   and MOVE caps, and actual-feedback correction, then accepts only a complete-
-   plan settled endpoint inside the caller's explicit activation region;
-10. starts a monotonic clock before every serial MOVE and, when ordinary samples
-   lack any commanded axis, discards the trajectory and uses at most ten fixed
-   20 ms no-input polls; the full cumulative effect must be observed by 200 ms
-   and two later identical whole-cursor samples by 240 ms, with pinned
-   focus/ownership, bounds, direction, gain, and uncommanded-axis proof on every
-   extended sample, then physical-button quiet plus a final unchanged owned
-   sample before a fresh plan; unresolved or invalid evidence becomes typed
-   cursor-state invalidation and can never be stacked with another command;
-11. passes that actual stable device-pixel endpoint to the caller's
-   lane-specific validator under a checked firmware-watchdog lease; if that
-   validator outlives the lease, performs at most one explicit safe rearm and
-   reruns the same semantic validator, while a second expiry blocks input;
-12. for pointer lanes, repeatedly requires quiet physical buttons and exact
-   `WindowFromPoint` root ownership around the newer menu/widget proof; typed
-   key lanes instead require their exact camera/interface/dialogue constraint;
-13. when the exact action is a unique lower context entry, opens the menu,
-   derives that row from RuneLite menu geometry, moves to it, revalidates the
-   fresh open-menu sample and pointer, and clicks it once;
-14. otherwise clicks the exact default entry or submits the one approved key,
-    then uses a bounded source-blind attribution window and two all-clear
-    samples for the acknowledged Windows button transition; same-button human
-    input during that window remains inherently best effort;
-15. records each command and firmware acknowledgement without truncation plus
+10. retains the canonical action identity/aim separately from the actual settled
+    cursor, selects bounded seed-reproducible curved command-space waypoints
+    toward the chosen point, and uses distance, target size, context, and screen
+    bounds for velocity, acceleration, braking, approach, and duration. Each
+    ordinary plan remains inside the pointer-safe inset, then accepts only a
+    complete-plan settled endpoint inside the explicit activation region;
+11. starts a monotonic clock before every serial MOVE and, when ordinary samples
+    lack any commanded axis, discards the trajectory and uses at most ten fixed
+    20 ms no-input polls; the full cumulative effect must be observed by 200 ms
+    and two later identical whole-cursor samples by 240 ms, with pinned
+    focus/ownership, bounds, direction, gain, and uncommanded-axis proof on every
+    extended sample, then physical-button quiet plus a final unchanged owned
+    sample before a fresh plan; unresolved or invalid evidence becomes typed
+    cursor-state invalidation and can never be stacked with another command;
+12. passes that actual stable device-pixel endpoint to the caller's lane-specific
+    validator under a checked firmware-watchdog lease; if that validator outlives
+    the lease, performs at most one explicit safe rearm and reruns the same
+    semantic validator, while a second expiry blocks input;
+13. for pointer lanes, repeatedly requires quiet physical buttons and exact
+    `WindowFromPoint` root ownership around the newer menu/widget proof; typed
+    key lanes instead require their exact camera/interface/dialogue constraint;
+14. when the exact action is a unique lower context entry, opens the menu,
+    derives that row from RuneLite menu geometry, moves to it, revalidates the
+    fresh open-menu sample and pointer, and clicks it once;
+15. otherwise clicks the exact default entry or submits the one approved key,
+    then uses a bounded source-blind attribution window and two all-clear samples
+    for the acknowledged Windows button transition; same-button human input
+    during that window remains inherently best effort;
+16. records each command and firmware acknowledgement without truncation plus
     bounded delayed-feedback counts, maxima, last command/points/timings, and
     outcome; and
-16. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
-   wire `STATUS` proving disarmed with zero held inputs before closing.
+17. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
+    wire `STATUS` proving disarmed with zero held inputs before closing.
+
+Protocol-safe ARM negotiates one frozen `InputCapabilities` from exact
+`IDENTIFY`, `CAPS`, and `STATUS` evidence before any activation. Every typed
+pointer, short-key, camera-hold, zoom, and cleanup intent declares a matching
+`RequiredInputCapabilities`; the coordinator rejects an absent operation or
+smaller limit before its activation callback. Task and action code never see the
+transport and never construct `CAMERA_HOLD`, `WHEEL`, or any other raw serial
+command. The private firmware operations remain inside the same lease, ledger,
+ARM, validation, activation, `STOP_ALL`, `DISARM`, `STATUS`, and close envelope.
+
+`arduino_hid.v2` adds only two semantic operations. Atomic `CAMERA_HOLD` accepts
+one of left/right/up/down for 1--600 ms, releases before its exact
+requested/applied-duration ACK, and stays below the 1,000 ms watchdog. `WHEEL`
+accepts one nonzero signed amount with magnitude at most three and returns the
+exact requested/applied amount. Generic key bounds remain 250 ms. Firmware-side
+new-command argument, limit, arming, or unknown-command failures release and
+disarm. ACK or transport failures trigger the existing fail-closed cleanup and
+grant no activation or verification credit; a state-changing rejection is never
+retried.
+
+Zoom activation has no cursor-movement sublane. It requires the actual cursor
+already inside the pointer-safe world viewport and owned by the pinned root
+HWND, physical input quiet, exact unchanged native/telemetry geometry, and a
+fresh loaded scene with bank, PIN, dialogue, and text input inactive. A newer
+verification observation must then preserve process/session and player
+location, yaw, pitch, and protected UI state while changing both geometry-frame
+identity and `zoom3d` in the requested direction. Unchanged or contradictory
+zoom is a typed failure, not permission for another yaw/pitch or wheel loop.
 
 The immutable `InputReceipt` is successful only when the activation and final
 cleanup sequence are present in order, every command is terminal and
 acknowledged, no ledger entry is unresolved, the final firmware state is safe,
 every recorded cursor-feedback wait settled, and both ledger and transport
-close. Current receipts also serialize additive `cursorReacquisition` evidence
+close. Current receipts also serialize the typed invalidation cause, bounded
+ordered actual cursor samples, pointer geometry, activation/movement bounds, and
+initial/correction-plan counts. Versioned camera transactions additionally
+retain required and negotiated capabilities, the exact activation boundary,
+requested/applied hold or wheel values, pre-action pose/zoom, and the eventual
+typed pose/zoom verification evidence. Additive `cursorReacquisition` evidence
 for movement-only external-cursor transactions: PMv2 virtual/neutral bounds,
 before/after cursor, bound PID/root HWND, exact outer/client/canvas geometry,
 completion, unchanged geometry, and no activation. Older additive-v1 receipts
-may omit `cursorFeedback` or `cursorReacquisition`. The raw transport methods are
+may omit `cursorFeedback`, `cursorReacquisition`, or the versioned capability/
+camera fields. The raw transport methods are
 private and only the coordinator imports them. A state-changing firmware
 rejection is never retried implicitly. There is no software-input fallback.
 
 The action layer may emit typed `TARGET_EVIDENCE_INVALIDATED` when an adaptive
 object/walk proposal exhausts bounded fresh hover reobservation before
-activation, or `CURSOR_STATE_INVALIDATED` when real cursor/ownership/bounds
-evidence changes. Runtime may discard at most one consecutive such proposal,
+activation, or `CURSOR_STATE_INVALIDATED` when typed real cursor feedback
+becomes invalid. Runtime may recover only the five explicitly eligible causes
+once per run,
 and only when the immutable receipt proves the matching failure kind, either
 complete connected cleanup or a closed empty pre-serial ledger/backend, and no
-activation. Target invalidation suppresses
-the exact resource key for one fresh alternate; cursor invalidation preserves
-the target and merely reobserves. Reason text is diagnostic and never selects
-the transition. Any activation, incomplete cleanup, mismatch, or repetition
-blocks.
+activation. Target invalidation suppresses the exact resource key for one fresh
+alternate. Cursor recovery discards the old target/intent, performs movement-
+only neutral reacquisition, and requires fresh recognition plus SafetyGate
+before one pointer retry. Reason text is diagnostic and never selects the
+transition. Any activation, incomplete cleanup, mismatch, identity/geometry
+drift, physical input, non-pointer retry, or repetition blocks.
 
 ### Saved-session login assistance
 
@@ -368,28 +531,35 @@ block, transport failure, verification failure, or a configured bound.
 
 ### Golden replay
 
-`run.cmd replay` executes the sanitized fixture in
-`tests/fixtures/golden_lumbridge_cycle.json`. It freezes the final task route,
-action kinds, typed verification sequence, and terminal cycle state. Its
-provenance records hashes of the bounded live component traces and explicitly
-states that those traces were stitched and do not contain complete raw sensor
-or SafetyGate evidence.
+`run.cmd replay` executes the sanitized cycle fixture in
+`tests/fixtures/golden_lumbridge_cycle.json` and the retained camera-analysis
+fixture in `tests/fixtures/retained_camera_79_trace.json`. The first freezes the
+final task route, action kinds, typed verification sequence, and terminal cycle
+state. Its provenance records hashes of the bounded live component traces and
+explicitly states that those traces were stitched and do not contain complete
+raw sensor or SafetyGate evidence. The second recomputes the retained camera
+bursts, target switches, direction reversals, pitch-limit attempts, and response
+rates. Its target-locked two-action result is a comparison envelope only and does
+not claim counterfactual interaction success.
 
 ## EngineFrame and passive diagnostics
 
 The real runtime publishes one immutable `EngineFrame` after observation,
 decision, execution, verification, and terminal boundaries. It contains
-task/state, definition/profile IDs, route progress, selected target identity
-and geometry, eligible and rejected candidates with codes, camera pose,
-decision reason, typed action key/hold evidence, ordered safety checks, pending
-and last verification, typed outcome, execution receipt, final cleanup state,
-and current blocker. The atomic publisher retains only the latest monotonic
-frame; it is not a history store.
+task/state, definition/profile IDs, polyline route progress and selected
+lookahead target, camera framing/action, authoritative geometry and inset aim
+candidates, selected seed/decision, pointer motion evidence, selected timing,
+eligible and rejected candidates with codes, decision reason, typed action
+key/hold evidence, ordered safety checks, pending and last verification, typed
+outcome, execution receipt, final cleanup state, and current blocker. The atomic
+publisher retains only the latest monotonic frame; it is not a history store.
 
-The optional overlay consumes this exact frame. It uses green for the selected
-target, amber for eligible alternatives, and optional red for rejected
-candidates. It suppresses rectangles when source tick/geometry provenance no
-longer matches the displayed Observation. The actual root top-level host owns
+The optional overlay consumes this exact frame. It may show the route corridor,
+mandatory/skipped route points, selected long target, desired framing region,
+authoritative and inset target shapes, aim candidates/selection, and recent
+pointer path in addition to green selected, amber eligible, and optional red
+rejected targets. It suppresses geometry when source tick/geometry provenance
+no longer matches the displayed Observation. The actual root top-level host owns
 the verified Win32 click-through, non-focusable, layered, and tool-window-only
 styles; Tcl creation and teardown remain on that host thread. It has no input
 handlers, target selection, SafetyGate calls, or Arduino imports, and an overlay
@@ -421,6 +591,26 @@ Walk, player, widget, incomplete, and uncorrelated menu identifiers cannot
 become entity candidates. Input coordinates are omitted and every candidate is
 review-only and never automatically active. The recorder imports no runtime,
 safety, task, input, login, or Arduino authority.
+
+The trusted review model keeps three distinctions explicit. First, sampled
+player-world `routePoints` are outcomes, while manual `Walk here` targets are
+intent evidence with each RuneLite tile representation preserved separately.
+Second, keyboard/middle/mixed is an observed camera-input method, while
+action-linked, exploratory/unassociated, cancelled, and no-pose-effect describe
+association or outcome. Third, exact TileObject identity can come from one
+same-ID object whose scene footprint matches the clicked menu coordinates, but
+only a direct authoritative-shape containment is object aim-point evidence. A
+fresh exact context-menu tuple instead labels the final pointer as a menu-row
+activation and never projects that row into the object clickbox.
+
+`EngineApplication` owns the ephemeral manual-versus-definition route review.
+It compares plane-supported manual targets against both fixed route directions,
+selects a direction only from forward-progress evidence, retains ambiguity when
+direction is not unique, and exposes per-plane manual, observed, definition,
+and mandatory-point layers to the GUI. It is explicitly review-only, is labeled
+with the current definition version, and cannot mutate either the hashed
+artifact or task data. Additive manifest feature flags preserve byte-exact
+derivation of older finalized summaries and timelines.
 
 ## Application facade and frontend
 
@@ -500,3 +690,38 @@ bank contents need not be readable; an open PIN blocks before input, and exact
 widget or keyboard-close support is still required.
 Completing any historical return grants no cycle credit; the active process
 must perform a new full cycle.
+
+## Bounded phase and wait observability
+
+Observability follows existing ownership instead of introducing another
+controller. `TaskRuntime` owns observation, decision, post-action observation,
+verification, and final frame publication timing. The action layer owns its
+SafetyGate-call timing. `InputCoordinator` owns lease, connection/negotiation/
+arm, pointer planning/settlement, serial transaction, and cleanup timing. The
+private Arduino transport contributes only sanitized write and ACK durations
+from its existing command ledger. These measurements are diagnostic outputs;
+no task, SafetyGate, retry, pointer, camera, input, verification, or cleanup
+branch may consult them for authority.
+
+The immutable additive wire contracts are `engine_phase_timing.v1` and
+`engine_observability.v1`, described in `docs/ENGINE_FRAME.md`. EngineFrame and
+execution/receipt evidence can merge owner-produced phase aggregates without
+reconstructing elapsed time from GUI polling or frame age. Existing
+`input_transaction_receipt.v1` and EngineFrame readers must accept artifacts
+that omit the new fields. Public evidence contains bounded numeric durations,
+counts, enumerated phases, and enumerated wait states only; it excludes raw
+typed text, secrets, session tokens, serial payloads, and raw ACK lines.
+
+The GUI and overlay remain presentation-only. Exact engine/safety and
+presentation classification is published immediately. Expected waits display
+immediately as neutral wait states. A GUI-only hysteresis may hold the prior
+rendered value across a momentary passive stale classification for no more than
+500 ms; it cannot delay `ARDUINO_COMMAND_FAILED` or change a Start/Resume gate,
+blocker, safety result, receipt, or cleanup classification.
+`lastExecution.activationAttempted` remains an enclosing EngineFrame execution
+fact beside `lastExecution.receipt`; it is not an `InputReceipt` member.
+
+This increment adds no live cycle, Arduino firmware change, software-input
+fallback, window movement, cursor injection, transport caller, or alternate
+runtime path. Regression and replay acceptance are recorded in
+`docs/ENGINE_STATUS.md`; live gameplay remained out of scope.

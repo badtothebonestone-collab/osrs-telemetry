@@ -118,7 +118,7 @@ Run all tests with the client closed:
 .\run.cmd test
 ```
 
-Replay the committed deterministic cycle fixture without RuneLite or Arduino:
+Replay the committed deterministic fixtures without RuneLite or Arduino:
 
 ```powershell
 .\run.cmd replay
@@ -126,8 +126,11 @@ Replay the committed deterministic cycle fixture without RuneLite or Arduino:
 
 The replay drives the final task FSM through 28 verified log gains, the fixed
 outbound route, bank open/deposit/close, the fixed return route, and `COMPLETE`.
-It is a sanitized semantic regression derived from the bounded live proof; it
-does not pretend that the ignored live traces contain full raw observations.
+It also recomputes the retained 79-camera-action trace and the comparison-only
+target-locked two-action envelope. The cycle is a sanitized semantic regression
+derived from bounded live proof; the camera comparison does not claim
+counterfactual interactions, and neither pretends that ignored live traces
+contain complete raw observations.
 
 Inspect the frontend-ready catalog/profile contract or run the same engine
 through the thin foreground facade:
@@ -152,6 +155,8 @@ or IPC service.
 - `osrs_bot/model.py`: immutable observation and action contracts.
 - `osrs_bot/observation.py`: the only snapshot-to-Observation adapter.
 - `osrs_bot/definition.py`: the one immutable/versioned built-in task/site definition.
+- `osrs_bot/movement.py`: pure polyline-progress and farthest-supported route selection.
+- `osrs_bot/behavior.py`: centralized bounded route, camera, aim, pointer, and timing policy.
 - `osrs_bot/profile.py`: the minimal validated profile and default binding.
 - `osrs_bot/configuration.py`: bounded machine/session runtime configuration.
 - `osrs_bot/task_contract.py`: the minimal task/runtime protocol.
@@ -161,7 +166,7 @@ or IPC service.
 - `osrs_bot/action.py`: gameplay validation and typed intent construction.
 - `osrs_bot/input_coordinator.py`: sole Arduino session owner and immutable
   command/ACK/cleanup receipts for gameplay and login.
-- `osrs_bot/pointer.py`: pure deterministic bounded relative-motion policy.
+- `osrs_bot/pointer.py`: pure bounded, curved, seed-reproducible relative-motion policy.
 - `osrs_bot/verification.py`: the only post-action verifier and typed outcomes.
 - `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
 - `osrs_bot/application.py`: tokenized thin composition/lifecycle facade.
@@ -188,6 +193,8 @@ or IPC service.
 - `docs/DEFINITIONS_AND_PROFILES.md`: definition/profile/configuration ownership.
 - `docs/INPUT_COORDINATOR.md`: sole input owner, pointer, receipt, and cleanup contract.
 - `docs/ENGINE_FRAME.md`: diagnostic publication and passive overlay contract.
+- `docs/TELEMETRY_PIPELINE.md`: bounded scene query, cache/backpressure,
+  completeness, duplicate, target-continuity, metrics, and benchmark contract.
 - `docs/DEMONSTRATIONS.md`: artifact, inspection, and no-replay contract.
 - `docs/FRONTEND_CONTRACT.md`: implemented facade and future GUI screen contract.
 - `docs/QUICKSTART.md`: non-programmer operator GUI guide.

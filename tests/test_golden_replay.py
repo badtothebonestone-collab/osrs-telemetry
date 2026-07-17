@@ -14,6 +14,7 @@ from osrs_bot.model import (
     NearbyObject,
     Observation,
     PlayerObservation,
+    SceneCensusEvidence,
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
@@ -114,6 +115,13 @@ def _observation(
         menu_timestamp=timestamp,
         menu_session_id=SESSION_ID,
         menu_process_id=process_id,
+        scene_census=SceneCensusEvidence(
+            metadata_present=True,
+            complete=True,
+            scene_coverage_complete=True,
+            authoritative_absence_eligible=True,
+            priority_absence_eligible=True,
+        ),
     )
 
 

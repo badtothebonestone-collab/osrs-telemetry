@@ -2,7 +2,73 @@
 
 ## Current milestone
 
-**The first full operator GUI is implemented and live-proven over the existing
+### Telemetry, observation, and decision-pipeline reliability
+
+**The bounded telemetry/observation/decision implementation, focused tests,
+complete regression, retained replay, and forced-fresh Java gate are PASS.
+Current-build loaded-scene timing remains a documented live gap because neither
+local telemetry listener was available.**
+
+The canonical scene request is now player-centered or explicitly anchored.
+Java performs a bounded identity census before definition/action enrichment and
+projection, reuses exact-source raw work, and admits client-thread work through
+one active plus one newest pending request. The endpoint is bounded and returns
+retryable backpressure instead of accumulating snapshots. Python performs a
+bounded read/parse, quarantines contradictory whole-row duplicates, builds one
+immutable exact-key/object-ID index, preserves typed completeness and pipeline
+evidence through EngineFrame, and supplies phase-specific task query budgets.
+Target selection is row-order independent, rejection evidence is bounded, and
+an exact lock cannot be declared depleted or switched merely because an
+incomplete/capped frame omitted it. SafetyGate still fails closed on explicit
+incomplete or contradictory authoritative target evidence; absent/legacy census
+authority is readable but cannot activate an object or prove absence. If a
+legacy client drops a planned anchor, exact key, or budget, runtime revokes that
+fetch's coverage and absence authority.
+
+The forced-fresh 4,225-object synthetic Java benchmark scanned/discovered 4,225
+and enriched/projected/returned 64. Fresh p50/p95/maximum was
+7.520/12.327/12.419 ms, exact-source hits were 0.715/1.527/4.815 ms, and payload
+bytes were 107,896/107,900/107,902. Python 64-row parsing improved from
+0.973/1.955/5.386 ms to 0.791/1.059/2.202 ms; immutable exact-key lookup improved
+from 1.031 to 0.077 microseconds (13.4x); and structurally oversized 1,000-row
+input is rejected in 0.049/0.104/0.213 ms instead of accepted in
+10.611/15.232/18.105 ms. The 1,001-row target benchmark improved from
+0.4388/0.6717/2.2055 ms to 0.0669/0.1557/0.4046 ms.
+
+Final validation is **PASS**: `run.cmd test` completed 973/973 Python tests and
+its normal Java gate; forced fresh Java `--rerun-tasks` completed 124/124 tests
+across 12 suites with all four Gradle tasks executed; retained replay completed
+7/7; and compile, input-boundary, and retained Java snapshot-fixture checks
+passed. A bounded live observation was attempted only after these deterministic
+gates, but neither `8890` nor `8893` was listening and the request failed with
+connection refused. It sent no input, created no operator-versus-engine action
+evidence, and required no input cleanup. No current-build live after timing is
+claimed. Firmware was not flashed. Detailed contracts and limitations are in
+[`TELEMETRY_PIPELINE.md`](TELEMETRY_PIPELINE.md).
+
+### Concurrent movement, camera, targeting, pointer, and timing work
+
+**Movement, camera, targeting, pointer, and timing quality are being upgraded
+inside the existing engine contracts. The target-locked coarse-to-fine camera
+offline gate and the pointer-containment/recovery deterministic and loaded-scene
+Arduino-only gates are PASS. Camera production evidence is VERIFIED_WITH_GAP
+because a server disconnect split acquisition and interaction across runs.**
+
+The current worktree adds classified definition route points, polyline progress
+and farthest-supported lookahead, collision/scene shortcut evidence, proactive
+yaw/pitch framing, authoritative polygon aim candidates, and run-seeded curved
+pointer/timing variation. `EngineFrame`, the passive overlay, and the GUI are
+being extended as views of the owner-produced route, framing, geometry,
+candidate, pointer, and timing decisions; they do not select or authorize them.
+Focused and full regressions now cover the camera and pointer milestones. No
+current-milestone repeated Tree interaction, complete cycle, uninterrupted
+camera-acquisition-to-interaction run, or final commit claim is made here yet.
+The retained live claims are the outside-viewport pointer recovery and fresh
+route interaction plus the split-run camera evidence described below.
+
+### Previous operator GUI milestone
+
+**The first full operator GUI is implemented and live-proven over the prior
 engine contracts.**
 
 `run.cmd gui` launches one Tkinter/ttk desktop application with Run, Live
@@ -203,8 +269,11 @@ Regression command:
   activation. Final activation also requires the exact pinned root HWND/PID
   from `WindowFromPoint`.
 - Object aim points lie inside the viewport and the first present RuneLite API
-  shape in clickbox -> convex hull -> canvas tile order. `canvasLocation` alone
-  is not activation proof, and a present stronger shape cannot fall through.
+  shape in clickbox -> convex hull -> canvas tile order. The engine insets the
+  authoritative polygon, excludes unusable regions, scores bounded interior
+  candidates, and records the selected candidate and seed. `canvasLocation`
+  alone is not activation proof, and a present stronger shape cannot fall
+  through. Fresh exact hover/menu evidence remains the final veto.
 - `CoordinatedActionInterface` preserves exact post-move hover/menu/widget
   checks, context-row revalidation, and the verified bank-close Escape path.
 - If wire evidence shows that a semantic widget click, key, direct object click,
@@ -213,15 +282,21 @@ Regression command:
   preparatory right-click context opener alone is not the semantic action. The
   conservative boolean is retained in the terminal EngineFrame/application
   artifact alongside the unsuccessful receipt.
-- The deterministic pointer policy produces only bounded relative motion with
-  velocity/acceleration caps and target-aware braking. Ordinary action transit
-  stays inside the canvas; the distinct movement-only reacquisition lane is
-  bounded by the verified virtual desktop until canvas entry and by the canvas
-  afterward.
+- The seed-reproducible pointer policy produces only bounded relative motion
+  with varied curved paths, velocity/acceleration caps, and distance/target-
+  size-aware braking. Selected control points, duration, timing, seed, decision
+  context, endpoint correction, and settled point remain diagnostic evidence.
+  Ordinary action transit, every planned/feedback/correction point, settlement,
+  context row, and activation stay inside the fixed 16-device-pixel inset of the
+  authoritative viewport. The distinct geometry-only movement-only
+  reacquisition lane is bounded by the verified virtual desktop until canvas
+  entry and by the neutral padded viewport region afterward.
 - The policy retains one exact target, while the coordinator binds activation to
-  the actual stable device-pixel endpoint. The coordinator executes at most 64
-  exact command-waypoint plans/512 MOVE commands across the complete Arduino
-  transaction, beginning an unknown axis with a unit probe. Every planner path
+  the actual stable device-pixel endpoint. Ordinary gameplay executes one
+  initial trajectory plus at most two feedback-correction replans; cursor
+  reacquisition retains a separate bounded movement allowance. Both remain
+  under the 512-MOVE transaction cap, beginning an unknown axis with a unit
+  probe. Every planner path
   requires an eight-device-pixel per-count envelope on all four sides, so a
   reversed or cross-axis response within that declared envelope remains inside
   verified bounds; observed transfer above four fails closed. Only a complete-
@@ -240,10 +315,19 @@ Regression command:
   watchdog refresh is sent during settlement. Same-direction/in-gain buttonless
   human motion remains source-indistinguishable and subject to fresh semantic
   validation.
-- Stable route-projection failure may use only the definition-owned camera lane:
-  shortest fixed-point yaw direction, 250 ms holds, at most eight verified
-  turns, and a typed camera-pose outcome. Missing evidence still waits and
-  contradictory identity still blocks.
+- Route and object framing use only the definition/task-owned camera lane. It
+  distinguishes barely visible from usable/well framed, biases usable screen
+  area toward travel, uses a general yaw/screen deadband, and chooses bounded
+  correction-sensitive yaw or supported pitch holds. Route decisions include a
+  fresh projection envelope and a bounded leading-edge allowance calibrated from
+  the user's manual long-walk evidence; object framing remains stricter. Exact
+  Trees, bank booths, and transition objects may now enter camera acquisition
+  while off-screen, including a bounded seeded same-tile search when world
+  bearing is unavailable, but activation still requires fresh authoritative
+  geometry and exact hover/menu proof. Every change requires a typed camera-pose
+  outcome and fresh replacement geometry; the outcome retains actual yaw/pitch
+  deltas and changed frame IDs. Missing evidence still waits and contradictory
+  identity still blocks.
 - A sent action's tick verification window begins at the final preactivation
   observation. Ordinary actions retain the eight-tick deadline; route movement
   has a separate 20-tick deadline. An intercepted walk target can use only one
@@ -254,11 +338,15 @@ Regression command:
   and the ledger contains preactivation commands exclusively. The task then
   suppresses that exact tree key for one fresh selection; the next equivalent
   failure blocks.
-- Physical cursor-state invalidation is a separate typed unsent lane. It may
-  receive one fresh reobservation with no target suppression only when the
-  receipt has the matching failure kind, preactivation-only ledger, and complete
-  cleanup; repetition blocks. A completed connected reacquisition qualifies
-  only with retained unchanged-geometry/no-activation evidence.
+- Physical cursor-state invalidation is a separate typed unsent lane. Only a
+  first unexpected direction, unsupported gain, cross-axis response, padded-
+  viewport exit, or point-owner mismatch may trigger the one geometry-only
+  movement recovery. The original target/intent is discarded; one strictly
+  newer fresh/coherent observation must rerun recognition and SafetyGate before
+  one pointer retry. Changed PID/HWND or geometry, physical input, incomplete
+  cleanup, a non-pointer/unsent retry, or repetition blocks. A completed
+  connected reacquisition qualifies only with retained unchanged-geometry/no-
+  activation evidence.
 - Before pointer preflight, the host acquires the same cross-process port lease
   used by the later Arduino session without opening or arming hardware. It keeps
   that lease through any connected cursor movement, cleanup, and backend close.
@@ -286,10 +374,15 @@ Regression command:
   boundary tests reject another production importer/caller and reject software
   input modules.
 - Task snapshots now expose the bound definition/profile and bounded route or
-  cycle progress without runtime reading mutable FSM internals.
+  cycle progress without runtime reading mutable FSM internals. Route decisions
+  use forward polyline progress, remaining distance, corridor deviation,
+  mandatory point classification, scene/collision support, visibility, and
+  backtracking/zigzag evidence to select a useful future point without skipping
+  a transition, constrained turn, or arrival.
 - Decisions carry the exact selected/eligible/rejected evidence produced by the
   task's real selection path, including stable rejection codes and source
-  geometry provenance.
+  geometry provenance, plus bounded route, framing, aim-candidate, seed, and
+  selected timing evidence.
 - Safety evaluations record the ordered checks actually used. Execution results
   retain those checks across bounded retries without diagnostic re-evaluation.
 - `TaskRuntime` publishes one monotonic latest `engine_frame.v1` at observation,
@@ -302,20 +395,31 @@ Regression command:
   frames are text-only. Terminal banners are bounded and then reduce to a
   non-target indicator. The host verifies click-through/no-activate window
   styles before display; overlay failure cannot alter engine control.
+- Rendering the new route corridor/mandatory/skipped targets, framing region,
+  authoritative/inset shape, aim candidates/selection, and pointer path from the
+  same frame is part of the current milestone; its live visual acceptance is
+  **NOT YET EVALUATED**.
 - The overlay host is the actual top-level click-through tool window, and Tcl
   creation/teardown stays on its owning thread. Live passive inspection has
   matched route progress, target/candidate status, camera outcomes,
   verification, and `cleanup: safe` against the underlying EngineFrame.
 - The sole snapshot endpoint now exposes bounded demonstration-only
-  client/menu/click tails with one global Java-assigned sequence, an NPC-only
-  actor census, and the existing collision window. Actor/collision provenance
-  must match the atomic frame before Python can consider the Observation
-  coherent.
-- `run.cmd record-demo NAME` records no input. It requires a loaded scene and
+  client/menu/click/camera-input tails with one global Java-assigned sequence,
+  an NPC-only actor census, and the existing collision window. Actor/collision
+  provenance must match the atomic frame before Python can consider the
+  Observation coherent.
+- `run.cmd record-demo NAME` injects no input. It requires a loaded scene and
   exact session/PID binding, rate-limits pointer evidence, records semantic
-  clicks plus before/after observations, stops on source identity/sequence
-  discontinuity, and limits screenshots to verified canvas regions outside a
-  bank-PIN surface.
+  clicks plus before/after observations, and enables only a fixed, renewable
+  two-second lease for candidate camera keys and middle-button gestures from
+  the focused RuneLite canvas. Finalization explicitly disables the lease.
+  Typed text, other buttons/keys, bank-PIN/input-field state, and OS-global
+  hooks remain outside the capture boundary. A candidate control is not called
+  positioning unless a nonzero camera-pose delta precedes an exact,
+  non-consumed semantic click. Identity/sequence discontinuity remains
+  terminal, while exact world-model and interaction-menu provenance handoffs,
+  individually or combined during the already bounded capture, retain the
+  independently bound hot tail instead of masquerading as a logout.
 - Finalized demonstration artifacts contain JSONL, commit/dependency/schema and
   session provenance, semantic JSON/Markdown summaries, optional images, and
   SHA-256 plus byte-size evidence for the complete file set.
@@ -561,6 +665,12 @@ the geometry condition and recovery behavior rather than source attribution.
 
 ## Validation
 
+- Phase 11 telemetry/observation/decision-pipeline gate: 973/973 Python tests
+  plus the normal Java gate through `run.cmd test`; forced fresh Java 124/124
+  across 12 suites with 4/4 Gradle tasks executed; retained replay 7/7; compile,
+  input-boundary, and retained snapshot-fixture checks passed. Current-build
+  loaded-scene timing was unavailable because local `8890`/`8893` listeners
+  were absent; connection refusal occurred before input.
 - Phase 0 baseline Python suite: 116 passed.
 - Phase 0 forced fresh Java suite: 22 passed, 0 failed, 0 errors, 0 skipped.
 - Golden replay: 28 chop actions, 19-step outbound route, bank
@@ -752,15 +862,440 @@ the geometry condition and recovery behavior rather than source attribution.
   cleared; the overlay is never independent proof that a later RuneLite scene
   is loaded.
 - The RuneLite endpoint does not expose global raw mouse-button or keyboard
-  transitions. Demonstration manifests declare those gaps and retain semantic
-  `MenuOptionClicked` evidence instead.
+  transitions. It now exposes only privacy-bounded in-process camera controls:
+  candidate W/A/S/D or arrows and middle-button press/drag/release on the exact
+  focused RuneLite canvas during a fixed, renewable two-second demonstration
+  lease. Demonstration manifests keep the global-input gap explicit. Review
+  semantics distinguish input method from association: exact object actions
+  and exact/high-confidence Walk activations may receive bounded camera links,
+  while pose-changing unlinked gestures remain exploratory/unassociated and
+  cancelled or no-pose-effect gestures remain explicit. All are review-only.
+- Live camera/object acceptance at
+  `_run_proofs/movement_targeting_quality/20260712T215958.353-0500/` captured a
+  mixed keyboard/middle episode, exact current-frame Oak-tree clickbox
+  containment, and reference timing fields. The artifact inspected as valid
+  with declared coverage gaps; production input remained Arduino-owned. A
+  later artifact at `demo_runs/20260713T025735882565Z_camera-object-resolved`
+  retained an exact Oak click and candidate RIGHT/middle controls but showed a
+  zero camera-pose delta, so it does not prove that those controls positioned
+  the camera.
 - A client-thread world-model query can occasionally land one sensor tick after
   the endpoint's immutable frame. The endpoint still rejects that mismatched
-  model. The recorder tolerates only the exact, bounded absence shape while
-  retaining independent hot-tail continuity; identity, session, tick, payload,
-  warning, or capability contradictions remain terminal.
+  model. After a fully bound start, the recorder tolerates only the exact known
+  world-model, interaction-hot, or combined handoff shape for the remaining
+  duration/event-bounded capture while retaining independent hot-tail
+  continuity; identity, session, tick, payload, warning, or capability
+  contradictions remain terminal. Live GUI smoke evidence at
+  `_run_proofs/movement_targeting_quality/20260713T163414Z_recorder_handoff_continuity/`
+  ran for the requested 20 seconds, retained five real handoff gaps and 1,360
+  events, finalized for `duration_elapsed`, and inspected `valid: true` with no
+  errors or ambiguities.
+- A follow-up Oak demonstration exposed a live-shape regression: two requested
+  60-second recordings stopped after 2.543 and 3.930 seconds because the endpoint
+  retained its stale `interaction_hot` diagnostic payload while marking that
+  capability unavailable. The recorder now accepts only the exact duplicated,
+  schema- and session/PID-bound diagnostic copy alongside the independently
+  validated hot tail; it still never uses that stale menu snapshot as interaction
+  authority. Requested duration is persisted and cross-checked, terminal gaps
+  retain bounded payload keys, and the GUI distinguishes duration completion from
+  operator or unexpected early stops. Live proof at
+  `_run_proofs/movement_targeting_quality/20260713T171233Z_recorder_interaction_handoff_fix/`
+  includes full 15-, 12-, and 18-second `duration_elapsed` artifacts. The 12-second
+  run retained a real interaction-hot handoff plus a verified Skills click; the
+  18-second run retained 12 verified tab clicks and eight world-model handoffs.
+  The exact combined form is deterministic-test proven but did not recur during
+  the bounded post-fix live session, so no combined live occurrence is claimed.
+- The user's three subsequent clips remain independently valid under their
+  original byte-exact summary/timeline contract. The application-owned ephemeral
+  review recovers two manual Walk targets to the bank, approximately 20.6 and
+  12.1 tiles apart under the qualified review estimate, and four return targets,
+  approximately 25.6, 6.1, 4.1, and 4.0 tiles. Polyline comparison selects the
+  bank and resource directions respectively, with no measured backtracking in
+  either retained target sequence. The Oak-only clip retains two exact Oak tree
+  / Chop down activations and separates three exploratory camera episodes from
+  one action-linked episode.
+- The older Top-floor, Bank, and Bottom-floor clicks correctly remain ambiguous:
+  those artifacts predate exact activation-surface capture and cannot be
+  rewritten. The user's later `20260713T183737323467Z_wood-cutting-to-bank` and
+  `20260713T183823171405Z_bank-to-woodcutting` captures now live-prove exact
+  `context_menu_row` identity for Top-floor Staircase `56230`, Bank booth `18491`,
+  and Bottom-floor Staircase `56231` without treating row coordinates as object
+  aim geometry. Both finalized artifacts remain independently hash-valid.
+- Versioned camera V4, context-menu timing V1, and manual-route V2 review fix the
+  defects exposed by those captures without rewriting V3/V1 artifacts. Exact
+  object review links the Bank middle drag at 2,501 ms while Walk remains bounded
+  to 2,500 ms; overlapping camera-key transitions remain one coherent episode.
+  Context-menu-open lower bounds are 1,313 ms Top-floor, 1,063 ms Bank, and
+  1,359 ms Bottom-floor. The return distance review is
+  `[3.0, 8.062, 29.12, 4.123, 5.385]`; later age-2/14/18 player samples remain
+  diagnostic-only, while the 33.38-tile to-bank click is explicitly a one-tick
+  estimate. The GUI prefers these corrected ephemeral review fields while
+  retaining finalized summary/timeline bytes unchanged.
+- Recorder/review regression for this increment is **PASS**: 762 Python tests,
+  71 Java tests across eight suites, focused 121-test recorder/application/GUI
+  coverage, compileall, and diff check all pass. The three saved artifacts also
+  re-inspect `valid: true`. No production action or additional manual RuneLite
+  cycle was run for this bounded recorder change.
+- Recorder interpretation follow-up is **PASS**: all 773 Python tests, focused
+  132-test recorder/review/application/GUI coverage, golden replay 2/2, the
+  9-test production-input boundary, compileall, `run.cmd test`, and diff checks
+  pass. A forced Java rerun executed 71 tests across eight suites with no
+  failures, errors, or skips. Both new user artifacts re-inspect
+  `VERIFIED_WITH_GAPS` with no hash rewrite. No production input or additional
+  manual RuneLite cycle was needed for this review-only correction.
 - Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
   demonstration, frontend composition, and operator GUI contracts are
   implemented. The GUI-recorded manual demo inspected as valid with declared
   gaps, and final shutdown checks cover the GUI worker, client/endpoint, Java
   process, and Arduino lease.
+
+## Bounded pointer containment and recovery status
+
+This submilestone is **PASS**. `InputCoordinator` remains the only production
+input owner and the Arduino remains the only production input backend. Ordinary
+gameplay pointer movement, feedback corrections, transit, settlement, and
+activation are confined to a fixed 16-device-pixel inset of the authoritative
+viewport. Ordinary motion has one initial trajectory and at most two correction
+replans. Cursor reacquisition remains a separate movement-only lane with its own
+bounded virtual-desktop-to-neutral-canvas contract.
+
+Deterministic acceptance is **PASS**: the focused pointer/action/runtime/safety/
+task/login/input-boundary gate passed 445/445; the complete Python regression
+passed 878/878; golden replay passed 2/2; `run.cmd test` passed; the forced Java
+rerun executed 71 tests across eight suites with no failures, errors, or skips;
+the static production-input boundary passed 9/9; and compileall and diff checks
+passed. Coverage includes all viewport edges and corners, device-pixel/high-DPI
+conversion, curved and linear paths, direction reversal, unsupported transfer
+gain, cross-axis motion, an acknowledged MOVE followed by viewport exit, owner/
+PID/HWND mismatch, zero activation before recovery, exact geometry and physical-
+input gates, one fresh retry, second-failure blocking, cleanup, and ordinary zero-
+or-minimal-correction success.
+
+The retained loaded-scene proof is under
+`_run_proofs/pointer_containment_recovery/20260715T035111.396056Z/`. Its exact
+binding was PID `7880`, HWND `656388`, session
+`plugin-7880-1784086893381`, outer `(1221,213,2243,1585)`, client
+`(1233,213,2219,1573)`, canvas `(1241,261,2151,1519)`, viewport
+`(1252,273,1440,1009)`, and gameplay-safe inset
+`(1268,289,1408,977)`, all in PMv2 device pixels. The operator placed the
+cursor at `(459,854)`, outside the viewport and owned by Notepad PID `11560` /
+HWND `131198`, then returned RuneLite to the foreground. Physical buttons were
+up and the physical-input history was quiet. An earlier setup run needed two
+bounded Arduino camera-key corrections before a pointer decision existed and is
+not counted as the qualifying proof.
+
+The qualifying artifact records exactly two transactions. `input-00000001` at
+source tick `872` discarded decision
+`navigate_to_bank:walk:route:west_approach_bridge:872:1`, sent 57 MOVE commands
+and no MOUSE_DOWN, MOUSE_UP, or KEY_PRESS, used three reacquisition plans (two
+correction replans), and moved `(459,854)` to neutral `(2317,1020)` through the
+virtual desktop. Its receipt is BLOCKED with
+`cursor_reacquired_reobserve_required`, `noActivationSent: true`, identical
+before/after geometry, complete STOP_ALL/DISARM/STATUS cleanup, disarmed zero-
+held firmware, and closed ledger/backend. A strictly newer loaded, fresh,
+wall-clock-fresh, coherent observation at tick `876` produced new decision
+`navigate_to_bank:walk:route:west_approach_bridge:876:2` after recognition and
+SafetyGate reran. `input-00000002` sent five MOVEs followed by the proof's only
+MOUSE_DOWN/MOUSE_UP, used two gameplay plans (one correction replan), retained
+all movement inside `(1268,289,1408,977)`, settled at `(2356,1072)`, and crossed
+the activation boundary `(2353,1068,7,7)` only after three final validation
+samples. It also ended with complete STOP_ALL/DISARM/STATUS cleanup, disarmed
+zero-held firmware, zero unresolved/failed/missing-ACK commands, and closed
+ledger/backend. Total qualifying counts are 62 MOVEs, five plans, three
+correction replans, and one activation.
+
+All 65 ordered recovery samples and 14 ordered retry samples are retained in
+`engine_frames.jsonl`; the manifest, frames, and receipt SHA-256 values are
+`061041310DF201B351E98B8EE712F24344FD0A354347C57A172C9C3F6BBB3EDE`,
+`50B0CF205C05FA8178A2CE6AFCC588A079F2E553E7215657FF7A44F93725D186`, and
+`4A41B850367AE34A9D379CC77CC1794182D2CFF7F587A4E748A1EE34A8CE5A57`.
+Post-proof observation retained the same PID/session/HWND and exact geometry,
+cursor owner PID/HWND matched RuneLite, and physical input remained quiet. The
+action-limit terminal state deliberately prevented a third action. Final
+shutdown confirmed no RuneLite/Java/Python worker, no 8890/8893 listener, and an
+available COM6 lease; the operator-only Notepad setup window was also closed.
+
+The live artifact proves the required initially-outside recovery and fresh
+interaction. Direction/gain/cross-axis and post-ACK outside-viewport fault
+injection were intentionally deterministic rather than live; no broader live
+fault-injection claim is made. No firmware file, software-cursor path, window-
+movement path, controller, or parallel recovery owner was added.
+
+## Target-locked coarse-to-fine camera status
+
+The implementation and offline acceptance are **PASS**. The existing
+`WoodcutBankTask` owns one `CameraAcquisitionEpisode`; `InputCoordinator` remains
+the only production input owner and the Arduino typed camera key intent remains
+the only production camera actuation path. The episode locks one exact object,
+tile, or route target together with source session/PID and exact client/canvas/
+viewport rectangles. It releases the target only when it becomes invalid or
+depleted, loses authoritative identity, becomes unsafe, or fails its bounded
+non-improvement budget. A pinned client/canvas/viewport rectangle or process/
+session change invalidates rather than silently retargeting the episode.
+
+The final camera goal is an acceptable safe range combining authoritative
+visible/clickbox ratio, a configurable central framing region, viewport-edge
+margin, route-direction bias, valid pitch, and desired zoom classification.
+Desired yaw comes from the player-to-target world bearing with shortest-turn
+wraparound; fresh projection supplies screen correction for the optional fine
+step. One coarse correction and at most one fine correction are allowed by
+default. Activation waits until the episode is ready on fresh authoritative
+geometry. No random direction or safety-bound change is permitted.
+
+Verified typed camera-pose receipts feed a bounded response model containing
+direction, requested hold, observed yaw/pitch delta, no-effect/pose-limit, and
+fresh overshoot evidence. Remaining error and the measured direction-specific
+rate choose the next hold. A left/right reversal is rejected unless a fresh
+changed-geometry response proves overshoot. An UP/DOWN no-effect at an unchanged
+pitch suppresses that same direction until pose changes. Every sent correction
+still requires an acknowledged receipt plus a newer pose and changed geometry
+before old projection evidence can be reused.
+
+Every hold in this historical proof was clamped through injected
+`CameraKeyCapabilities`. The then-installed v1 protocol adapter supplied 250 ms,
+matching that firmware limit; its CAPS text advertised `holdKeys=1` without a
+numeric maximum. No negotiated value above 250 ms and no wheel actuation is
+claimed by this proof. The later versioned capability milestone described below
+changes source and host contracts but has not been flashed, so it does not
+retroactively change these measurements. At this milestone boundary, materially
+unsatisfied zoom reported typed `zoom_required_but_unavailable` and sent no
+repeated compensating keys.
+
+The retained trace at
+`_run_proofs/movement_targeting_quality/20260713T220522.280174Z` contained 79
+camera actions in bursts `2,2,10,12,2,27,2,1,21`, 36 yaw reversals (31 without
+same-target fresh overshoot proof), seven target switches within bursts, and six
+DOWN no-effects at pitch `1024` (five redundant after the first limit). Its
+cleanup was complete. The new comparison-only two-action envelope is at most 18
+camera actions across those nine episodes: at least 61 fewer, or 77.2%. This
+does not assert that counterfactual interactions would have occurred.
+
+Offline acceptance is **PASS**: the complete Python regression passed 903/903;
+`run.cmd replay` passed 7/7 across the golden cycle and retained camera trace;
+and the forced Java `--rerun-tasks` build was `BUILD SUCCESSFUL` with all 4 tasks
+executed.
+
+Production evidence is retained under
+`_run_proofs/camera_controller_live/20260715T051415.0193041Z/`. The first run's
+qualifying evidence is
+`qualifying/20260715T053544.948938Z/`. One episode kept exact locked target
+`route:west_wall_corner`: an acknowledged 250 ms RIGHT coarse correction changed
+yaw `0 -> 1109` with fresh changed geometry, and an acknowledged 80 ms RIGHT fine
+correction changed yaw `1109 -> 1588` with another fresh changed geometry. No
+yaw reversal or pitch command occurred. Framing advanced
+`not_visible -> barely_visible -> usable`, after which an out-of-inset cursor
+caused the existing coordinator to send ten Arduino-only recovery MOVEs with no
+activation. The configured action limit then stopped that run safely.
+
+The game server disconnected afterward. Computer Use performed only separate
+operator reconnect setup and is not production evidence. The reconnected
+boundary retained exact PID `11304`, root HWND `3735924`, the same session, and
+unchanged outer/client/canvas/viewport geometry. Historical physical-input
+activity was consumed before production continued. The existing coordinator
+required a second neutral recovery and sent ten Arduino MOVEs, zero clicks, and
+zero keys with complete cleanup.
+
+A fresh one-action continuation is retained at
+`qualifying_continuation/20260715T054845.604479Z/`. It selected the same
+`route:west_wall_corner` target and executed one Arduino pointer Walk interaction:
+49 MOVEs, two pointer correction replans (the allowed maximum), one MOUSE_DOWN,
+and one MOUSE_UP. The player arrived from `(3200,3238)` to `(3196,3234)`, and the
+transaction completed full cleanup. A later RIGHT camera proposal visible in the
+terminal frame was never sent.
+
+Across both production runs the exact totals are two KEY_PRESS, 69 MOVE (ten
+first-run recovery, ten post-reconnect recovery, and 49 interaction), one
+MOUSE_DOWN, and one MOUSE_UP. All five transactions completed STOP_ALL, DISARM,
+and authoritative STATUS with zero held input. Every ledger/backend closed and
+the Arduino lease was released. Production used no software input and no window
+mutation. The canonical compact evidence is `camera_live_analysis.json`; final
+host/process/port cleanup is retained in `environment_cleanup.json`.
+
+The result is **VERIFIED_WITH_GAP**: the disconnect split the camera episode and
+the interaction across two `EngineApplication` runs, so the stricter requirement
+for one uninterrupted loaded-scene run is not met. The measured 250 ms hold moved
+1,109 yaw units but left 5,035 world-bearing units. The 80 ms fine hold moved 479
+units and safe usable framing was reached. Combined with the retained replay,
+this supports the conclusion that the current 250 ms limit materially constrains
+large otherwise-correct coarse turns. No firmware, wheel, middle drag, chord,
+raw KEY_DOWN/KEY_UP, software-input, window mutation, `InputCoordinator`, or
+parallel input path changed.
+
+## Observability stabilization status
+
+The current bounded increment is implemented and regression-verified. It adds immutable,
+additive timing and exact passive wait-state evidence to the existing runtime,
+execution, InputCoordinator, Arduino-ledger, verification, EngineFrame, and GUI
+presentation seams. It does not change camera or pointer behavior and does not
+add control authority.
+
+The final passive vocabulary and meanings are:
+
+| State | Meaning |
+| --- | --- |
+| `WAITING_FOR_NEXT_SCENE_UPDATE` | An owner is waiting for the next eligible scene/source update; this expected wait is not an Arduino fault. |
+| `WAITING_FOR_SOURCE_COHERENCE` | Current sources are not yet mutually coherent/fresh enough to proceed; all existing coherence gates remain exact. |
+| `INPUT_TRANSACTION_BUSY` | The sole coordinator transaction/lease is occupied or in progress; this is serialization, not a command outcome. |
+| `CURSOR_FEEDBACK_SETTLING` | A bounded pointer/Windows feedback all-clear is still settling; it does not claim command failure. |
+| `ARDUINO_HEALTH_STALE` | Passive Arduino readiness/health evidence has aged beyond its presentation bound; it is not a command result. |
+| `ARDUINO_COMMAND_FAILED` | Connect, negotiate, arm, serial write, ACK, rejection, or command cleanup failed; presentation is immediate. |
+| `SENSOR_STALE` | The underlying Observation/source evidence violates its safety freshness bound; the engine safety fact is immediate. |
+| `PRESENTATION_FRAME_STALE` | The displayed EngineFrame/run association is expired or mismatched; old presentation data has no current authority. |
+
+Expected waits display immediately as neutral wait states. The GUI may debounce
+only a momentary passive stale display state, for at most 500 ms. It may not
+debounce `ARDUINO_COMMAND_FAILED`, alter the exact presentation or underlying
+safety state, or infer an Arduino failure from a freshness wait. Old run/frame
+evidence must be cleared as soon as the run ID changes.
+
+`lastExecution.activationAttempted` is an enclosing EngineFrame execution fact.
+The compact GUI must read it beside, not inside,
+`lastExecution.receipt`. New timing/observability and command-duration fields
+are optional for legacy readers and fixtures.
+
+Acceptance status for this increment:
+
+- focused deterministic suites: **PASS**, 411/411;
+- complete Python regression through `run.cmd test`: **PASS**, 859/859;
+- Java regression through `run.cmd test`: **PASS**;
+- forced Java rebuild/test with `--rerun-tasks`: **PASS**, 4/4 tasks executed;
+- golden replay: **PASS**, 2/2;
+- retained Java snapshot fixture checks: **PASS**, 2/2;
+- input-boundary and software-input static gate: **PASS**, 9/9; and
+- live gameplay cycle: **NOT RUN / OUT OF SCOPE**.
+
+A milestone-only checkpoint commit was not created. The authoritative worktree
+was already dirty across the same runtime, EngineFrame, GUI, coordinator, and
+test files for the movement/camera milestone, so a commit could not isolate
+this increment without reconstructing or overwriting pre-existing work.
+
+## Versioned camera-input capability expansion status
+
+The source implementation is **IMPLEMENTED, DETERMINISTICALLY AND FULL-
+REGRESSION VERIFIED, AND NOT FLASHED**. `InputCoordinator` remains the only
+production input owner,
+`_ArduinoHIDTransport` remains private, and production input remains Arduino-
+only. There is still one runtime, one lease, one command ledger, one cleanup
+path, and no task-visible raw command surface. No generic `KEY_DOWN`/`KEY_UP`,
+middle drag, chord, software-input path, window mutation, controller, or parallel
+recovery path was added.
+
+The proposed firmware identifies as `arduino_hid.v2` / `2.0.0` and advertises
+exact `input_capabilities.v2`. Its retained pointer/button/generic-key/cleanup
+limits remain 20 relative counts and 250 ms. It adds only:
+
+- `cameraKeyHold=1`, `cameraKeys=left,right,up,down`, and
+  `maxCameraHoldMs=600`; and
+- `wheel=1` with `maxWheelStep=3`.
+
+`CAMERA_HOLD` accepts one approved direction and 1--600 ms, performs press/wait/
+release atomically, and then reports exact requested/applied duration. `WHEEL`
+accepts only nonzero signed amounts from -3 through 3 and reports exact
+requested/applied amount. The 600 ms maximum is compile-time constrained below
+the 1,000 ms watchdog. Invalid, zero, negative-duration, oversized, malformed,
+extra-token, unarmed, unsupported-key, and unknown commands release all tracked
+input and disarm. Generic key presses retain their old short bound.
+
+The host constructs one frozen negotiated `InputCapabilities` from exact
+identity, CAPS, and STATUS agreement. Every typed intent declares a frozen
+`RequiredInputCapabilities` and fails before activation when support or limit is
+absent. Receipts retain the required and negotiated capability values, exact
+activation boundary, requested/applied hold or wheel value, timing/command
+ledger, later pose/zoom verification, and final cleanup. Old
+`input_transaction_receipt.v1` and `engine_frame.v1` fixtures remain readable
+when these additive fields are absent.
+
+Camera zoom is one semantic task request for the already locked target, not a
+generic wheel API. Before `WHEEL`, the normal loaded/fresh/coherent, PID/session,
+focus, geometry, physical-input-quiet, bank/PIN/dialogue/text-input, and
+SafetyGate rules all remain mandatory. The coordinator additionally proves the
+actual cursor already lies inside the fixed pointer-safe world viewport and is
+owned by the exact foreground root HWND; it does not move the cursor for zoom.
+After ACK, the shared verifier requires a newer same-process/session/location
+observation, expected-sign `zoom3d` movement, changed geometry identity,
+unchanged yaw/pitch, and unchanged protected UI. Unchanged or contradictory zoom
+blocks, and the locked episode cannot burn repeated wheel or yaw/pitch attempts
+to compensate.
+
+Compatibility is explicit: old host plus old v1 firmware remains the historical
+baseline; current host plus v1 firmware preserves pointer/short-key/cleanup but
+types camera hold and wheel as unavailable before activation; current host plus
+exact v2 firmware enables only the newly advertised bounded operations; and old
+v1-only host plus v2 firmware safely rejects the protocol and is not a supported
+deployment pair. Any rollout must therefore be host-first.
+
+Deterministic and complete regression evidence is:
+
+- firmware source-contract/golden harness: **PASS**, 8/8 tests across 25 command
+  vectors;
+- capability plus full Arduino transport modules: **PASS**, 78/78 tests;
+- full InputCoordinator plus ownership/software-input boundary gate: **PASS**,
+  139/139 tests;
+- complete Python regression: **PASS**, 949/949 tests;
+- Python compileall for host, tests, and protocol harness: **PASS**;
+- golden-cycle and retained-camera replay: **PASS**, 7/7 tests;
+- forced Java rebuild/regression: **PASS**, 105/105 tests across 10 suites with
+  zero failures, errors, or skips and all four Gradle tasks executed;
+- Leonardo firmware compile: **PASS**, 14,038/28,672 flash bytes and
+  682/2,560 RAM bytes; and
+- audited documentation/code diff whitespace check: **PASS** for the protocol
+  files.
+
+The harness binds exact CAPS text, constants, dispatch, handler ordering, fatal
+cleanup, limits, ACK shapes, and watchdog relationships to a deterministic
+Python model. The Leonardo compile proves the sketch builds; it does not execute
+the compiled handlers on hardware. Actual HID timing and wheel/`zoom3d` polarity
+remain post-flash live-proof questions. The completed offline gates above are not
+a hardware-installation or live-input claim.
+
+No upload command was run and no board was flashed. Existing historical 250 ms
+camera evidence remains v1 evidence only. The proposed v2 firmware must not be
+treated as installed, negotiated from hardware, or live-proven.
+
+The proposed bounded host-first flash and live-proof procedure is:
+
+1. Freeze the intended host/firmware diff and record its commit or source hashes.
+   Rerun the protocol harness, complete Python and forced Java suites, golden
+   replay, input-boundary/static gates, Leonardo compile, and final diff/status
+   review. Stop on any failure.
+2. Deploy or start the current host while the device still runs v1. Prove the
+   exact serial device/VID/PID, v1 negotiation, refusal of camera hold/wheel
+   before activation, and acknowledged `STOP_ALL -> DISARM -> STATUS` with zero
+   held input. Close the ledger/backend and release the lease.
+3. Present the exact firmware diff, compiled board target and size, deterministic
+   results, compatibility consequence, safety analysis, and this procedure to
+   the user. Obtain a new explicit user approval that specifically authorizes
+   flashing this board. Prior authorization for computer use or testing is not
+   flash approval.
+4. With all engine workers stopped, the lease free, no sensitive text field
+   focused, and the exact Leonardo/serial target re-proven, flash only the
+   reviewed v2 sketch. Do not flash a fallback, another board, or an automatic
+   rollback without separate approval.
+5. After reset, use the current host for a no-gameplay handshake: exact
+   `IDENTIFY`, exact v2 CAPS, and STATUS proving disarmed with zero keys/buttons.
+   Reject any version, field, limit, watchdog, device, or status mismatch.
+6. Run one cleanup-only armed transaction and require acknowledged
+   `STOP_ALL -> DISARM -> STATUS`, a complete closed ledger/backend, and a
+   released lease before any camera operation.
+7. Pin one loaded-scene RuneLite PID/root HWND and exact unchanged outer/client/
+   canvas/viewport geometry. Prove physical-input quiet, PIN/dialogue/bank/text
+   safety, and place the cursor manually at a neutral point inside the world
+   inset. Lock one safe target. Send at most one conservative typed camera hold;
+   require its exact ACK and a fresh changed-pose/geometry result, then complete
+   cleanup.
+8. Only if a fresh decision for the same locked target materially requires zoom,
+   send at most one signed magnitude-one typed zoom. Require cursor ownership,
+   exact unchanged geometry, exact ACK, expected-sign fresh `zoom3d` movement,
+   unchanged yaw/pitch/UI, and complete cleanup. Unchanged or contradictory zoom,
+   target/identity/geometry drift, physical input, or cleanup failure is
+   terminal; do not try the opposite sign or another wheel step.
+9. Only after both applicable camera proofs pass, obtain another fresh
+   recognition/SafetyGate decision and permit at most one ordinary safe target
+   interaction. Finish with acknowledged `STOP_ALL`, `DISARM`, authoritative
+   zero-held STATUS, closed ledger/backend, released lease, and retained exact
+   receipts/samples/timings. Record all commands and explicitly distinguish any
+   Computer Use setup from Arduino production evidence.
+
+This procedure is proposed only. Steps 4--9 remain prohibited until the user
+explicitly approves the flash after every deterministic and full-regression gate
+passes.

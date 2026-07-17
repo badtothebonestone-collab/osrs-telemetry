@@ -35,7 +35,7 @@ echo   run.cmd login COMx             Recover a saved authenticated session
 echo   run.cmd record-demo NAME [options]
 echo   run.cmd inspect-demo PATH
 echo   run.cmd app COMMAND [options]  Use the diagnostic application CLI
-echo   run.cmd replay                 Run the golden cycle replay
+echo   run.cmd replay                 Run golden cycle and retained camera replays
 echo   run.cmd test                   Run the Python and Java suites
 exit /b 0
 
@@ -100,7 +100,7 @@ python -m osrs_bot.gui
 exit /b %ERRORLEVEL%
 
 :replay
-python -m unittest -v tests.test_golden_replay
+python -m unittest -v tests.test_golden_replay tests.test_camera_replay
 exit /b %ERRORLEVEL%
 
 :test

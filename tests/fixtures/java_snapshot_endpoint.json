@@ -31,7 +31,7 @@
         "capturedAtUtc": "2025-01-01T00:00:00.010Z",
         "available": true,
         "errors": [],
-        "sizeBytes": 617
+        "sizeBytes": 630
       },
       "inventory": {
         "sourceTick": 4242,
@@ -101,7 +101,8 @@
         "canvasWidth": 800,
         "canvasHeight": 600,
         "cameraYaw": 512,
-        "cameraPitch": 256
+        "cameraPitch": 256,
+        "zoom3d": 384
       },
       "inputGeometry": {
         "schema": "input_geometry.v1",
@@ -166,6 +167,21 @@
   "missingCapabilities": [],
   "warnings": [],
   "serviceTimingMillis": 0,
+  "endpointQueueDiagnostics": {
+    "schema": "plugin_snapshot_endpoint_queue_diagnostics.v1",
+    "workerLimit": 4,
+    "pendingCapacity": 8,
+    "activeWorkerCount": 0,
+    "pendingRequestCount": 0,
+    "pendingRemainingCapacity": 8,
+    "largestWorkerCount": 0,
+    "completedRequestCount": 0,
+    "executionRejectionCount": 0,
+    "rejectionPolicy": "CALLER_RUNS_BACKPRESSURE",
+    "snapshotRequestActive": false,
+    "snapshotBusyRejectionCount": 0,
+    "executorState": "NOT_STARTED"
+  },
   "responseSizing": {
     "maxResponseBytes": 1048576,
     "requestedProjectionRefs": 16,

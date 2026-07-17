@@ -6,6 +6,9 @@ import math
 import re
 from urllib.parse import urlsplit
 
+from .behavior import BehaviorConfig, DEFAULT_BEHAVIOR_CONFIG
+from .camera import CameraKeyCapabilities
+
 
 MAX_REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_POLL_SECONDS = 5.0
@@ -28,6 +31,11 @@ class RuntimeConfig:
     max_actions: int = 100
     max_runtime_seconds: float = 1_200.0
     verification_timeout_seconds: float = 75.0
+    behavior: BehaviorConfig = DEFAULT_BEHAVIOR_CONFIG
+    camera_key_capabilities: CameraKeyCapabilities = CameraKeyCapabilities(
+        max_hold_millis=600,
+        source="arduino_hid.v2.negotiated_contract",
+    )
 
     def __post_init__(self) -> None:
         _validate_endpoint(self.endpoint)
@@ -54,6 +62,12 @@ class RuntimeConfig:
         if self.verification_timeout_seconds > self.max_runtime_seconds:
             raise ValueError(
                 "verification_timeout_seconds must not exceed max_runtime_seconds"
+            )
+        if not isinstance(self.behavior, BehaviorConfig):
+            raise TypeError("behavior must be BehaviorConfig")
+        if not isinstance(self.camera_key_capabilities, CameraKeyCapabilities):
+            raise TypeError(
+                "camera_key_capabilities must be CameraKeyCapabilities"
             )
 
     def validated_for_mode(self, *, execute: bool) -> RuntimeConfig:

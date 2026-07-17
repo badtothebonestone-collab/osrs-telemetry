@@ -15,17 +15,21 @@ class ClientTickHotState
 	static final String LANE_CLIENT_TICK = "client_tick";
 	static final String LANE_POST_MENU_SORT = "post_menu_sort";
 	static final String LANE_MENU_OPTION_CLICKED = "menu_option_clicked";
+	static final String LANE_CAMERA_INPUT = "camera_input";
 
 	private final int sampleCap;
 	private final ArrayDeque<Map<String, Object>> clientTickSamples = new ArrayDeque<>();
 	private final ArrayDeque<Map<String, Object>> postMenuSortSamples = new ArrayDeque<>();
 	private final ArrayDeque<Map<String, Object>> clickedSamples = new ArrayDeque<>();
+	private final ArrayDeque<Map<String, Object>> cameraInputSamples = new ArrayDeque<>();
 	private Map<String, Object> latestClientTick;
 	private Map<String, Object> latestPostMenuSort;
 	private Map<String, Object> latestMenuOptionClicked;
+	private Map<String, Object> latestCameraInput;
 	private long droppedClientTickSamples;
 	private long droppedPostMenuSortSamples;
 	private long droppedClickedSamples;
+	private long droppedCameraInputSamples;
 	private long nextEventSequence;
 
 	ClientTickHotState()
@@ -71,6 +75,24 @@ class ClientTickHotState
 		droppedClickedSamples += appendBounded(clickedSamples, copy);
 	}
 
+	synchronized void recordCameraInput(Map<String, Object> sample)
+	{
+		Map<String, Object> copy = sequencedSample(sample, LANE_CAMERA_INPUT);
+		if (copy == null)
+		{
+			return;
+		}
+		latestCameraInput = copy;
+		droppedCameraInputSamples += appendBounded(cameraInputSamples, copy);
+	}
+
+	synchronized void clearCameraInput()
+	{
+		latestCameraInput = null;
+		cameraInputSamples.clear();
+		droppedCameraInputSamples = 0L;
+	}
+
 	synchronized Map<String, Object> latestPostMenuSort()
 	{
 		return copySample(latestPostMenuSort);
@@ -88,6 +110,23 @@ class ClientTickHotState
 			boolean includeMenuEntries,
 			int menuEntryLimit)
 	{
+		return snapshot(
+				maxClientTickSamples,
+				maxMenuSamples,
+				maxClickedSamples,
+				0,
+				includeMenuEntries,
+				menuEntryLimit);
+	}
+
+	synchronized Map<String, Object> snapshot(
+			int maxClientTickSamples,
+			int maxMenuSamples,
+			int maxClickedSamples,
+			int maxCameraInputSamples,
+			boolean includeMenuEntries,
+			int menuEntryLimit)
+	{
 		long now = System.currentTimeMillis();
 		int effectiveMenuEntryLimit = Math.min(
 				MAX_MENU_ENTRY_LIMIT,
@@ -96,6 +135,7 @@ class ClientTickHotState
 		Map<String, Object> clientTick = trimmedSample(latestClientTick, includeMenuEntries, effectiveMenuEntryLimit);
 		Map<String, Object> postMenuSort = trimmedSample(latestPostMenuSort, includeMenuEntries, effectiveMenuEntryLimit);
 		Map<String, Object> clicked = trimmedSample(latestMenuOptionClicked, includeMenuEntries, effectiveMenuEntryLimit);
+		Map<String, Object> cameraInput = trimmedSample(latestCameraInput, false, 0);
 		Map<String, Object> metadata = latestMetadataSample(clientTick, postMenuSort, clicked);
 
 		payload.put("schema", SCHEMA);
@@ -114,6 +154,7 @@ class ClientTickHotState
 		payload.put("postMenuSort", postMenuSort);
 		payload.put("hoverMenu", postMenuSort);
 		payload.put("lastMenuOptionClicked", clicked);
+		payload.put("latestCameraInput", cameraInput);
 		payload.put("latency", latencyPayload(now));
 
 		if (maxClientTickSamples > 0)
@@ -127,6 +168,10 @@ class ClientTickHotState
 		if (maxClickedSamples > 0)
 		{
 			payload.put("clickedTail", tail(clickedSamples, maxClickedSamples, includeMenuEntries, effectiveMenuEntryLimit));
+		}
+		if (maxCameraInputSamples > 0)
+		{
+			payload.put("cameraInputTail", tail(cameraInputSamples, maxCameraInputSamples, false, 0));
 		}
 
 		return payload;
@@ -150,17 +195,22 @@ class ClientTickHotState
 		latency.put("ageMillis", ageMillis(latestClientTick, now));
 		latency.put("postMenuSortAgeMillis", ageMillis(latestPostMenuSort, now));
 		latency.put("lastClickAgeMillis", ageMillis(latestMenuOptionClicked, now));
+		latency.put("cameraInputAgeMillis", ageMillis(latestCameraInput, now));
 		Long gameTick = firstLong(latestClientTick, latestPostMenuSort, latestMenuOptionClicked, "gameTickAtSample");
 		Long clientTick = firstLong(latestClientTick, latestPostMenuSort, latestMenuOptionClicked, "clientTick");
 		latency.put("clientTicksSinceGameTick", gameTick == null || clientTick == null ? null : Math.max(0L, clientTick - gameTick));
-		latency.put("samplesBuffered", clientTickSamples.size() + postMenuSortSamples.size() + clickedSamples.size());
+		latency.put("samplesBuffered", clientTickSamples.size() + postMenuSortSamples.size()
+				+ clickedSamples.size() + cameraInputSamples.size());
 		latency.put("clientTickSamplesBuffered", clientTickSamples.size());
 		latency.put("postMenuSortSamplesBuffered", postMenuSortSamples.size());
 		latency.put("clickedSamplesBuffered", clickedSamples.size());
-		latency.put("droppedSamples", droppedClientTickSamples + droppedPostMenuSortSamples + droppedClickedSamples);
+		latency.put("cameraInputSamplesBuffered", cameraInputSamples.size());
+		latency.put("droppedSamples", droppedClientTickSamples + droppedPostMenuSortSamples
+				+ droppedClickedSamples + droppedCameraInputSamples);
 		latency.put("droppedClientTickSamples", droppedClientTickSamples);
 		latency.put("droppedPostMenuSortSamples", droppedPostMenuSortSamples);
 		latency.put("droppedClickedSamples", droppedClickedSamples);
+		latency.put("droppedCameraInputSamples", droppedCameraInputSamples);
 		return latency;
 	}
 

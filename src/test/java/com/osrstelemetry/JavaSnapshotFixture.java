@@ -106,7 +106,8 @@ public final class JavaSnapshotFixture
 						"canvasWidth", 800,
 						"canvasHeight", 600,
 						"cameraYaw", 512,
-						"cameraPitch", 256),
+						"cameraPitch", 256,
+						"zoom3d", 384),
 				"inputGeometry", ordered(
 						"schema", "input_geometry.v1",
 						"sourceTick", SOURCE_TICK,

@@ -12,10 +12,12 @@ PACKAGE = ROOT / "osrs_bot"
 
 REQUIRED_COORDINATOR_OPERATIONS = {
     "_begin_command_ledger",
+    "_acquire_input_lease",
     "_command_evidence",
     "_end_command_ledger",
     "_connect",
     "_arm",
+    "_input_capabilities",
     "_current_position",
     "_move_relative",
     "_assert_foreground",
@@ -24,6 +26,8 @@ REQUIRED_COORDINATOR_OPERATIONS = {
     "_mouse_down",
     "_mouse_up",
     "_press",
+    "_camera_hold",
+    "_wheel",
     "_stop_all",
     "_disarm",
     "_firmware_status",
@@ -46,11 +50,38 @@ FORBIDDEN_RAW_CALLS = REQUIRED_COORDINATOR_OPERATIONS | {
     "_legacy_key_down",
     "_legacy_key_up",
 }
-SOFTWARE_INPUT_MODULES = {"pyautogui", "pydirectinput", "pynput"}
+SOFTWARE_INPUT_MODULES = {
+    "keyboard",
+    "mouse",
+    "pyautogui",
+    "pydirectinput",
+    "pynput",
+}
+GLOBAL_INPUT_HOOK_TOKENS = {
+    "GetAsyncKeyState",
+    "GlobalScreen",
+    "RegisterRawInputDevices",
+    "SetWindowsHookEx",
+    "addAWTEventListener",
+    "org.jnativehook",
+}
+DEMONSTRATION_EVIDENCE_MODULES = {
+    "demonstration.py",
+    "screen_capture.py",
+}
+DEMONSTRATION_FORBIDDEN_IMPORTS = {
+    "action",
+    "arduino",
+    "input_coordinator",
+    "login",
+    "runtime",
+}
 CURSOR_POLICY_MODULES = {
-    "arduino.py",
-    "input_coordinator.py",
-    "login.py",
+    path.name
+    for path in PACKAGE.glob("*.py")
+    # The passive debug overlay is a separately bounded GUI surface whose own
+    # topmost-window placement is not a production input or recovery path.
+    if path.name != "debug_overlay.py"
 }
 FORBIDDEN_CURSOR_MUTATION_APIS = {
     "SetWindowPos",
@@ -112,6 +143,28 @@ class AutomatedInputBoundaryTests(unittest.TestCase):
             self.assertTrue(name.startswith("_"))
             self.assertTrue(hasattr(transport, name), name)
 
+    def test_camera_capability_transport_remains_coordinator_only(self) -> None:
+        for name in ("_input_capabilities", "_camera_hold", "_wheel"):
+            offenders: list[str] = []
+            for path in PACKAGE.rglob("*.py"):
+                if path.name in {"arduino.py", "input_coordinator.py"}:
+                    continue
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == name
+                    ):
+                        offenders.append(f"{path.name}:{node.lineno}:{name}")
+            self.assertEqual([], offenders, name)
+
+        coordinator = (PACKAGE / "input_coordinator.py").read_text(encoding="utf-8")
+        self.assertIn("def execute_camera_hold(", coordinator)
+        self.assertIn("def execute_camera_zoom(", coordinator)
+        self.assertNotIn("def execute_key_down(", coordinator)
+        self.assertNotIn("def execute_key_up(", coordinator)
+
     def test_no_software_input_fallback_exists_in_python_or_java(self) -> None:
         python_offenders: list[str] = []
         for path in PACKAGE.rglob("*.py"):
@@ -133,6 +186,53 @@ class AutomatedInputBoundaryTests(unittest.TestCase):
 
         self.assertEqual([], python_offenders)
         self.assertEqual([], java_offenders)
+
+    def test_demonstration_capture_uses_no_os_or_global_input_hook(self) -> None:
+        offenders: list[str] = []
+        paths = [
+            *(PACKAGE / name for name in sorted(DEMONSTRATION_EVIDENCE_MODULES)),
+            ROOT / "src/main/java/com/osrstelemetry/CameraInputCapture.java",
+            ROOT / "src/main/java/com/osrstelemetry/TelemetryPlugin.java",
+        ]
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            for token in sorted(GLOBAL_INPUT_HOOK_TOKENS):
+                if token in source:
+                    offenders.append(f"{path.relative_to(ROOT)}:{token}")
+
+        self.assertEqual([], offenders)
+
+    def test_demonstration_evidence_modules_have_no_input_authority(self) -> None:
+        offenders: list[str] = []
+        for name in sorted(DEMONSTRATION_EVIDENCE_MODULES):
+            path = PACKAGE / name
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = {
+                        alias.name.split(".", 1)[0] for alias in node.names
+                    }
+                elif isinstance(node, ast.ImportFrom):
+                    imported = {
+                        (node.module or alias.name).split(".", 1)[0]
+                        for alias in node.names
+                    }
+                else:
+                    continue
+                for module in imported & (
+                    DEMONSTRATION_FORBIDDEN_IMPORTS | SOFTWARE_INPUT_MODULES
+                ):
+                    offenders.append(f"{name}:{node.lineno}:import:{module}")
+            for token in (
+                "ArduinoHID",
+                "InputCoordinator",
+                "_ArduinoHIDTransport",
+            ):
+                if token in source:
+                    offenders.append(f"{name}:source:{token}")
+
+        self.assertEqual([], offenders)
 
     def test_production_cursor_recovery_and_focus_cannot_mutate_window_geometry_or_use_software_cursor_input(
         self,
@@ -156,8 +256,8 @@ class AutomatedInputBoundaryTests(unittest.TestCase):
                         f"{name}:{node.lineno}:{referenced_name}"
                     )
 
-        # debug_overlay.py is intentionally outside this production cursor/focus
-        # audit; its passive overlay positioning remains a separate GUI concern.
+        # Every production Python module except the explicitly separate passive
+        # debug overlay is in this cursor/window-mutation audit.
         self.assertEqual([], offenders)
 
     def test_login_runtime_and_actions_depend_on_coordinator_not_transport(self) -> None:

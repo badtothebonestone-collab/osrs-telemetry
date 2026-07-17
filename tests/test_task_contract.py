@@ -198,6 +198,19 @@ class TaskContractTests(unittest.TestCase):
 
         self.assertEqual(projections, ObservationRequest(projections).tile_projections)
 
+    def test_observation_request_accepts_bounded_unique_priority_object_ids(self) -> None:
+        object_ids = tuple(range(1, 33))
+
+        self.assertEqual(
+            object_ids,
+            ObservationRequest(priority_object_ids=object_ids).priority_object_ids,
+        )
+
+        for invalid in ([1276], (1276, 1276), (0,), (-1,), (True,), ("1276",), tuple(range(1, 34))):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    ObservationRequest(priority_object_ids=invalid)  # type: ignore[arg-type]
+
     def test_observation_request_rejects_invalid_structure_and_values(self) -> None:
         invalid_requests = (
             [("target", WorldPoint(3200, 3201, 0))],

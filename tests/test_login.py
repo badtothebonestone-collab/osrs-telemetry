@@ -11,10 +11,12 @@ from PIL import Image, ImageDraw
 
 from osrs_bot import login as login_module
 from osrs_bot.input_coordinator import (
+    CursorInvalidationCause,
     InputCoordinator,
     InputFailureKind,
     InputReceipt,
 )
+from osrs_bot.input_capabilities import InputCapabilities
 from osrs_bot.login import (
     LoginCandidate,
     LoginPromptHelper,
@@ -287,6 +289,34 @@ class FakeBackend:
         self.armed = True
         return {}
 
+    def _input_capabilities(self) -> InputCapabilities:
+        return InputCapabilities.from_negotiation(
+            {"protocol": "arduino_hid.v1", "version": "1.0.0"},
+            {
+                "mouse": True,
+                "keyboard": True,
+                "relativeMove": True,
+                "buttons": "left,right,middle",
+                "keys": "basic",
+                "holdKeys": True,
+                "watchdog": True,
+                "stopAll": True,
+                "resetSafe": True,
+            },
+            {
+                "armed": False,
+                "keysDown": 0,
+                "mouseButtonsDown": 0,
+                "watchdogMs": 1000,
+            },
+        )
+
+    def _camera_hold(self, direction: str, hold_millis: int) -> dict[str, object]:
+        raise AssertionError("login must not use camera hold")
+
+    def _wheel(self, amount: int) -> dict[str, object]:
+        raise AssertionError("login must not use wheel")
+
     def _assert_foreground(self, titles: list[str], *, expected_pid: int) -> dict[str, int]:
         self._call("foreground", expected_pid)
         return {"pid": expected_pid, "hwnd": self.foreground_hwnd}
@@ -515,6 +545,7 @@ def safely_unsent_cursor_receipt(transaction_id: str) -> InputReceipt:
         ledger_closed=True,
         backend_closed=True,
         failure_kind=InputFailureKind.CURSOR_STATE_INVALIDATED,
+        cursor_invalidation_cause=CursorInvalidationCause.CURSOR_REACQUIRED,
     )
 
 
@@ -1844,7 +1875,7 @@ class LoginHelperTests(unittest.TestCase):
         self.assertTrue(target.contains(actual))
         self.assertFalse(actual == ScreenPoint(520, 400))
 
-    def test_login_reobserves_once_after_safe_cursor_interference(self) -> None:
+    def test_login_cursor_interference_after_validation_is_terminal(self) -> None:
         source = FakeObservations(
             [
                 observation("LOGIN_SCREEN", 1),
@@ -1866,17 +1897,20 @@ class LoginHelperTests(unittest.TestCase):
 
         result = helper.run(max_clicks=1, timeout_seconds=10)
 
-        self.assertTrue(result.successful)
-        self.assertEqual(2, len(result.clicks))
+        self.assertFalse(result.successful)
+        self.assertEqual(1, len(result.clicks))
         self.assertFalse(result.clicks[0].sent)
         self.assertIs(
             result.clicks[0].receipt.failure_kind,
             InputFailureKind.CURSOR_STATE_INVALIDATED,
         )
-        self.assertTrue(result.clicks[1].sent)
-        self.assertEqual(2, len(backends))
+        self.assertIs(
+            result.clicks[0].receipt.cursor_invalidation_cause,
+            CursorInvalidationCause.PHYSICAL_INPUT_ACTIVITY,
+        )
+        self.assertIn("cursor_changed_after_pointer_validation", result.reason)
+        self.assertEqual(1, len(backends))
         self.assertNotIn("mouse_down", backends[0].calls)
-        self.assertIn("mouse_down", backends[1].calls)
         self.assertTrue(all("stop_all" in backend.calls for backend in backends))
         self.assertTrue(all("disarm" in backend.calls for backend in backends))
 

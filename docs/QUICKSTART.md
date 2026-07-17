@@ -180,9 +180,10 @@ window/worker; terminal cleanup remains in the GUI status even after that.
 Recording and automation are mutually exclusive. Recording is read-only and
 does not inject input. To review an existing artifact, select **Inspect
 Demonstration** and choose its directory. The trusted existing inspector shows
-validity, semantic timeline, interacted entities, movement facts, gaps,
-ambiguities, and review-only suggestions. It never replays coordinates or
-activates a suggestion.
+  validity, semantic timeline, interacted entities, movement facts,
+  camera-intent episodes, reference timing profiles, gaps, ambiguities, and
+  review-only suggestions. It never replays coordinates, converts observed
+  timing directly into Arduino commands, or activates a suggestion.
 
 ## Diagnostics and evidence
 
@@ -190,7 +191,8 @@ The Diagnostics tab shows commit and schema versions, Python, Java/Gradle,
 RuneLite PID/session, Arduino/lease state, and latest artifact paths.
 
 - **Run Quick Self-Test** runs a bounded focused contract suite.
-- **Run Golden Replay** invokes the existing committed replay.
+- **Run Golden Replay** invokes `run.cmd replay`, which runs both the committed
+  golden cycle and retained-camera deterministic analysis without hardware.
 - Detailed logs stay in `_run_proofs/gui_diagnostics/<timestamp>/`.
 - GUI acceptance screenshots and summaries stay in
   `_run_proofs/gui_acceptance/<timestamp>/`.

@@ -16,11 +16,18 @@ from osrs_bot.engine_frame import (
     ObservationReference,
 )
 from osrs_bot.frontend_presentation import (
+    PRESENTATION_HYSTERESIS_MILLIS,
+    PresentationHysteresisState,
     PresentationState,
+    apply_arduino_health_age,
+    apply_presentation_hysteresis,
     classify_frontend_presentation,
 )
+from osrs_bot.input_coordinator import CommandEvidence, InputReceipt
 from osrs_bot.model import ScreenBounds
+from osrs_bot.observability import ObservabilityEvidence, WaitState
 from osrs_bot.operator_services import (
+    ArduinoReadiness,
     ConnectionSnapshot,
     ConnectionState,
 )
@@ -128,6 +135,8 @@ def _frame(
     blocker: str | None = None,
     terminal_outcome: bool = False,
     safe_cleanup: bool = False,
+    observability: ObservabilityEvidence = ObservabilityEvidence(),
+    receipt: InputReceipt | None = None,
 ) -> EngineFrame:
     verification = (
         VerificationResult(
@@ -171,8 +180,46 @@ def _frame(
             source_tick=source_tick,
         ),
         last_verification=verification,
+        last_execution_status=(receipt.status if receipt is not None else None),
+        last_execution_reason=(receipt.reason if receipt is not None else None),
+        last_execution_receipt=receipt,
         cleanup=cleanup,
         blocker=blocker,
+        observability=observability,
+    )
+
+
+def _failed_ack_receipt() -> InputReceipt:
+    command = CommandEvidence(
+        command_id="cmd-00000001",
+        sequence=1,
+        command="ARM",
+        status="ACK_TIMEOUT_OR_READ_FAIL",
+        write_ok=True,
+        ack_received=False,
+        accepted=False,
+        error="ack timeout",
+    )
+    return InputReceipt(
+        transaction_id="input-00000001",
+        mode="key",
+        intent_ids=("test-key",),
+        status="ERROR",
+        reason="arm_not_acknowledged",
+        connected=True,
+        arm_acknowledged=False,
+        stop_all_acknowledged=False,
+        disarm_acknowledged=False,
+        firmware_status_acknowledged=False,
+        firmware_status=None,
+        commands=(command,),
+        unresolved_command_count=0,
+        failed_command_count=1,
+        ack_missing_count=1,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+        errors=("arm_not_acknowledged",),
     )
 
 
@@ -215,7 +262,8 @@ class FrontendPresentationTests(unittest.TestCase):
             "threading",
             "subprocess",
             "SafetyGate",
-            "Arduino",
+            "_ArduinoHIDTransport",
+            "InputCoordinator",
         ):
             self.assertNotIn(forbidden, source)
 
@@ -231,11 +279,74 @@ class FrontendPresentationTests(unittest.TestCase):
                 "BLOCKED",
                 "SAFE_STOPPED",
                 "DISCONNECTED",
-                "STALE",
+                "WAITING_FOR_NEXT_SCENE_UPDATE",
+                "WAITING_FOR_SOURCE_COHERENCE",
+                "INPUT_TRANSACTION_BUSY",
+                "CURSOR_FEEDBACK_SETTLING",
+                "ARDUINO_HEALTH_STALE",
+                "ARDUINO_COMMAND_FAILED",
+                "SENSOR_STALE",
+                "PRESENTATION_FRAME_STALE",
                 "ERROR",
             },
             {state.value for state in PresentationState},
         )
+        self.assertEqual(
+            {state.value for state in WaitState},
+            {
+                state.value
+                for state in PresentationState
+                if state.name in WaitState.__members__
+            },
+        )
+
+    def test_explicit_wait_state_evidence_maps_exactly_without_string_guessing(
+        self,
+    ) -> None:
+        for wait_state in WaitState:
+            with self.subTest(wait_state=wait_state.value):
+                presentation = _classify(
+                    frame=_frame(
+                        blocker="Arduino stale is only legacy diagnostic text",
+                        observability=ObservabilityEvidence(
+                            wait_state=wait_state,
+                            wait_elapsed_millis=123,
+                        ),
+                    )
+                )
+
+                self.assertIs(
+                    presentation.state,
+                    PresentationState[wait_state.name],
+                )
+                self.assertEqual(123, presentation.wait_elapsed_millis)
+
+    def test_sensor_and_presentation_frame_age_are_distinct(self) -> None:
+        later = NOW + timedelta(milliseconds=2_001)
+        sensor = _classify(
+            now=later,
+            frame=_frame(captured_at=later),
+            connection=_connection(captured_at=NOW),
+        )
+        presentation_frame = _classify(
+            now=later,
+            frame=_frame(captured_at=NOW),
+            connection=_connection(captured_at=later),
+        )
+
+        self.assertIs(sensor.state, PresentationState.SENSOR_STALE)
+        self.assertIs(
+            presentation_frame.state,
+            PresentationState.PRESENTATION_FRAME_STALE,
+        )
+
+    def test_real_failed_ack_is_immediate_arduino_command_failure(self) -> None:
+        presentation = _classify(frame=_frame(receipt=_failed_ack_receipt()))
+
+        self.assertIs(
+            presentation.state, PresentationState.ARDUINO_COMMAND_FAILED
+        )
+        self.assertNotIn("fresh", presentation.reconnect_guidance.casefold())
 
     def test_fresh_current_frame_retains_source_truth_and_geometry(self) -> None:
         presentation = _classify()
@@ -281,7 +392,7 @@ class FrontendPresentationTests(unittest.TestCase):
     def test_frame_becomes_stale_without_a_new_response(self) -> None:
         presentation = _classify(now=NOW + timedelta(milliseconds=2001))
 
-        self.assertIs(presentation.state, PresentationState.STALE)
+        self.assertIs(presentation.state, PresentationState.SENSOR_STALE)
         self.assertAlmostEqual(2.001, presentation.age_seconds)
         self.assertEqual(50, presentation.source_tick)
         self.assertFalse(presentation.current)
@@ -370,7 +481,9 @@ class FrontendPresentationTests(unittest.TestCase):
             frame_run_id="run-000001",
         )
 
-        self.assertIs(presentation.state, PresentationState.STALE)
+        self.assertIs(
+            presentation.state, PresentationState.PRESENTATION_FRAME_STALE
+        )
         self.assertEqual("run-000002", presentation.run_id)
         self.assertEqual("run-000001", presentation.frame_run_id)
         self.assertTrue(presentation.historical)
@@ -477,7 +590,9 @@ class FrontendPresentationTests(unittest.TestCase):
 
         self.assertIs(old_frame.state, PresentationState.DISCONNECTED)
         self.assertFalse(old_frame.start_live_allowed)
-        self.assertIs(incoherent.state, PresentationState.STALE)
+        self.assertIs(
+            incoherent.state, PresentationState.WAITING_FOR_SOURCE_COHERENCE
+        )
         self.assertFalse(incoherent.start_live_allowed)
         self.assertIs(ready.state, PresentationState.READY)
         self.assertEqual(4321, ready.source_process_id)
@@ -542,6 +657,169 @@ class FrontendPresentationTests(unittest.TestCase):
         self.assertEqual("old run failed", presentation.terminal_reason)
         self.assertTrue(presentation.start_live_allowed)
         self.assertFalse(presentation.geometry_allowed)
+
+    def test_timestamped_arduino_health_age_is_passive_and_bounded(self) -> None:
+        ready = _classify(
+            lifecycle=LifecycleState.IDLE,
+            run_id=None,
+            frame_run_id=None,
+            frame=None,
+        )
+        readiness = ArduinoReadiness(
+            "COM6",
+            ("COM6",),
+            True,
+            "available",
+            True,
+            None,
+            None,
+            "lease available",
+            captured_at=NOW,
+            max_age_millis=2_000,
+        )
+
+        fresh = apply_arduino_health_age(
+            ready,
+            readiness,
+            now=NOW + timedelta(milliseconds=2_000),
+        )
+        stale = apply_arduino_health_age(
+            ready,
+            readiness,
+            now=NOW + timedelta(milliseconds=2_001),
+        )
+        legacy = apply_arduino_health_age(
+            ready,
+            replace(readiness, captured_at=None),
+            now=NOW + timedelta(days=2),
+        )
+
+        self.assertIs(fresh.state, PresentationState.READY)
+        self.assertIs(stale.state, PresentationState.ARDUINO_HEALTH_STALE)
+        self.assertEqual(2_001, stale.wait_elapsed_millis)
+        self.assertEqual(ready.start_live_allowed, stale.start_live_allowed)
+        self.assertEqual(ready.geometry_allowed, stale.geometry_allowed)
+        self.assertIs(legacy.state, PresentationState.READY)
+
+    def test_presentation_hysteresis_is_bounded_and_gates_remain_exact(self) -> None:
+        ready = _classify(
+            lifecycle=LifecycleState.IDLE,
+            run_id=None,
+            frame_run_id=None,
+            frame=None,
+        )
+        readiness = ArduinoReadiness(
+            "COM6",
+            ("COM6",),
+            True,
+            "available",
+            True,
+            None,
+            None,
+            "lease available",
+            captured_at=NOW,
+            max_age_millis=2_000,
+        )
+        stale = apply_arduino_health_age(
+            ready,
+            readiness,
+            now=NOW + timedelta(milliseconds=2_001),
+        )
+        _shown, history = apply_presentation_hysteresis(
+            ready,
+            PresentationHysteresisState(),
+            now_monotonic=1.0,
+        )
+        held, history = apply_presentation_hysteresis(
+            stale,
+            history,
+            now_monotonic=1.1,
+        )
+        almost, history = apply_presentation_hysteresis(
+            stale,
+            history,
+            now_monotonic=1.599,
+        )
+        expired, _history = apply_presentation_hysteresis(
+            stale,
+            history,
+            now_monotonic=1.6,
+        )
+
+        self.assertEqual(500, PRESENTATION_HYSTERESIS_MILLIS)
+        self.assertIs(held.state, PresentationState.ARDUINO_HEALTH_STALE)
+        self.assertIs(held.display_state, PresentationState.READY)
+        self.assertTrue(held.start_live_allowed)
+        self.assertIs(almost.display_state, PresentationState.READY)
+        self.assertIs(
+            expired.display_state, PresentationState.ARDUINO_HEALTH_STALE
+        )
+
+    def test_command_failure_bypasses_hysteresis_and_run_change_clears_it(self) -> None:
+        observing = _classify()
+        _shown, history = apply_presentation_hysteresis(
+            observing,
+            PresentationHysteresisState(run_id="run-000001"),
+            now_monotonic=4.0,
+        )
+        failed = _classify(frame=_frame(receipt=_failed_ack_receipt()))
+        immediate, history = apply_presentation_hysteresis(
+            failed,
+            history,
+            now_monotonic=4.001,
+        )
+        mismatched_new_run = _classify(
+            run_id="run-000002",
+            frame_run_id="run-000001",
+        )
+        reset, reset_history = apply_presentation_hysteresis(
+            mismatched_new_run,
+            history,
+            now_monotonic=4.002,
+        )
+
+        self.assertIs(
+            immediate.display_state, PresentationState.ARDUINO_COMMAND_FAILED
+        )
+        self.assertIs(
+            reset.display_state, PresentationState.PRESENTATION_FRAME_STALE
+        )
+        self.assertEqual("run-000002", reset_history.run_id)
+        self.assertIsNone(reset_history.pending_state)
+
+    def test_typed_connect_failure_without_a_ledger_is_immediate(self) -> None:
+        receipt = replace(
+            _failed_ack_receipt(),
+            connected=False,
+            commands=(),
+            failed_command_count=0,
+            ack_missing_count=0,
+            observability=ObservabilityEvidence(
+                wait_state=WaitState.ARDUINO_COMMAND_FAILED,
+                observed_wait_states=(WaitState.ARDUINO_COMMAND_FAILED,),
+            ),
+        )
+
+        presentation = _classify(frame=_frame(receipt=receipt))
+
+        self.assertIs(
+            presentation.state,
+            PresentationState.ARDUINO_COMMAND_FAILED,
+        )
+        self.assertIs(
+            presentation.display_state,
+            PresentationState.ARDUINO_COMMAND_FAILED,
+        )
+
+    def test_legacy_arduino_stale_text_is_not_a_command_failure(self) -> None:
+        presentation = _classify(
+            blockers=("Arduino stale",),
+        )
+
+        self.assertIs(presentation.state, PresentationState.OBSERVING)
+        self.assertIsNot(
+            presentation.state, PresentationState.ARDUINO_COMMAND_FAILED
+        )
 
     def test_failed_probe_has_no_fresh_connection_source_timestamp(self) -> None:
         failed = replace(

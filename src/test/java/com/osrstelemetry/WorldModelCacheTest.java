@@ -117,6 +117,40 @@ public class WorldModelCacheTest
 	}
 
 	@Test
+	public void authoritativePolygonUsesClickboxThenHullThenCanvasTile()
+	{
+		Rectangle clickbox = new Rectangle(10, 20, 30, 40);
+		Rectangle hull = new Rectangle(50, 60, 20, 20);
+		Rectangle tile = new Rectangle(80, 90, 10, 10);
+
+		assertEquals("clickbox", WorldModelCache.authoritativeGeometrySource(
+				clickbox, hull, tile));
+		assertEquals(clickbox.getBounds(), polygonBounds(
+				WorldModelCache.authoritativePolygon(clickbox, hull, tile)));
+		assertEquals("convex_hull", WorldModelCache.authoritativeGeometrySource(
+				null, hull, tile));
+		assertEquals(hull.getBounds(), polygonBounds(
+				WorldModelCache.authoritativePolygon(null, hull, tile)));
+		assertEquals("canvas_tile", WorldModelCache.authoritativeGeometrySource(
+				null, null, tile));
+		assertEquals(tile.getBounds(), polygonBounds(
+				WorldModelCache.authoritativePolygon(null, null, tile)));
+		assertNull(WorldModelCache.authoritativeGeometrySource(null, null, null));
+		assertNull(WorldModelCache.authoritativePolygon(null, null, null));
+	}
+
+	@Test
+	public void authoritativePolygonRejectsMultiContourShapeInsteadOfFlatteningBounds()
+	{
+		Area clickbox = new Area(new Rectangle(10, 10, 20, 20));
+		clickbox.add(new Area(new Rectangle(60, 60, 20, 20)));
+
+		assertEquals("clickbox", WorldModelCache.authoritativeGeometrySource(
+				clickbox, null, null));
+		assertNull(WorldModelCache.authoritativePolygon(clickbox, null, null));
+	}
+
+	@Test
 	public void refreshDecisionIncludesTickGeometryAndExistingTriggers()
 	{
 		assertFalse(WorldModelCache.shouldRefreshSnapshot(
@@ -165,6 +199,82 @@ public class WorldModelCacheTest
 				"geometryFrameId", "geometry-2");
 		long nextFrame = refreshSequence(cache.query(null, List.of(), Map.of(), 10L, 22L, nextGeometry));
 		assertEquals(priorTick + 1L, nextFrame);
+	}
+
+	@Test
+	public void exactSourceCacheIgnoresWallClockAndRetainsBoundedQueryShapes() throws Exception
+	{
+		WorldModelCache cache = new WorldModelCache();
+		Map<String, Object> identity = Map.of(
+				"sessionId", "session-cache",
+				"clientProcessId", 4321L,
+				"geometryFrameId", "geometry-cache");
+		Map<String, Object> broadRequest = Map.of(
+				"worldModel", Map.of("radiusTiles", 32, "maxObjects", 64));
+		Map<String, Object> localRequest = Map.of(
+				"worldModel", Map.of("radiusTiles", 4, "maxObjects", 32));
+
+		Map<String, Object> first = cache.query(
+				null, List.of("scene_object_census"), broadRequest, 10L, 20L, identity);
+		long broadSequence = refreshSequence(first);
+		Thread.sleep(375L);
+		Map<String, Object> repeated = cache.query(
+				null, List.of("scene_object_census"), broadRequest, 10L, 21L, identity);
+		assertEquals(broadSequence, refreshSequence(repeated));
+		assertTrue((Boolean) map(repeated.get("pipeline")).get("cacheHit"));
+
+		Map<String, Object> local = cache.query(
+				null, List.of("scene_object_census"), localRequest, 10L, 22L, identity);
+		assertEquals(broadSequence + 1L, refreshSequence(local));
+		assertFalse((Boolean) map(local.get("pipeline")).get("cacheHit"));
+		Map<String, Object> broadAgain = cache.query(
+				null, List.of("scene_object_census"), broadRequest, 10L, 23L, identity);
+		assertEquals(broadSequence, refreshSequence(broadAgain));
+		assertTrue((Boolean) map(broadAgain.get("pipeline")).get("cacheHit"));
+		assertTrue(((Number) map(broadAgain.get("pipeline")).get("cacheEntries")).intValue() <= 4);
+	}
+
+	@Test
+	public void scanWindowIsPlayerRadiusBoundedAndEdgesFailCompleteness()
+	{
+		WorldModelCache.ScanWindow centered = WorldModelCache.boundedScanWindow(
+				52, 52, 32, 104, 104);
+		assertTrue(centered.valid);
+		assertFalse(centered.clipped);
+		assertEquals(4_225, centered.requestedTileCount);
+		assertEquals(4_225, centered.boundedTileSlots());
+
+		WorldModelCache.ScanWindow corner = WorldModelCache.boundedScanWindow(
+				0, 0, 32, 104, 104);
+		assertTrue(corner.valid);
+		assertTrue(corner.clipped);
+		assertEquals(1_089, corner.boundedTileSlots());
+		assertEquals(0, corner.minX);
+		assertEquals(32, corner.maxX);
+
+		WorldModelCache.ScanWindow outside = WorldModelCache.boundedScanWindow(
+				-100, -100, 4, 104, 104);
+		assertFalse(outside.valid);
+		assertTrue(outside.clipped);
+		assertEquals(0, outside.boundedTileSlots());
+	}
+
+	@Test
+	public void exactPriorityKeysWinBeforeIdsAndInputOrder()
+	{
+		Map<String, Object> exact = Map.of(
+				"objectKey", "exact", "id", 999, "distanceToPlayer", 20);
+		Map<String, Object> idOnly = Map.of(
+				"objectKey", "id-only", "id", 1276, "distanceToPlayer", 1);
+		Map<String, Object> near = Map.of(
+				"objectKey", "near", "id", 999, "distanceToPlayer", 0);
+		List<Map<String, Object>> first = new ArrayList<>(List.of(near, idOnly, exact));
+		List<Map<String, Object>> reversed = new ArrayList<>(List.of(exact, idOnly, near));
+
+		WorldModelCache.sortObjectCensusCandidates(first, List.of("exact"), List.of(1276));
+		WorldModelCache.sortObjectCensusCandidates(reversed, List.of("exact"), List.of(1276));
+		assertEquals(List.of("exact", "id-only", "near"), objectKeys(first));
+		assertEquals(objectKeys(first), objectKeys(reversed));
 	}
 
 	@Test
@@ -231,21 +341,30 @@ public class WorldModelCacheTest
 	}
 
 	@Test
-	public void projectionOrderingUsesOnlyDistanceAndStableIdentity()
+	public void projectionOrderingPrioritizesRequestedIdsWithoutDroppingCompetitors()
 	{
 		Map<String, Object> far = Map.of(
 				"objectKey", "far",
+				"id", 1276,
 				"distanceToPlayer", 10);
 		Map<String, Object> near = Map.of(
 				"objectKey", "near",
+				"id", 999,
 				"distanceToPlayer", 1);
 
 		List<Map<String, Object>> ordered = new ArrayList<>(List.of(far, near));
 		WorldModelCache.sortProjectionCandidates(
 				ordered,
 				32,
-				object -> ((Number) object.get("distanceToPlayer")).intValue());
-		assertEquals("near", ordered.get(0).get("objectKey"));
+				object -> ((Number) object.get("distanceToPlayer")).intValue(),
+				List.of(1276));
+		assertEquals("far", ordered.get(0).get("objectKey"));
+		assertEquals("near", ordered.get(1).get("objectKey"));
+
+		List<Map<String, Object>> census = new ArrayList<>(List.of(near, far));
+		WorldModelCache.sortObjectCensusCandidates(census, List.of(1276));
+		assertEquals("far", census.get(0).get("objectKey"));
+		assertEquals("near", census.get(1).get("objectKey"));
 		assertFalse(WorldModelCache.shouldProjectRecord(false));
 		assertTrue(WorldModelCache.shouldProjectRecord(true));
 
@@ -261,6 +380,10 @@ public class WorldModelCacheTest
 				true, true, true, 192, 193, "player", "player"));
 		assertTrue(WorldModelCache.projectionRefreshRequired(
 				true, true, true, 192, 192, "player", "3200:3200:0"));
+		assertFalse(WorldModelCache.projectionPriorityRefreshRequired(
+				true, false, "[]", "[1276]"));
+		assertTrue(WorldModelCache.projectionPriorityRefreshRequired(
+				true, true, "[]", "[1276]"));
 	}
 
 	@Test
@@ -369,6 +492,27 @@ public class WorldModelCacheTest
 	private static long refreshSequence(Map<String, Object> response)
 	{
 		return ((Number) map(response.get("quality")).get("refreshSequence")).longValue();
+	}
+
+	private static Rectangle polygonBounds(List<Map<String, Object>> polygon)
+	{
+		assertNotNull(polygon);
+		assertTrue(polygon.size() >= 3);
+		int minX = polygon.stream().mapToInt(point -> ((Number) point.get("x")).intValue()).min().orElseThrow();
+		int minY = polygon.stream().mapToInt(point -> ((Number) point.get("y")).intValue()).min().orElseThrow();
+		int maxX = polygon.stream().mapToInt(point -> ((Number) point.get("x")).intValue()).max().orElseThrow();
+		int maxY = polygon.stream().mapToInt(point -> ((Number) point.get("y")).intValue()).max().orElseThrow();
+		return new Rectangle(minX, minY, maxX - minX, maxY - minY);
+	}
+
+	private static List<String> objectKeys(List<Map<String, Object>> objects)
+	{
+		List<String> keys = new ArrayList<>();
+		for (Map<String, Object> object : objects)
+		{
+			keys.add(String.valueOf(object.get("objectKey")));
+		}
+		return keys;
 	}
 
 	@SuppressWarnings("unchecked")

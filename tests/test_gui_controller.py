@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,11 +19,17 @@ from osrs_bot.gui_controller import (
     GuiControllerBusyError,
     GuiControllerClosedError,
 )
+from osrs_bot.frontend_presentation import (
+    PresentationHysteresisState,
+    PresentationState,
+    classify_frontend_presentation,
+)
 from osrs_bot.gui_settings import (
     SETTINGS_SCHEMA,
     GuiSettings,
     GuiSettingsStore,
 )
+from osrs_bot.operator_services import ArduinoReadiness
 from osrs_bot.task_contract import TaskSnapshot, TaskStatus
 
 
@@ -71,6 +78,7 @@ CATALOG = {
         ],
     },
 }
+NOW = datetime(2026, 7, 13, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _snapshot(
@@ -119,6 +127,32 @@ def _frame(sequence: int, *, state: str = "find_tree"):
     return frame
 
 
+def _ready_presentation():
+    connection = SimpleNamespace(
+        endpoint_healthy=True,
+        runelite_found=True,
+        exact_process_binding=True,
+        process_id=1234,
+        session_id="session-a",
+        loaded_scene=True,
+        coherent_fresh_observation=True,
+        source_captured_at=NOW,
+        max_source_age_millis=2_000,
+        source_tick=50,
+        blocker=None,
+        diagnostic=None,
+    )
+    return classify_frontend_presentation(
+        lifecycle=LifecycleState.IDLE,
+        run_id=None,
+        frame_run_id=None,
+        execute_requested=False,
+        frame=None,
+        connection=connection,
+        now=NOW + timedelta(milliseconds=100),
+    )
+
+
 class _FakeApplication:
     def __init__(self, initial: ApplicationSnapshot | None = None) -> None:
         self.current = initial or _snapshot()
@@ -138,6 +172,7 @@ class _FakeApplication:
         self.expected_session_id = None
         self.current_process_id = None
         self.current_session_id = None
+        self.presentation_override = None
 
     @staticmethod
     def catalog():
@@ -162,6 +197,8 @@ class _FakeApplication:
         return {"maxActions": 100, "maxRuntimeSeconds": 900}
 
     def frontend_presentation(self, **_values):
+        if self.presentation_override is not None:
+            return self.presentation_override
         terminal = self.current.lifecycle in {
             LifecycleState.COMPLETE,
             LifecycleState.BLOCKED,
@@ -202,8 +239,10 @@ class _FakeApplication:
         self.calls.append(("arduino_readiness", port))
         return {"port": port, "available": True, "leaseAvailable": True}
 
-    def start(self, *, profile_values, execute=False):
-        self.calls.append(("start", execute, dict(profile_values)))
+    def start(self, *, profile_values, execute=False, live_evidence_root=None):
+        self.calls.append(
+            ("start", execute, dict(profile_values), live_evidence_root)
+        )
         if self.current.active_run_id or self.current.active_capture_id:
             raise RuntimeError("another operation is active")
         self.run_number += 1
@@ -277,6 +316,14 @@ class _FakeApplication:
     def inspect_demonstration(self, path):
         self.calls.append(("inspect_demonstration", Path(path)))
         return {"valid": True, "path": str(path)}
+
+    def review_demonstration(self, path):
+        self.calls.append(("review_demonstration", Path(path)))
+        return {
+            "valid": True,
+            "path": str(path),
+            "routeComparison": {"status": "not_compared", "reviewOnly": True},
+        }
 
     def refresh_connection(self):
         self.connection_calls += 1
@@ -433,6 +480,7 @@ class GuiControllerTests(unittest.TestCase):
             "queue",
             "application",
             "engine_frame",
+            "frontend_presentation",
             "gui_settings",
         }
         offenders = []
@@ -475,7 +523,7 @@ class GuiControllerTests(unittest.TestCase):
         values = observe.profile_values("observe_profile")
         observe.start_observe(values)
         observe.wait_for_idle()
-        self.assertIn(("start", False, values), observe_app.calls)
+        self.assertIn(("start", False, values, None), observe_app.calls)
         self.assertFalse(observe.snapshot().application.execute_requested)
 
         live, live_app = self._controller()
@@ -484,7 +532,15 @@ class GuiControllerTests(unittest.TestCase):
         live.wait_for_idle()
         self.assertIn(("set_arduino_port", "COM7"), live_app.calls)
         self.assertIn(("prepare_live_handoff",), live_app.calls)
-        self.assertIn(("start", True, live_values), live_app.calls)
+        self.assertIn(
+            (
+                "start",
+                True,
+                live_values,
+                Path("_run_proofs/movement_targeting_quality"),
+            ),
+            live_app.calls,
+        )
         self.assertTrue(live.snapshot().application.execute_requested)
         self.assertEqual("COM7", live.snapshot().settings.arduino_port)
 
@@ -691,6 +747,89 @@ class GuiControllerTests(unittest.TestCase):
         self.assertEqual(1, state.engine_frame.sequence)
         self.assertEqual("new-run", state.engine_frame.task.state)
 
+    def test_new_run_without_frame_clears_frame_and_presentation_debounce(self) -> None:
+        run_one = _snapshot(
+            lifecycle=LifecycleState.RUNNING,
+            run_id="run-000001",
+            active_run_id="run-000001",
+            frame=_frame(2, state="old-run"),
+        )
+        app = _FakeApplication(run_one)
+        controller, _app = self._controller(app)
+        with controller._lock:
+            controller._presentation_hysteresis = PresentationHysteresisState(
+                run_id="run-000001",
+                displayed_state=PresentationState.READY,
+                pending_state=PresentationState.SENSOR_STALE,
+                pending_since_monotonic=1.0,
+            )
+
+        run_two = _snapshot(
+            lifecycle=LifecycleState.RUNNING,
+            run_id="run-000002",
+            active_run_id="run-000002",
+            frame=None,
+        )
+        app.current = run_two
+        with controller._lock:
+            controller._apply_application_snapshot_unlocked(run_two, announce=True)
+
+        state = controller.snapshot()
+        self.assertIsNone(state.engine_frame)
+        self.assertIsNone(state.engine_frame_run_id)
+        self.assertEqual("run-000002", controller._presentation_hysteresis.run_id)
+        self.assertIsNone(controller._presentation_hysteresis.pending_state)
+
+        delayed = replace(run_one, lifecycle=LifecycleState.COMPLETE)
+        with controller._lock:
+            controller._apply_application_snapshot_unlocked(delayed, announce=True)
+        self.assertIsNone(controller.snapshot().engine_frame)
+
+    def test_timestamped_arduino_health_is_exact_but_display_only_debounced(
+        self,
+    ) -> None:
+        app = _FakeApplication()
+        app.presentation_override = _ready_presentation()
+        monotonic = [10.0]
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = GuiSettingsStore(
+            Path(directory.name) / ".osrs-telemetry" / "gui-settings.json"
+        )
+        controller = GuiController(
+            app,
+            settings_store=store,
+            presentation_clock=lambda: monotonic[0],
+            presentation_wall_clock=lambda: NOW + timedelta(seconds=3),
+        )
+        self.assertIs(controller.snapshot().presentation.state, PresentationState.READY)
+        with controller._lock:
+            controller._results["arduinoReadiness"] = ArduinoReadiness(
+                "COM6",
+                ("COM6",),
+                True,
+                "available",
+                True,
+                None,
+                None,
+                "lease available",
+                captured_at=NOW,
+                max_age_millis=2_000,
+            )
+
+        monotonic[0] = 10.1
+        held = controller.snapshot().presentation
+        self.assertIs(held.state, PresentationState.ARDUINO_HEALTH_STALE)
+        self.assertIs(held.display_state, PresentationState.READY)
+        self.assertEqual(3_000, held.wait_elapsed_millis)
+        self.assertTrue(held.start_live_allowed)
+
+        monotonic[0] = 10.6
+        expired = controller.snapshot().presentation
+        self.assertIs(
+            expired.display_state, PresentationState.ARDUINO_HEALTH_STALE
+        )
+
     def test_delayed_same_run_active_snapshot_cannot_regress_terminal_state(self) -> None:
         app = _FakeApplication(
             _snapshot(
@@ -832,7 +971,7 @@ class GuiControllerTests(unittest.TestCase):
             {"source": "refresh-1"}, state.result("connection")["connection"]
         )
 
-    def test_demonstration_uses_current_capture_and_high_level_inspector(self) -> None:
+    def test_demonstration_uses_current_capture_and_application_owned_review(self) -> None:
         controller, app = self._controller()
         controller.start_demonstration("short-route", duration_seconds=3.0)
         started = controller.wait_for_idle()
@@ -845,8 +984,11 @@ class GuiControllerTests(unittest.TestCase):
 
         self.assertIn(("end_demonstration", capture_id, 2.0), app.calls)
         self.assertEqual(True, state.result("demonstrationInspection")["valid"])
+        self.assertTrue(
+            state.result("demonstrationInspection")["routeComparison"]["reviewOnly"]
+        )
         self.assertIn(
-            ("inspect_demonstration", Path("demo_runs") / "artifact"), app.calls
+            ("review_demonstration", Path("demo_runs") / "artifact"), app.calls
         )
 
     def test_starting_demonstration_clears_prior_run_engine_frame(self) -> None:

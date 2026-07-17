@@ -5,8 +5,12 @@ const unsigned long BAUD_RATE = 115200;
 const unsigned long WATCHDOG_MS = 1000;
 const int MAX_MOVE_DELTA = 20;
 const unsigned long MAX_HOLD_MS = 250;
-const char *PROTOCOL = "arduino_hid.v1";
-const char *VERSION = "1.0.0";
+const unsigned long MAX_CAMERA_HOLD_MS = 600;
+const int MAX_WHEEL_STEP = 3;
+const char *PROTOCOL = "arduino_hid.v2";
+const char *VERSION = "2.0.0";
+
+static_assert(MAX_CAMERA_HOLD_MS < WATCHDOG_MS, "camera hold must remain below watchdog");
 
 bool armed = false;
 String sessionToken = "";
@@ -64,6 +68,19 @@ void err(const String &code, const String &command)
   Serial.println();
 }
 
+void fatalErr(const String &code, const String &command)
+{
+  stopAll();
+  Serial.print(F("ERR "));
+  Serial.print(code);
+  if (command.length() > 0)
+  {
+    Serial.print(F(" "));
+    Serial.print(command);
+  }
+  Serial.println();
+}
+
 String tokenAt(const String &line, int index)
 {
   int current = 0;
@@ -105,6 +122,30 @@ long parseLongToken(const String &line, int index, bool &okValue)
   long value = strtol(token.c_str(), &endPtr, 10);
   okValue = endPtr != token.c_str() && *endPtr == '\0';
   return value;
+}
+
+int tokenCount(const String &line)
+{
+  int count = 0;
+  int start = 0;
+  int len = line.length();
+  while (start < len)
+  {
+    while (start < len && line[start] == ' ')
+    {
+      start++;
+    }
+    if (start >= len)
+    {
+      break;
+    }
+    count++;
+    while (start < len && line[start] != ' ')
+    {
+      start++;
+    }
+  }
+  return count;
 }
 
 int buttonCode(const String &button)
@@ -174,6 +215,27 @@ char keyCode(const String &name)
   if (name == "space")
   {
     return ' ';
+  }
+  return 0;
+}
+
+char cameraKeyCode(const String &direction)
+{
+  if (direction == "left")
+  {
+    return KEY_LEFT_ARROW;
+  }
+  if (direction == "right")
+  {
+    return KEY_RIGHT_ARROW;
+  }
+  if (direction == "up")
+  {
+    return KEY_UP_ARROW;
+  }
+  if (direction == "down")
+  {
+    return KEY_DOWN_ARROW;
   }
   return 0;
 }
@@ -444,6 +506,92 @@ void handleHoldKeys(const String &line, const String &command)
   ok("HOLD_KEYS");
 }
 
+void handleCameraHold(const String &line, const String &command)
+{
+  if (!armed)
+  {
+    fatalErr("NOT_ARMED", command);
+    return;
+  }
+  if (tokenCount(line) != 3)
+  {
+    fatalErr("BAD_ARGS", command);
+    return;
+  }
+
+  String direction = tokenAt(line, 1);
+  char code = cameraKeyCode(direction);
+  if (!code)
+  {
+    fatalErr("UNSUPPORTED_KEY", command);
+    return;
+  }
+
+  bool okDuration = false;
+  long requestedDurationMs = parseLongToken(line, 2, okDuration);
+  if (!okDuration)
+  {
+    fatalErr("BAD_ARGS", command);
+    return;
+  }
+  if (requestedDurationMs <= 0 || requestedDurationMs > (long)MAX_CAMERA_HOLD_MS)
+  {
+    fatalErr("ERR_LIMIT", command);
+    return;
+  }
+
+  Keyboard.press(code);
+  trackKeyDown(code);
+  delay((unsigned long)requestedDurationMs);
+  Keyboard.release(code);
+  trackKeyUp(code);
+
+  Serial.print(F("OK CAMERA_HOLD direction="));
+  Serial.print(direction);
+  Serial.print(F(" requestedDurationMs="));
+  Serial.print(requestedDurationMs);
+  Serial.print(F(" appliedDurationMs="));
+  Serial.println(requestedDurationMs);
+}
+
+void handleWheel(const String &line, const String &command)
+{
+  if (!armed)
+  {
+    fatalErr("NOT_ARMED", command);
+    return;
+  }
+  if (tokenCount(line) != 2)
+  {
+    fatalErr("BAD_ARGS", command);
+    return;
+  }
+
+  bool okAmount = false;
+  long requestedAmount = parseLongToken(line, 1, okAmount);
+  if (!okAmount)
+  {
+    fatalErr("BAD_ARGS", command);
+    return;
+  }
+  if (requestedAmount == 0 || requestedAmount < -MAX_WHEEL_STEP || requestedAmount > MAX_WHEEL_STEP)
+  {
+    fatalErr("ERR_LIMIT", command);
+    return;
+  }
+
+  Mouse.move(0, 0, (signed char)requestedAmount);
+  Serial.print(F("OK WHEEL requestedAmount="));
+  Serial.print(requestedAmount);
+  Serial.print(F(" appliedAmount="));
+  Serial.println(requestedAmount);
+}
+
+void sendCapabilities()
+{
+  Serial.println(F("OK CAPS schema=input_capabilities.v2 protocol=arduino_hid.v2 firmwareVersion=2.0.0 pointer=1 mouse=1 relativeMove=1 maxMoveDelta=20 buttons=left,right,middle buttonDownUp=1 click=1 maxClickHoldMs=250 keyboard=1 keys=basic keyPress=1 maxKeyPressMs=250 holdKeys=1 maxHoldKeysMs=250 cameraKeyHold=1 cameraKeys=left,right,up,down maxCameraHoldMs=600 wheel=1 maxWheelStep=3 arm=1 watchdog=1 watchdogMs=1000 stopAll=1 disarm=1 status=1 resetSafe=1"));
+}
+
 void handleLine(String line)
 {
   line.trim();
@@ -464,7 +612,7 @@ void handleLine(String line)
   }
   else if (command == "CAPS")
   {
-    ok("CAPS mouse=1 keyboard=1 relativeMove=1 buttons=left,right,middle keys=basic holdKeys=1 watchdog=1 stopAll=1 resetSafe=1");
+    sendCapabilities();
   }
   else if (command == "STATUS")
   {
@@ -525,9 +673,17 @@ void handleLine(String line)
   {
     handleHoldKeys(line, command);
   }
+  else if (command == "CAMERA_HOLD")
+  {
+    handleCameraHold(line, command);
+  }
+  else if (command == "WHEEL")
+  {
+    handleWheel(line, command);
+  }
   else
   {
-    err("UNKNOWN", command);
+    fatalErr("UNKNOWN", command);
   }
 }
 

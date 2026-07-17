@@ -305,3 +305,51 @@ No LLM participates in the facade or runtime. An offline assistant may read
 immutable definitions, demonstration artifacts, run history, and diagnostics,
 but cannot issue input, mutate an active profile, or bypass the task FSM,
 SafetyGate, InputCoordinator, or Verifier.
+
+## Exact passive status presentation
+
+Frontend presentation uses these exact distinct states instead of a generic
+`stale` or `Arduino stale` label:
+
+- `WAITING_FOR_NEXT_SCENE_UPDATE`: neutral wait for the next eligible scene
+  update;
+- `WAITING_FOR_SOURCE_COHERENCE`: neutral wait for coherent/fresh sources;
+- `INPUT_TRANSACTION_BUSY`: the sole transaction/lease is occupied;
+- `CURSOR_FEEDBACK_SETTLING`: bounded pointer feedback is still settling;
+- `ARDUINO_HEALTH_STALE`: passive readiness evidence is too old;
+- `ARDUINO_COMMAND_FAILED`: a real connect/negotiate/arm/write/ACK/rejection or
+  cleanup command failure;
+- `SENSOR_STALE`: the Observation/source freshness safety bound is violated;
+  and
+- `PRESENTATION_FRAME_STALE`: the displayed EngineFrame/run association is too
+  old or no longer current.
+
+The exact `presentation.state` classification and all underlying safety facts
+remain immediate. Expected waits render immediately as neutral rather than
+flashing as faults. The Tkinter layer may hold the prior rendered value for no
+more than 500 ms only across a momentary passive
+`ARDUINO_HEALTH_STALE`, `SENSOR_STALE`, or
+`PRESENTATION_FRAME_STALE` classification. A real
+`ARDUINO_COMMAND_FAILED` bypasses that presentation hysteresis. The debounce
+cannot alter Start/Resume eligibility, blockers, receipts, cleanup, run state,
+or the value returned by the facade/presentation classifier.
+
+Arduino readiness carries an explicit `capturedAtUtc` and a 2,000 ms
+`maxAgeMillis` presentation contract. Only that typed age may produce
+`ARDUINO_HEALTH_STALE`; a legacy readiness value with no capture time remains
+readable and cannot be called stale by inference from its reason text.
+
+On every run-ID change, the controller clears the accepted EngineFrame and
+run-bound presentation data before accepting the new run's frames. A delayed
+old-run callback cannot repopulate them. Legacy EngineFrame and receipt fixtures
+that omit additive observability fields remain readable and render without
+invented timing.
+
+The compact receipt line must read activation truth from
+`lastExecution.activationAttempted` and receipt details from
+`lastExecution.receipt`. `InputReceipt` does not own `activationAttempted`.
+
+The GUI and overlay only render `engine_observability.v1` evidence. They do not
+measure engine phase duration, classify task/safety/retry behavior, open the
+Arduino transport, or send input. This status work adds no control authority
+and no live gameplay acceptance cycle.

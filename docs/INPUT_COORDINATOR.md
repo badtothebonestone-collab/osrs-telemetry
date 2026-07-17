@@ -4,9 +4,10 @@
 
 `osrs_bot.input_coordinator.InputCoordinator` is the only production owner of
 Arduino sessions. Gameplay and saved-session login keep their distinct fresh
-validators, but both submit immutable `ApprovedPointerIntent` or
-`ApprovedKeyIntent` values to the same coordinator. They never receive the
-transport object.
+validators, but submit only immutable `ApprovedPointerIntent`,
+`ApprovedKeyIntent`, `ApprovedCameraHoldIntent`, or
+`ApprovedCameraZoomIntent` values to the same coordinator. They never receive
+the transport object.
 
 The Arduino implementation is the private `_ArduinoHIDTransport`. Its connect,
 arm, movement, button, key, cleanup, status, ledger, and close operations are
@@ -18,12 +19,12 @@ fallback. Static boundary tests reject another production importer or caller.
 Every coordinator transaction is non-reentrant. It creates one private backend,
 begins an empty command ledger, and acquires the shared cross-process input
 lease before any serial connection or pointer preflight. Pointer lanes then
-sample current cursor, focus, virtual-desktop, and exact RuneLite geometry. If
-the cursor is outside the canvas, the same transaction connects and arms the
-existing Arduino transport, performs movement-only reacquisition to a neutral
-canvas region, sends no click or key, cleans up, and returns typed invalidation
-so the caller must rebuild the intent from fresh evidence. Every connected
-input transaction follows this bounded lane:
+sample current cursor, focus, virtual-desktop, and exact RuneLite geometry. An
+ordinary gameplay transaction never turns an invalid cursor sample into
+recovery or activation: it returns typed invalidation and performs complete
+cleanup. Runtime may then request the separate geometry-only, movement-only
+neutral-canvas lane once. Every connected input transaction follows this
+bounded lane:
 
 ```text
 begin command ledger
@@ -56,7 +57,10 @@ click evidence rather than summarized into a mutable backend dictionary.
 `input_transaction_receipt.v1` now adds `cursorFeedback`: bounded wait/settled
 counts, maximum extra polls and elapsed milliseconds, and the last event's
 plan/step, command, before/final points, first/complete effect times, and
-outcome. Movement-only recovery also retains additive `cursorReacquisition`
+outcome. It also retains a bounded ordered `cursorSamples` sequence, the typed
+`cursorInvalidationCause`, exact pointer geometry, activation/movement bounds,
+and initial-versus-correction plan counts. Movement-only recovery also retains
+additive `cursorReacquisition`
 (`cursor_reacquisition.v1`): PMv2 coordinate space, virtual-desktop and neutral
 bounds, before/after cursor, exact bound PID/root HWND and outer/client/canvas
 geometry, completion, unchanged-geometry, and no-activation proof. Every
@@ -65,24 +69,150 @@ these additive fields. `EngineFrame` intentionally retains only the latest
 execution receipt, so a later retry can replace an earlier transaction's
 evidence in terminal run output.
 
+## Versioned capabilities and typed camera input
+
+Capability negotiation is part of protocol-safe ARM, not a task preference.
+The private transport reads `IDENTIFY`, `CAPS`, and wire `STATUS`, constructs one
+frozen `InputCapabilities`, and gives that immutable value only to the
+coordinator transaction. Every approved intent supplies a frozen
+`RequiredInputCapabilities` value. The coordinator compares the requirement to
+the negotiated value after ARM and before the activation callback or command.
+An absent operation or a smaller negotiated limit is therefore
+`CAPABILITY_UNAVAILABLE`, sends no activation command, and still completes the
+normal connected cleanup sequence.
+
+The expanded firmware advertises this exact single-line response:
+
+```text
+OK CAPS schema=input_capabilities.v2 protocol=arduino_hid.v2 firmwareVersion=2.0.0 pointer=1 mouse=1 relativeMove=1 maxMoveDelta=20 buttons=left,right,middle buttonDownUp=1 click=1 maxClickHoldMs=250 keyboard=1 keys=basic keyPress=1 maxKeyPressMs=250 holdKeys=1 maxHoldKeysMs=250 cameraKeyHold=1 cameraKeys=left,right,up,down maxCameraHoldMs=600 wheel=1 maxWheelStep=3 arm=1 watchdog=1 watchdogMs=1000 stopAll=1 disarm=1 status=1 resetSafe=1
+```
+
+The corresponding immutable host serialization is
+`input_capabilities.v2` with these exact fields:
+
+```text
+schema, protocolVersion, firmwareVersion,
+pointer, mouse, relativeMove, maxMoveDelta,
+buttons, buttonDownUp, click, maxClickHoldMs,
+keyboard, keys, keyPress, maxKeyPressMs, holdKeys, maxHoldKeysMs,
+cameraKeyHold, cameraKeys, maxCameraHoldMs,
+wheel, maxWheelStep,
+arm, watchdog, watchdogMs, stopAll, disarm, status, resetSafe
+```
+
+`buttons` and `cameraKeys` become immutable sets at the host boundary and
+serialize in one fixed order.
+Identity/CAPS protocol, identity/CAPS firmware version, and CAPS/STATUS watchdog
+must agree exactly; every support flag and numeric limit must match its strict
+typed schema. The host refuses
+unknown protocol versions, malformed types, missing fields, unsupported button
+or camera-key names, duplicate names, a hold at or above the watchdog, and any
+advertised limit above its compiled safety maximum. Existing generic key press
+and multi-key transport limits remain 250 ms; task code gains no multi-key,
+raw `KEY_DOWN`/`KEY_UP`, chord, middle-drag, or transport-command surface.
+
+Typed requirements use `required_input_capabilities.v1` and one of
+`pointer_move`, `pointer_click`, `generic_key_press`, `camera_key_hold`,
+`camera_zoom`, or `cleanup`. Camera callers request only semantic direction,
+duration, or signed zoom amount. They cannot select a wire command.
+
+The two new private wire operations are:
+
+```text
+CAMERA_HOLD <left|right|up|down> <1..600>
+OK CAMERA_HOLD direction=<direction> requestedDurationMs=<n> appliedDurationMs=<n>
+
+WHEEL <-3..-1|1..3>
+OK WHEEL requestedAmount=<n> appliedAmount=<n>
+```
+
+`CAMERA_HOLD` is one atomic firmware operation: press the one approved arrow,
+wait the bounded duration, release it, then acknowledge. It never exposes a
+separated key-down/up transaction. Its host uses one overall ACK deadline equal
+to the requested duration plus a bounded 500 ms margin; intervening reads cannot
+restart that deadline. `BOOT` or `WATCHDOG_STOP` before the exact camera/wheel
+ACK is terminal rather than ignorable noise. The 600 ms firmware maximum is
+compile-time constrained below the 1,000 ms watchdog. Negative, zero,
+oversized, malformed, extra-token, unarmed, or unsupported-direction requests
+are rejected without clamping. `WHEEL` is armed-only, signed, nonzero, and
+bounded to magnitude three. Both ACKs must return the requested and applied
+values exactly; disagreement is a transport failure and triggers fail-safe
+cleanup.
+
+Firmware rejection of either new operation, or an unknown command, releases
+all tracked keyboard and mouse state, clears the session token, and disarms.
+The host never retries a rejected state-changing command. A write/ACK timeout,
+malformed ACK, capability mismatch, or cleanup failure remains unsuccessful and
+cannot be converted into verification credit. Firmware watchdog expiry itself
+releases tracked input and disarms; it is never camera verification evidence.
+
+Camera hold still requires the existing fresh camera-pose validator. Camera
+zoom additionally requires a loaded, fresh, coherent scene; exact PID/root
+HWND, foreground ownership, and unchanged outer/client/canvas/viewport
+geometry; physical-input quiet; cursor containment and point ownership inside
+the engine pointer-safe world viewport; and bank, PIN, dialogue, and text-input
+safety. The coordinator does not move the cursor for zoom. After an acknowledged
+wheel operation, the shared verifier requires a newer coherent observation from
+the same process/session and player location, changed geometry, zoom movement in
+the requested sign, unchanged yaw/pitch, and unchanged protected UI state.
+Unchanged or contradictory zoom fails typed verification and cannot authorize a
+compensating input loop.
+
+The additive receipt fields are `requiredCapabilities`,
+`negotiatedCapabilities`, `activationBoundary`, and `cameraVerification`.
+`input_activation_boundary.v1` retains operation/command, exact PID and optional
+root HWND, attempted/acknowledged state, command sequence, requested/applied
+duration or wheel amount, cursor point where required, source geometry frame,
+and pre-action yaw/pitch/zoom. `camera_input_verification.v1` retains pending,
+pass, or fail status; observed tick; before/after pose and zoom; before/after
+geometry identities; and protected-UI equality. These are additive to
+`input_transaction_receipt.v1`; old receipts and EngineFrames may omit them and
+must not be interpreted as having negotiated the new operations.
+
+Compatibility is deliberately fail-closed:
+
+| Host | Firmware/CAPS | Result |
+|---|---|---|
+| legacy v1 host | legacy v1 firmware | unchanged pointer, short-key, and cleanup behavior |
+| current host | legacy `arduino_hid.v1` firmware | conservative `input_capabilities.v1`; pointer and short generic key behavior remain available, while camera hold and wheel fail before activation |
+| current host | exact `arduino_hid.v2` / `input_capabilities.v2` firmware | typed camera hold and wheel are available only within negotiated limits |
+| legacy v1 host | v2 firmware | unsupported protocol; safe refusal, not a supported deployment pairing |
+
+This matrix requires a host-first upgrade. Firmware v2 must not be flashed while
+a v1-only production host is still expected to operate it.
+
 ## Pointer policy
 
-`osrs_bot.pointer.plan_pointer_motion` is a pure deterministic policy. It emits
-only relative deltas inside the caller's verified transit region, with bounded
-per-command displacement, velocity, acceleration, and target-aware braking.
-It reaches the exact target at rest and contains no randomization or transport
+`osrs_bot.pointer.plan_pointer_motion` is a pure seed-reproducible policy. It
+emits only relative deltas inside the caller's verified transit region, with
+bounded per-command displacement, velocity, acceleration, target-size-aware
+braking, and controlled curved-path variation. Distance, target geometry,
+action context, and screen bounds influence duration and approach. The selected
+seed, decision ID, style, control points, duration, and settled endpoint remain
+observable. The policy reaches the selected target at rest and has no transport
 access. The private transport independently rejects zero moves and deltas over
 20 pixels on either axis.
 
-The coordinator aims at the center/proposed safe point but separately evaluates
-observed arrival because integer Arduino HID counts and Win32 device pixels need
+The engine derives one fixed 16-device-pixel inset inside the authoritative
+RuneLite viewport. Because the viewport is already in PMv2 Win32 device pixels,
+the inset is applied exactly once and is not display-scale multiplied. Every
+ordinary gameplay intent must use that exact inset as its movement bound, and
+every planned waypoint, actual feedback/correction sample, transit point,
+settled point, context-row point, and activation point must remain inside it.
+A viewport too small for the inset blocks.
+
+The coordinator aims at the engine-selected safe interior point but separately
+evaluates observed arrival because integer Arduino HID counts and Win32 device pixels need
 not share a one-pixel lattice at scaled display settings. It feeds the pure
 planner exact, bounded command-space waypoints and normally lets each plan finish
 at rest before replanning from actual cursor feedback. If bounded delayed-
 feedback settlement interrupts a trajectory, the coordinator discards its
-remainder and requires a fresh correction or zero-step confirmation plan. The
-complete Arduino transaction, including context-row movement, is capped at 64
-plans and 512 MOVE commands.
+remainder and requires a fresh correction or zero-step confirmation plan.
+Ordinary gameplay receives exactly one initial plan plus at most two correction
+replans; it cannot consume the reacquisition allowance or create dozens of
+gameplay plans. The separate cursor-reacquisition lane retains its own bounded
+allowance of one initial plan plus at most 63 correction replans. Both lanes
+remain subject to the 512-MOVE transaction cap.
 Only a settled endpoint inside an explicit caller-
 approved activation region may authorize a click; a transient crossing cannot.
 An already-stable point in that region is represented by a complete zero-step
@@ -126,12 +256,16 @@ must sample and prove identical PID/HWND and outer/client geometry before and
 after; it never restores, moves, or resizes the window. Failed focus or a
 minimized window is an actionable manual-attention blocker.
 
-If the freshly sampled cursor is outside the canvas, its start must be inside
-the freshly proven PMv2 virtual desktop. The coordinator derives a central
+Cursor reacquisition is never implicit ordinary pointer execution. It accepts
+only an `ApprovedCursorRecoveryIntent` containing pinned geometry and identity;
+it cannot carry a target validator, button, key, or stale semantic intent. Its
+start must be inside the freshly proven PMv2 virtual desktop. The coordinator
+derives a central
 neutral canvas region with a safe inset, connects and arms the one Arduino
 transport under the already-held lease, and moves only the cursor toward that
 region. Protocol-safe ARM first proves firmware `keysDown=0` and
-`mouseButtonsDown=0`. Reacquisition sends no click, mouse button, or key. Every movement sample preserves
+`mouseButtonsDown=0`. Reacquisition sends no click, mouse button, or key. Every
+movement sample preserves
 the exact PID/root HWND, foreground ownership, virtual-desktop bounds,
 outer/client/canvas geometry, physical-button release, bounded direction/gain,
 and velocity/acceleration limits. Foreign-surface transit is permitted only
@@ -148,6 +282,9 @@ fresh, wall-clock-fresh, and coherent, plus exact unchanged geometry, before
 target recognition and normal SafetyGate validation. Login
 re-fetches telemetry, re-finds the exact window, and re-screens the entire
 client at tick zero before prompt recognition and validation.
+
+The first executable gameplay action after successful reacquisition must still
+be a pointer action. A key action cannot inherit the recovery retry.
 
 An unknown axis begins with one HID-count probe. Before every MOVE, all four
 directions on both screen axes must contain an explicit envelope of eight device
@@ -196,10 +333,15 @@ remain final vetoes rather than retrospective source attribution.
 
 Effect not observed by 200 ms, instability at 240 ms, focus/owner/bounds drift,
 or invalid transfer becomes typed cursor-state invalidation before activation.
-The gameplay runtime may reobserve once; login permits at most two total cursor-
-recovery attempts, including the first, and then returns an explicit manual-
-attention blocker. A separate later user attempt always samples the user's
-current cursor anew. The receipt retains success and failure timing, including
+Only `unexpected_direction`, `unsupported_transfer_gain`,
+`unexpected_cross_axis`, `outside_padded_viewport`, and
+`point_owner_mismatch` are eligible for gameplay recovery. Identity or geometry
+change, physical-input activity, unresolved feedback, other failures, failed
+cleanup, or a second invalidation are terminal. The gameplay runtime permits at
+most one movement-only reacquisition and one executable fresh pointer retry for
+the complete run; login retains its separately bounded helper policy. A separate
+later user attempt always samples the user's current cursor anew. The receipt
+retains success and failure timing, including
 an effect first observed
 after the deadline, without misclassifying safe firmware cleanup as an input
 error. No path may send another MOVE while the prior effect remains unproved.
@@ -244,7 +386,8 @@ ages its observation beyond two seconds, the loaded proof is refreshed and must
 remain current, coherent, same-identity, and non-regressing.
 
 The coordinator checks focus/PID and actual cursor feedback throughout the
-trajectory. Every correction is another bounded deterministic plan. Immediately
+trajectory. Every correction is another bounded plan derived from its recorded
+decision context. Immediately
 before activation, it passes the actual settled device-pixel point to the
 caller's fresh validator. The cursor must remain unchanged and inside both the
 verified transit and activation bounds before and after that validation, the
@@ -292,16 +435,18 @@ The adaptive gameplay action layer has two typed unsent dispositions.
 `TARGET_EVIDENCE_INVALIDATED` means fresh exact hover proof changed before any
 activation; the resource task may suppress that exact pending key for one fresh
 alternate selection. `CURSOR_STATE_INVALIDATED` means the observed physical
-cursor/ownership/bounds state changed or a no-click reacquisition completed; it
-permits one fresh reobservation but does not suppress the target. Runtime
+cursor state failed with a typed cause or a no-click reacquisition completed. An
+eligible first cause may open exactly one recovery cycle; it never suppresses or
+reuses the old target. Runtime
 accepts either only when the receipt is blocked, the failure kind matches the
 typed disposition, and either connected
 cleanup is authoritative and safe or a pre-serial receipt proves an empty closed
 ledger and closed backend. Any ledger commands must remain preactivation/
 cleanup-only--never mouse activation or a key press. Neither lane is input
 success or a verification result. Any activation command, incomplete terminal
-proof, mismatched denial, identity change, or second consecutive invalidation
-fails closed instead of replanning.
+proof, mismatched denial, identity or geometry change, physical input, non-
+pointer retry, cleanup failure, or second invalidation fails closed instead of
+replanning.
 
 ## Supported callers
 
@@ -313,3 +458,47 @@ fails closed instead of replanning.
 
 Replay, dry-run, observation, diagnostics, overlay, and demonstration capture
 must not construct the coordinator or open hardware.
+
+## Additive timing and wait evidence
+
+The coordinator records diagnostic evidence for work it already owns. Its
+immutable `InputReceipt.observability` uses `engine_observability.v1` and may
+contain aggregates for:
+
+- `input_lease_acquisition`;
+- `arduino_connect_negotiate_arm`;
+- `pointer_planning_feedback_settlement`;
+- `serial_write_acknowledgement`; and
+- `final_cleanup`.
+
+The receipt may retain `INPUT_TRANSACTION_BUSY` and
+`CURSOR_FEEDBACK_SETTLING` in `observedWaitStates`; neither state changes
+success, failure, activation, safety, retry, watchdog, or cleanup semantics.
+An actual typed transport or command failure also retains
+`waitState=ARDUINO_COMMAND_FAILED`, including connect/negotiation failures that
+occur before a command-ledger entry exists. Lease contention and cursor-state
+invalidation do not set that fault state.
+The coordinator's wait-state observer is diagnostic-only and failure-isolated.
+It cannot authorize input or turn a blocked transaction into a retry.
+
+Each additive command record may include `writeDurationMillis` and
+`acknowledgementDurationMillis`. They are bounded, nonnegative numeric evidence
+derived from the existing private transport ledger. Missing values remain
+valid for old backends and old `input_transaction_receipt.v1` fixtures. The
+public evidence never includes the private session token, owner token, raw
+serial command/payload, raw ACK line, secret, or typed text.
+
+`INPUT_TRANSACTION_BUSY` describes coordinator serialization.
+`CURSOR_FEEDBACK_SETTLING` describes the existing bounded physical-feedback
+all-clear. Passive aged Arduino readiness is `ARDUINO_HEALTH_STALE`. A real
+connect/negotiate/arm/write/ACK/rejection/cleanup command failure is
+`ARDUINO_COMMAND_FAILED` and must reach presentation immediately. Freshness or
+source-coherence waits must never be relabeled as Arduino failures.
+
+`activationAttempted` is deliberately not part of `InputReceipt`; the action
+layer conservatively derives that execution fact and EngineFrame serializes it
+at `lastExecution.activationAttempted` beside the nested receipt.
+
+This evidence adds no command, transport caller, firmware operation, software
+cursor path, input pathway, timeout, retry, or safety exception. Completed
+regression acceptance is recorded in `docs/ENGINE_STATUS.md`.

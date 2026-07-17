@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import osrs_bot.debug_overlay as overlay_module
 from osrs_bot.debug_overlay import (
+    CANDIDATE_COLOR,
     ELIGIBLE_COLOR,
     PASSIVE_EX_STYLE_MASK,
     REJECTED_COLOR,
@@ -19,14 +21,25 @@ from osrs_bot.debug_overlay import (
     configure_passive_window,
 )
 from osrs_bot.engine_frame import EngineFramePublisher, EngineStage, ObservationReference
-from osrs_bot.model import Action, ActionKind, ScreenBounds, ScreenPoint
+from osrs_bot.input_coordinator import (
+    CommandEvidence,
+    FirmwareSafetyStatus,
+    InputReceipt,
+    PointerMotionEvidence,
+)
+from osrs_bot.model import Action, ActionKind, ScreenBounds, ScreenPoint, WorldPoint
 from osrs_bot.task_contract import (
+    CameraDecisionEvidence,
     Decision,
     DecisionEvidence,
     RejectedCandidateEvidence,
+    RouteCandidateRejectionEvidence,
+    RouteDecisionEvidence,
     TargetEvidence,
+    TargetingDecisionEvidence,
     TaskSnapshot,
     TaskStatus,
+    TimingDecisionEvidence,
 )
 
 
@@ -80,6 +93,157 @@ def _frame(*, observation_tick: int = 50):
             source_coherent=True,
         ),
         decision=decision,
+    )
+
+
+def _command(sequence: int, name: str) -> CommandEvidence:
+    return CommandEvidence(
+        command_id=f"cmd-{sequence:08d}",
+        sequence=sequence,
+        command=name,
+        status="PASS",
+        write_ok=True,
+        ack_received=True,
+        accepted=True,
+        response_token="OK",
+        payload_token=name,
+    )
+
+
+def _pointer_receipt() -> InputReceipt:
+    names = (
+        "ARM",
+        "MOVE",
+        "MOUSE_DOWN",
+        "MOUSE_UP",
+        "STOP_ALL",
+        "DISARM",
+        "STATUS",
+    )
+    return InputReceipt(
+        transaction_id="input-00000001",
+        mode="pointer",
+        intent_ids=("tree",),
+        status="PASS",
+        reason="input_transaction_succeeded",
+        connected=True,
+        arm_acknowledged=True,
+        stop_all_acknowledged=True,
+        disarm_acknowledged=True,
+        firmware_status_acknowledged=True,
+        firmware_status=FirmwareSafetyStatus(False, 0, 0),
+        commands=tuple(_command(index, name) for index, name in enumerate(names, 1)),
+        unresolved_command_count=0,
+        failed_command_count=0,
+        ack_missing_count=0,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+        pointer_motion=PointerMotionEvidence(
+            plan_count=1,
+            planned_step_count=1,
+            executed_step_count=1,
+            requested_start=ScreenPoint(40, 200),
+            requested_target=ScreenPoint(110, 110),
+            last_planned_target=ScreenPoint(110, 110),
+            settled_target=ScreenPoint(111, 109),
+            direct_distance_px=114.0,
+            planned_path_length_px=121.5,
+            planned_duration_seconds=0.287,
+            style="cubic_bezier",
+            context="object_interaction",
+            seed="42",
+            decision_id="aim-42",
+            control_points=(ScreenPoint(60, 185), ScreenPoint(100, 140)),
+        ),
+    )
+
+
+def _diagnostic_frame():
+    source = _frame()
+    assert source.decision is not None
+    selected = source.decision.evidence.selected
+    eligible = source.decision.evidence.eligible
+    rejected = source.decision.evidence.rejected
+    decision = Decision(
+        "find_tree",
+        "selected varied exact resource point",
+        Action(ActionKind.WAIT, "Wait", 50),
+        DecisionEvidence(
+            selected,
+            eligible,
+            rejected,
+            route=RouteDecisionEvidence(
+                progress_tiles=18.0,
+                remaining_tiles=37.0,
+                lateral_deviation_tiles=0.4,
+                selected_step_id="west_trees_entry",
+                selected_location=WorldPoint(3165, 3228, 0),
+                requested_distance_tiles=14.0,
+                expected_progress_tiles=13.5,
+                actual_progress_tiles=12.0,
+                skipped_guidance_points=("west_wall_corner", "west_field"),
+                mandatory_next_step_id="castle_stairs",
+                candidate_rejections=(
+                    RouteCandidateRejectionEvidence(
+                        "castle_stairs", ("shortcut_unsupported",)
+                    ),
+                ),
+            ),
+            camera=CameraDecisionEvidence(
+                classification="barely_visible",
+                desired_region=ScreenBounds(130, 90, 420, 290),
+                target_point=ScreenPoint(100, 100),
+                action="yaw_left",
+                hold_millis=190,
+                route_direction_bias="west",
+                correction_distance_px=48.0,
+                framing_context="interaction",
+                source_tick=50,
+                geometry_frame_id="geometry-50",
+                target_bounds=ScreenBounds(80, 80, 60, 70),
+                edge_clearance_px=18.0,
+                required_edge_margin_px=72,
+                lookahead_points=(ScreenPoint(150, 110), ScreenPoint(210, 125)),
+                lookahead_bounds=ScreenBounds(140, 95, 90, 50),
+                yaw_error_units=-900,
+                correction_attempt=2,
+                correction_limit=8,
+                cumulative_hold_millis=390,
+            ),
+            targeting=TargetingDecisionEvidence(
+                geometry_source="clickbox",
+                shape_bounds=ScreenBounds(80, 80, 60, 70),
+                inset_region=ScreenBounds(88, 88, 44, 54),
+                candidate_points=(
+                    ScreenPoint(98, 104),
+                    ScreenPoint(110, 110),
+                    ScreenPoint(122, 126),
+                ),
+                selected_point=ScreenPoint(110, 110),
+                selected_score=0.91,
+                previous_points=(ScreenPoint(98, 104),),
+                decision_id="aim-42",
+                seed=42,
+                rejected_reasons=("near_edge",),
+            ),
+            timing=TimingDecisionEvidence(
+                decision_id="aim-42",
+                seed=42,
+                pre_move_delay_seconds=0.031,
+                settle_delay_seconds=0.062,
+                pre_click_delay_seconds=0.027,
+                post_action_delay_seconds=0.119,
+                route_pause_seconds=0.044,
+            ),
+        ),
+    )
+    return EngineFramePublisher().publish(
+        stage=EngineStage.DECIDED,
+        task=source.task,
+        observation=source.observation,
+        decision=decision,
+        last_execution_receipt=_pointer_receipt(),
     )
 
 
@@ -139,6 +303,130 @@ class DebugOverlayTests(unittest.TestCase):
         self.assertTrue(any("target:" in line for line in scene.text_lines))
         self.assertTrue(any("geometry suppressed" in line for line in scene.text_lines))
         self.assertFalse(any("100,100" in line for line in scene.text_lines))
+
+    def test_new_engine_diagnostics_are_visualized_without_selection_logic(self) -> None:
+        scene = build_overlay_scene(_diagnostic_frame())
+
+        labels = tuple(item.label for item in scene.rectangles)
+        self.assertIn("desired camera framing", labels)
+        self.assertIn("camera target shape", labels)
+        self.assertIn("camera lookahead bounds", labels)
+        self.assertIn("target clickbox", labels)
+        self.assertIn("usable aim", labels)
+        self.assertEqual(3, sum(point.color == CANDIDATE_COLOR for point in scene.points))
+        self.assertTrue(any(point.label == "camera target" for point in scene.points))
+        self.assertEqual(
+            2,
+            sum(point.label == "camera lookahead" for point in scene.points),
+        )
+        self.assertTrue(any(point.label == "selected aim" for point in scene.points))
+        self.assertTrue(any(point.label == "settled" for point in scene.points))
+        self.assertTrue(
+            any(line.label == "recent pointer path" for line in scene.polylines)
+        )
+        for prefix in ("route:", "camera:", "aim:", "pointer:", "timing:"):
+            self.assertTrue(any(line.startswith(prefix) for line in scene.text_lines))
+        self.assertTrue(any("request 14.0 tiles" in line for line in scene.text_lines))
+        self.assertTrue(
+            any(
+                "rejected 1 (castle_stairs:shortcut_unsupported)" in line
+                for line in scene.text_lines
+            )
+        )
+        self.assertTrue(any("candidates 3" in line for line in scene.text_lines))
+        camera_line = next(
+            line for line in scene.text_lines if line.startswith("camera:")
+        )
+        self.assertIn("interaction barely_visible", camera_line)
+        self.assertIn("correction 48.0 px", camera_line)
+        self.assertIn("clearance 18.0/72 px", camera_line)
+        self.assertIn("attempt 2/8", camera_line)
+        self.assertIn("cumulative 390 ms", camera_line)
+
+    def test_diagnostic_geometry_is_suppressed_with_stale_observation(self) -> None:
+        frame = _diagnostic_frame()
+        assert frame.observation is not None
+        stale = EngineFramePublisher().publish(
+            stage=frame.stage,
+            task=frame.task,
+            observation=ObservationReference(
+                source_tick=51,
+                captured_at=frame.observation.captured_at,
+                frame_id="frame-51",
+                geometry_frame_id="geometry-51",
+                session_id=frame.observation.session_id,
+                process_id=frame.observation.process_id,
+                canvas_bounds=frame.observation.canvas_bounds,
+                game_state=frame.observation.game_state,
+                loaded_scene=True,
+                client_focused=True,
+                fresh=True,
+                cache_wall_clock_fresh=True,
+                source_coherent=True,
+            ),
+            decision=frame.decision,
+            last_execution_receipt=frame.last_execution_receipt,
+        )
+
+        scene = build_overlay_scene(stale)
+
+        self.assertEqual((), scene.rectangles)
+        self.assertEqual((), scene.points)
+        self.assertEqual((), scene.polylines)
+        self.assertIn("aim: geometry suppressed", scene.text_lines)
+        self.assertFalse(any("110,110" in line for line in scene.text_lines))
+
+    def test_current_camera_geometry_does_not_require_selected_target_geometry(self) -> None:
+        source = _diagnostic_frame()
+        assert source.decision is not None
+        camera = source.decision.evidence.camera
+        decision = Decision(
+            "navigate_to_bank",
+            "frame route lookahead",
+            Action(ActionKind.WAIT, "Wait", 50),
+            DecisionEvidence(camera=camera),
+        )
+        frame = EngineFramePublisher().publish(
+            stage=EngineStage.DECIDED,
+            task=source.task,
+            observation=source.observation,
+            decision=decision,
+        )
+
+        scene = build_overlay_scene(frame)
+
+        self.assertTrue(any(point.label == "camera target" for point in scene.points))
+        self.assertEqual(
+            2,
+            sum(point.label == "camera lookahead" for point in scene.points),
+        )
+        self.assertTrue(
+            any(item.label == "desired camera framing" for item in scene.rectangles)
+        )
+
+    def test_route_projection_contract_fields_render_when_present(self) -> None:
+        points = []
+        polylines = []
+        overlay_module._append_route_geometry(
+            SimpleNamespace(
+                projected_route_points=(
+                    ScreenPoint(100, 200),
+                    ScreenPoint(180, 190),
+                    ScreenPoint(250, 170),
+                ),
+                mandatory_route_points=(ScreenPoint(250, 170),),
+                skipped_route_points=(ScreenPoint(180, 190),),
+                selected_screen_point=ScreenPoint(250, 170),
+            ),
+            points,
+            polylines,
+        )
+
+        self.assertEqual("route corridor", polylines[0].label)
+        self.assertEqual(3, len(polylines[0].points))
+        self.assertEqual(
+            ("mandatory", "", "route target"), tuple(point.label for point in points)
+        )
 
     def test_wall_clock_stale_frame_becomes_text_only_without_new_publication(self) -> None:
         frame = _frame()

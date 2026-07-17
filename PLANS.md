@@ -37,7 +37,9 @@ runtime logic.
 - **D008 — Sensor source contract:** gameplay facts publish as one immutable
   `sensor_frame.v1`; HTTP assembly time is never evidence time. Menu evidence
   is separately stamped, and request-time world/tile geometry is accepted only
-  when tick, session, process, capture age, and geometry frame match.
+  when tick, session, process, capture age, and geometry frame match. Optional
+  definition-owned priority object IDs may order projection work but never filter
+  the census or remove competing objects.
 - **D009 — Minimal task seam:** runtime sees only `Task`, `Decision`, and
   `TaskSnapshot`; task state is opaque. Passing verification always carries a
   typed `Outcome`, and task-specific interface/dialogue/inventory requirements
@@ -77,15 +79,17 @@ runtime logic.
   quantization, while still requiring native-client containment of the exact
   canvas; login geometry stays exact.
 
-- **D016 — Observed pointer arrival:** the pure motion policy still targets one
-  exact command-space waypoint at a time, but integer HID deltas may land on a
+- **D016 — Observed pointer arrival:** each planned path still targets one
+  selected command-space activation point, but integer HID deltas may land on a
   coarser device-pixel lattice under display scaling. The coordinator uses an
-  unknown-axis unit probe, a four-sided transfer envelope, and at most 64
-  actual-feedback plans/512 MOVE commands across the complete Arduino
-  transaction. It may activate only from a settled full-plan endpoint inside an
-  explicit verified region, and fresh validation is bound to that actual point.
-  Gameplay uses at most three pixels around the approved safe point; login may
-  use the freshly recognized prompt bounds.
+  unknown-axis unit probe and a four-sided transfer envelope. Ordinary gameplay
+  receives one initial trajectory plus at most two feedback-correction replans;
+  the separate movement-only cursor-reacquisition lane retains an allowance of
+  one initial plan plus at most 63 correction replans. Both remain under the 512
+  MOVE transaction cap. Activation is permitted only from a settled full-plan
+  endpoint inside an explicit verified region, with fresh validation bound to
+  that actual point. Gameplay uses at most three pixels around the approved safe
+  point; login may use the freshly recognized prompt bounds.
 
 - **D017 — Inventory truth is structural:** the authoritative inventory fact is
   normalized before task use. A visible exact 28-slot inventory may prove an
@@ -99,14 +103,24 @@ runtime logic.
   scans the complete configured search region and fails on ambiguity, but pixel
   and candidate work have hard limits so adversarial or noisy frames cannot
   create unbounded login processing.
-- **D020 — Canonical target and settled pointer remain distinct:** the immutable
-  action retains its authoritative aim identity while fresh safety proof binds
+- **D020 — Selected target and settled pointer remain distinct:** the immutable
+  action retains its authoritative target identity, geometry, selected aim, and
+  decision seed while fresh safety proof binds
   to the actual settled device-pixel endpoint. Transient frame warnings and
   reprojection jitter receive only bounded reobservation; they never relax
   identity, menu, geometry, or focus proof.
-- **D021 — Camera recovery is task-specific input:** a stable unavailable route
-  projection may request the shortest fixed-point yaw arc using 250 ms left or
-  right holds, at most eight verified turns, and a typed camera-pose outcome.
+- **D021 — Camera framing is task-specific input:** the task classifies current
+  and upcoming route/object framing, continues beyond barely visible toward a
+  useful biased region, gives supported long walk targets a bounded leading-edge
+  band, and keeps object clickbox framing stricter. Exact task-owned object
+  identities may enter acquisition while off-screen but cannot activate without
+  fresh authoritative geometry and hover/menu proof. Bounded yaw/pitch holds use
+  a general deadband, fresh lookahead, and a seeded same-tile search when world
+  bearing is unavailable. Each adjustment requires a typed verified pose result,
+  records actual yaw/pitch delta, and invalidates old projections. A later
+  correction requires a fresh signed projection from the changed geometry.
+  Bounded repeated non-improvement may switch only to an exact eligible alternate
+  or mandatory route fallback; absent one, it blocks instead of oscillating.
   Missing evidence still waits, contradictory identity still blocks, and no
   generic navigation or camera planner exists.
 - **D022 — Verification starts after preactivation work:** a sent action rebases
@@ -127,8 +141,12 @@ runtime logic.
 
 - **D024 — Object aim points stay inside API shapes:** object activation uses
   the first present RuneLite shape in clickbox -> convex hull -> canvas tile
-  order and chooses a point inside that actual shape and the viewport.
-  `canvasLocation` alone is not authorization.
+  order. Fully visible shapes use an inset interior region; a clipped or
+  oversized authoritative shape requires bounded visible overlap plus a safe
+  interior aim inside that same shape. Clipping never permits weaker-geometry
+  fallthrough or broadening. UI/competing regions remain excluded, a recorded
+  seed reproduces the bounded strong-candidate choice, and fresh exact hover/menu
+  truth remains the final veto. `canvasLocation` alone is not authorization.
 - **D025 — Live restart and resource recovery remain task-specific:** one
   verified resource no-yield may discard the old tree and reselect once; a
   second no-yield blocks. Fresh full/empty inventory may reconcile only to the
@@ -230,6 +248,76 @@ runtime logic.
   terminal evidence. Existing run, frame, PID/session, source-age, endpoint,
   runtime-result, and cleanup facts determine display state; this adds no
   second connection or control owner.
+- **D037 - Controlled behavioral variation is engine-owned:** route lookahead,
+  proactive camera framing, geometry-aware aim selection, pointer trajectories,
+  and context timing may vary only through one bounded engine policy. Decisions
+  must remain geometry-aware, context-aware, observable, and reproducible from
+  their recorded run seed/decision ID. Tasks supply context and definitions
+  retain route facts; neither duplicates policy constants or weakens safety.
+- **D038 - Manual evidence layers remain orthogonal:** demonstration review keeps
+  intended Walk targets separate from sampled player outcomes, camera input
+  method separate from action association, and exact TileObject identity separate
+  from direct object aim geometry. Quick follow-ups are possible corrections, not
+  proven mistakes. Application-owned comparison may visualize the current fixed
+  route against verified evidence but remains review-only, version-labeled, and
+  unable to rewrite either the hashed artifact or task definition.
+- **D039 - Gameplay pointer containment and recovery are engine-owned and
+  bounded:** ordinary gameplay movement uses one fixed 16-device-pixel inset of
+  the authoritative viewport for every planned, feedback, transit, settled, and
+  activation point. It receives one initial trajectory plus at most two fresh
+  feedback-correction plans. Cursor reacquisition is a separate geometry-only,
+  movement-only `InputCoordinator` lane with its own bounded virtual-desktop-to-
+  neutral-canvas budget. The first eligible typed physical-feedback invalidation
+  may close the original transaction, discard its target/intent, reacquire once,
+  require a strictly newer wall-clock-fresh coherent observation with identical
+  PID/HWND and geometry, rerun recognition and SafetyGate, and retry once. A
+  repeated invalidation, identity/geometry change, physical input, cleanup
+  failure, or non-pointer retry is terminal. No recovery authorizes activation.
+- **D040 - Camera acquisition is one target-locked coarse-to-fine episode:** the
+  task pins one exact object/tile/route target plus its session/PID and client,
+  canvas, and viewport rectangles until that target becomes invalid/depleted,
+  loses authoritative identity, becomes unsafe, or exhausts its bounded non-
+  improvement budget. A safe final range combines authoritative visible/clickbox
+  ratio, a route-biased central region, viewport-edge clearance, valid pitch,
+  and desired zoom classification. World bearing supplies wrap-safe desired yaw;
+  fresh projection supplies the remaining screen correction. The task sends one
+  coarse typed camera key intent and at most one fine intent by default, and each
+  must receive an acknowledged typed pose result with fresh changed geometry.
+  A retained response model binds direction and requested hold to observed yaw/
+  pitch delta, no-effect/limit, and overshoot. It may reverse yaw only after fresh
+  changed-geometry evidence proves overshoot and may not repeat an unchanged-
+  pose pitch limit. Materially unsatisfied zoom that cannot be framed safely is
+  typed `zoom_required_but_unavailable` and sends no compensating key. The
+  current protocol adapter injects a 250 ms maximum; current firmware `CAPS`
+  reports hold-key support but does not numerically advertise that maximum.
+- **D041 - Bounded scene queries are explicitly anchored facts:** every scene
+  census uses either a validated task-neutral world anchor or the authoritative
+  player anchor. Radius and row/projection budgets bound work; they do not
+  classify resources or authorize a task decision. A malformed, wrong-plane,
+  clipped, or outside-scene explicit anchor is incomplete coverage and cannot
+  prove absence.
+- **D042 - Exact-source reuse and backpressure replace accumulating work:** one
+  raw census/index may be reused only for the same source/session/process/
+  geometry/plane/base/dirty identity, raw request shape, and anchor. The
+  client-thread scheduler permits one active and one newest pending request,
+  coalesces identical work, supersedes older pending work, and rejects expired
+  or late results. The bounded endpoint may return retryable `503 endpoint_busy`
+  instead of accumulating snapshot work.
+- **D043 - Object identity is whole-row and negative proof is explicit:** stable
+  keys never combine identity from one row with geometry, actions, or projection
+  from another. Exact duplicates resolve deterministically; contradictory keys
+  are quarantined. Raw census completeness, ordinary absence eligibility, and
+  exact-priority absence eligibility are separate facts. A target lock survives
+  two incomplete or UNKNOWN omissions and then blocks while retaining identity;
+  it unlocks only on authoritative arbitrary absence or exact-priority absence.
+- **D044 - Pipeline evidence is typed diagnostics, not activation authority:**
+  additive `scene_census_evidence.v1` and
+  `observation_pipeline_evidence.v1` travel with Observation and EngineFrame.
+  The task and SafetyGate require explicit complete scene coverage for object
+  activation and fail closed on contradictory identity. Cache, queue, payload,
+  and timing metrics can never authorize input. Legacy artifacts that omit the
+  additive evidence remain readable as UNKNOWN but cannot activate an object or
+  prove absence.
 
 ## Phases and acceptance
 
@@ -245,6 +333,8 @@ runtime logic.
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
 | 9. Operator GUI | Base GUI complete; lifecycle truth implemented, production recheck blocked (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; current/historical/terminal EngineFrame presentation; stale/disconnected Start Live gate; identity-bound reconnect; passive overlay geometry clearing; demonstration and diagnostics. |
+| 10. Movement and targeting quality | In progress; pointer containment deterministic and bounded Arduino-only live gates **PASS** | Polyline route lookahead, classified mandatory points, proactive yaw/pitch framing, authoritative polygon aim candidates, seeded pointer/timing variation, padded pointer containment, one bounded recovery/fresh retry, EngineFrame/overlay diagnostics, focused tests, live route/Tree/cycle proof, full gate, commit, and clean worktree. The pointer submilestone is complete; broader route/Tree/cycle and clean-worktree acceptance remain. |
+| 11. Telemetry, observation, and decision-pipeline reliability | Deterministic and full regression gates **PASS**; current-build live timing remains a documented gap | Explicit anchors and phase budgets; bounded raw/enriched/projection caches; client-thread coalescing/backpressure; truthful completeness; deterministic duplicate quarantine; indexed selection and bounded target continuity; typed EngineFrame diagnostics; replay, complete Python, and forced fresh Java gates. Live `8890`/`8893` listeners were unavailable, so no synthetic-to-live after comparison is claimed. |
 | Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
@@ -366,6 +456,9 @@ runtime logic.
 - Added a pure deterministic relative pointer policy with exact arrival,
   target-aware braking, bounded velocity/acceleration, verified-canvas
   containment, bounded feedback correction, and no randomization.
+- That statement records the Phase 5 implementation. D037 supersedes its blanket
+  no-variation policy while preserving every containment, feedback, and input
+  ownership invariant.
 - Added a non-truncating redacted Arduino command ledger and immutable input
   receipts. Success requires ordered activation evidence followed by
   acknowledged `STOP_ALL`, `DISARM`, and wire `STATUS` proving disarmed with
@@ -758,9 +851,12 @@ runtime logic.
   commands, and no lease.
 - Checkpoints `c8888bb` and `000a886` retain a demonstration through the
   endpoint's bounded sensor-frame/world-model handoff without weakening the
-  Java mismatch rejection. Only the exact all-dynamic-payloads-absent shape is
-  tolerated for five monotonic seconds; session/PID, core scene, tick, hot-tail,
-  raw-payload, warning, or capability contradictions still stop capture.
+  Java mismatch rejection. The world-model payload family must be absent. A
+  rejected `interaction_hot` snapshot may remain only as same-session/PID,
+  schema-checked diagnostic evidence that exactly matches the endpoint's root
+  copy and accompanies the independent hot tail; it is never current menu
+  authority. Session/PID, core scene, tick, hot-tail, raw-payload, warning, or
+  capability contradictions still stop capture.
 - **PASS - accepted manual demonstration.** The clean-commit `000a886` artifact
   `demo_runs/20260712T170027843742Z_final-manual-walk-000a886-final/` records a
   semantic `Walk here` click at source tick 1060 and player movement from
@@ -803,9 +899,11 @@ runtime logic.
 - Each new source tick can still force a world-model refresh behind a 250 ms
   provider wait. A client-thread query can also return at the next sensor tick;
   the endpoint correctly rejects that mismatch, while demonstration recording
-  now tolerates only the exact bounded all-dynamic-payloads-absent handoff. This
-  remains a thin acquisition-latency hardening opportunity, not a second cache
-  or a final-regression blocker.
+  now tolerates only the exact known world-model, interaction-hot, or combined
+  handoff. Rejected world payloads remain absent; retained stale interaction
+  diagnostics stay non-authoritative and strictly bound to the endpoint's root
+  copy and independent hot tail. This remains a thin acquisition-latency
+  hardening opportunity, not a second cache or a final-regression blocker.
 - The later RuneLite GPU errors and Gradle-wrapper PID `500` native-memory
   failure are launch-stack stability limitations, not engine/input cleanup
   failures. Their error and replay logs remain in the ignored proof directory.
@@ -830,3 +928,167 @@ runtime logic.
   attempt history remains a future observability decision, not control state.
 - `input_transaction_receipt.v1` gained additive `cursorFeedback` evidence.
   Current artifacts serialize it; older v1 artifacts may omit the field.
+
+## Bounded observability stabilization
+
+This additive increment makes existing waits and phase durations measurable
+before any further camera or pointer change. It does not add a runtime,
+controller, input pathway, task, or retry owner, and it does not change any
+freshness, coherence, focus, geometry, safety, verification, Arduino, or
+cleanup decision.
+
+The implementation contract is:
+
+- the existing runtime, action layer, SafetyGate caller, InputCoordinator,
+  Arduino transport, Verifier, and cleanup path record only the time spent in
+  phases they already own;
+- immutable `engine_phase_timing.v1` and `engine_observability.v1` evidence is
+  additive to EngineFrame/execution/receipt serialization, so older fixtures
+  may omit it and remain readable;
+- the exact passive wait-state vocabulary is
+  `WAITING_FOR_NEXT_SCENE_UPDATE`, `WAITING_FOR_SOURCE_COHERENCE`,
+  `INPUT_TRANSACTION_BUSY`, `CURSOR_FEEDBACK_SETTLING`,
+  `ARDUINO_HEALTH_STALE`, `ARDUINO_COMMAND_FAILED`, `SENSOR_STALE`, and
+  `PRESENTATION_FRAME_STALE`;
+- expected waits render immediately as neutral wait states. Passive stale
+  display states alone may be presentation-debounced for at most 500 ms.
+  Exact presentation/safety state remains immediate, and a real Arduino
+  command/write/ACK failure bypasses that debounce;
+- compact receipt presentation reads `activationAttempted` from the enclosing
+  EngineFrame `lastExecution`, not from the nested `InputReceipt`; and
+- tests must prove exact classification, immutable and bounded additive timing,
+  legacy readability, run-change clearing, immediate real failure display,
+  secret/text redaction, and unchanged input ownership before this increment is
+  called complete.
+
+Acceptance evidence for this increment is:
+
+- focused deterministic suites: **PASS**, 411/411;
+- complete Python regression through `run.cmd test`: **PASS**, 859/859;
+- Java regression through `run.cmd test`: **PASS**, followed by a forced
+  `gradlew.bat test --rerun-tasks` rebuild: **PASS**, 4/4 tasks executed;
+- golden replay: **PASS**, 2/2;
+- retained Java snapshot fixture checks: **PASS**, 2/2; and
+- live gameplay cycle: **NOT RUN / OUT OF SCOPE**.
+
+Final diff isolation is unsafe because the bounded observability files overlap
+the pre-existing dirty movement/camera worktree. No checkpoint commit may be
+created from that mixed state. No live gameplay cycle is part of acceptance.
+
+## Target-locked coarse-to-fine camera acquisition
+
+The bounded controller and offline gates are **PASS**. The explicit task FSM now
+owns one `CameraAcquisitionEpisode` for an exact selected target and pinned
+session/PID plus client/canvas/viewport geometry. Alternate ranking cannot cause
+target oscillation while the lock remains valid. The final goal is a safe range,
+not one randomized pixel: visibility/clickbox coverage, central route-biased
+framing, edge margin, valid pitch, and zoom class all participate. Activation
+waits for a fresh authoritative final geometry after the episode reaches ready.
+
+One coarse correction plus at most one fine correction is the default and hard
+configured camera budget for this milestone. Hold duration scales with wrap-safe
+world-bearing and fresh screen error using a bounded response model retained from
+verified camera receipts. The injected `CameraKeyCapabilities` maximum clamps
+every request to the current protocol's 250 ms. This is deliberately not
+documented as a numeric firmware negotiation: current `CAPS` text advertises
+`holdKeys=1` but contains no maximum-hold value. Fresh capability negotiation can
+replace that adapter-provided value later without changing controller ownership.
+The controller itself therefore needs no redesign, but the present
+`CameraConstraint`, typed key intent, and Arduino transport still fail closed at
+250 ms; a later firmware/protocol milestone must raise those downstream bounds
+atomically with the newly negotiated capability.
+
+The retained 79-camera-action trace is now a deterministic replay fixture. It
+reproduces camera bursts of `2,2,10,12,2,27,2,1,21`, 36 yaw reversals of which 31
+lacked same-target fresh overshoot evidence, seven target switches within bursts,
+and six DOWN no-effects at pitch `1024`, five redundant after the first unchanged
+limit. The target-locked two-action envelope is at most 18 actions across the
+nine retained episodes: at least 61 fewer, or 77.2%. This is a comparison-only
+bound; it does not claim that counterfactual interactions would have occurred.
+The retained run's cleanup was complete.
+
+Acceptance evidence for the offline increment is:
+
+- complete Python regression through `run.cmd test`: **PASS**, 903/903;
+- combined golden-cycle and retained-camera replay: **PASS**, 7/7; and
+- forced fresh Java rebuild/test with `--rerun-tasks`: **BUILD SUCCESSFUL**,
+  4/4 tasks executed.
+
+The bounded production evidence is **VERIFIED_WITH_GAP**, not strict live
+acceptance. In
+`_run_proofs/camera_controller_live/20260715T051415.0193041Z/qualifying/20260715T053544.948938Z/`,
+one `route:west_wall_corner` episode remained locked across RIGHT coarse and fine
+corrections. The 250 ms coarse hold changed yaw `0 -> 1109`; the 80 ms fine hold
+changed yaw `1109 -> 1588`. Both had acknowledged receipts and fresh changed
+geometry, framing progressed `not_visible -> barely_visible -> usable`, and no
+left/right reversal or pitch command occurred. A cursor outside the inset then
+caused ten Arduino-only no-activation recovery MOVEs and an action-limit stop.
+
+The server disconnected afterward. Separate operator-only Computer Use reconnect
+setup did not count as production input. The next production preflight retained
+the exact PID `11304`, root HWND `3735924`, session, and unchanged outer/client/
+canvas/viewport rectangles, consumed historical physical-input activity, and
+performed the coordinator-required ten-MOVE Arduino-only neutral recovery with
+zero click/key and full cleanup. Fresh continuation evidence at
+`_run_proofs/camera_controller_live/20260715T051415.0193041Z/qualifying_continuation/20260715T054845.604479Z/`
+then executed one Arduino pointer Walk interaction on the same route target: 49
+MOVEs, the allowed maximum two pointer correction replans, one MOUSE_DOWN/UP, and
+player arrival `(3200,3238) -> (3196,3234)`. Its later terminal RIGHT proposal
+was unsent.
+
+Aggregate production counts are two KEY_PRESS, 69 MOVE, one MOUSE_DOWN, and one
+MOUSE_UP across five transactions. Every transaction completed STOP_ALL, DISARM,
+and STATUS; final evidence proves zero held input, closed ledgers/backends, and a
+released lease. No production software input or window mutation occurred. The
+canonical compact analysis is `camera_live_analysis.json`, with terminal cleanup
+in `environment_cleanup.json`. The disconnect split the camera episode and
+interaction across two `EngineApplication` runs, so the required one
+uninterrupted loaded-scene run is not claimed.
+
+The live 250 ms maximum moved 1,109 yaw units but left 5,035 world-bearing units;
+the 80 ms fine hold moved 479 units and reached safe usable framing. Together
+with the retained replay, this shows the current cap materially constrains large
+otherwise-correct coarse turns even though a safe fine-framed interaction was
+reached here. No firmware, `InputCoordinator`, wheel, middle-drag, chord, raw
+key-down/up, software-input, or alternate input path changed.
+
+## Phase 11 telemetry, observation, and decision-pipeline reliability
+
+The implementation and focused deterministic gates are **PASS**. The detailed
+architecture, field semantics, baseline, and measured deltas are recorded in
+`docs/TELEMETRY_PIPELINE.md`. The selected design keeps one authoritative
+Observation and one guarded activation path while separating bounded raw census,
+whole-row enrichment, returned-row projection, host parsing/indexing, and task
+selection.
+
+Acceptance evidence for the completed deterministic regression closeout is:
+
+- a radius-32 synthetic census scans/discovers 4,225 objects and enriches,
+  projects, and returns 64, instead of scanning all 10,816 scene slots and
+  enriching thousands of unreturnable objects;
+- forced-fresh Java scene p50/p95/maximum is 7.520/12.327/12.419 ms,
+  exact-source hit p50/p95/maximum is 0.715/1.527/4.815 ms, and payload bytes
+  are 107,896/107,900/107,902 in the deterministic 4,225-object benchmark;
+- the 64-row Python parser improves from 0.973/1.955/5.386 ms to
+  0.791/1.059/2.202 ms; exact-key lookup improves from 1.031 to 0.077
+  microseconds (13.4x); and oversized 1,000-row input is structurally rejected
+  in 0.049/0.104/0.213 ms instead of accepted in 10.611/15.232/18.105 ms;
+- the 1,001-row target benchmark improves from 0.4388/0.6717/2.2055 ms to
+  0.0669/0.1557/0.4046 ms while identity evaluations fall from 1,001 to 33 and
+  retained rejection records from 1,000 to 32; and
+- scheduler/adversarial tests prove hard depth two, identical-request
+  coalescing, newest-pending supersession, expiry before execution, late-result
+  rejection, deterministic row-order behavior, contradiction quarantine, and
+  bounded incomplete-frame target retention.
+
+The final deterministic gate is **PASS**: `run.cmd test` completed 973/973
+Python tests plus its normal Java gate; forced fresh Java `--rerun-tasks`
+completed 124/124 tests across 12 suites with all four Gradle tasks executed;
+golden-cycle and retained-camera replay completed 7/7; and compile, input-
+boundary, and retained Java snapshot-fixture checks passed. Retained live
+artifacts supply the before distribution, but no current-build loaded-scene
+after distribution is available: neither local `8890` nor `8893` listener was
+running and `observe` failed with connection refused before any input. This is a
+documented live-validation gap rather than a synthetic-to-live comparison.
+Firmware source and input ownership are outside Phase 11, and no firmware was
+flashed.

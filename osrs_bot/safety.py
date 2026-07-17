@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
+from .behavior import point_in_polygon
 from .model import (
     MAX_FUTURE_CLOCK_SKEW_SECONDS,
     Action,
     ActionKind,
     BANK_INTERFACE_NAME,
     CameraConstraint,
+    CameraZoomConstraint,
     CLOSE_BANK_WIDGET_KEY,
     DEPOSIT_INVENTORY_WIDGET_KEY,
     DialogueOptionConstraint,
@@ -21,6 +24,7 @@ from .model import (
     VerificationKind,
     WidgetTarget,
 )
+from .pointer import gameplay_pointer_safe_bounds
 
 
 POINTER_MATCH_TOLERANCE_PX = 3
@@ -101,7 +105,7 @@ class SafetyGate:
         common = _record(
             checks,
             "pre_move.observation",
-            self._validate_observation(observation),
+            self._validate_observation(observation, action),
         )
         if not common.allowed:
             return _evaluation(common, checks)
@@ -297,7 +301,7 @@ class SafetyGate:
         common = _record(
             checks,
             "context_menu.observation",
-            self._validate_observation(observation),
+            self._validate_observation(observation, action),
         )
         if not common.allowed:
             return _evaluation(common, checks)
@@ -428,6 +432,13 @@ class SafetyGate:
         )
         if not pointer_inside.allowed:
             return _evaluation(pointer_inside, checks)
+        pointer_safe = _record(
+            checks,
+            "context_menu.row_pointer_safe_inset",
+            _validate_pointer_safe_point(row_point, observation),
+        )
+        if not pointer_safe.allowed:
+            return _evaluation(pointer_safe, checks)
         pointer_match = _record(
             checks,
             "context_menu.row_pointer_match",
@@ -465,7 +476,7 @@ class SafetyGate:
         common = _record(
             checks,
             f"{stage}.observation",
-            self._validate_observation(observation),
+            self._validate_observation(observation, action),
         )
         if not common.allowed:
             return _evaluation(common, checks)
@@ -574,16 +585,19 @@ class SafetyGate:
                 )
                 if not dialogue_sample.allowed:
                     return _evaluation(dialogue_sample, checks)
-            elif action.task_constraints.camera is not None:
-                camera_sample = _record(
-                    checks,
-                    f"{stage}.camera_sample",
-                    _allow("camera_sample_newer")
-                    if observation.tick > action.source_tick
-                    else _reject("camera_sample_not_newer"),
-                )
-                if not camera_sample.allowed:
-                    return _evaluation(camera_sample, checks)
+        if action.kind in {
+            ActionKind.CAMERA_HOLD,
+            ActionKind.CAMERA_ZOOM,
+        }:
+            camera_sample = _record(
+                checks,
+                f"{stage}.camera_sample",
+                _allow("camera_sample_newer")
+                if observation.tick > action.source_tick
+                else _reject("camera_sample_not_newer"),
+            )
+            if not camera_sample.allowed:
+                return _evaluation(camera_sample, checks)
         action_result = _record(
             checks,
             f"{stage}.action_invariants",
@@ -613,26 +627,45 @@ class SafetyGate:
         observation: Observation,
         point: ScreenPoint | None,
     ) -> SafetyResult:
+        pointer_safe = _validate_pointer_safe_point(point, observation)
+        if not pointer_safe.allowed:
+            return pointer_safe
         if not _points_close(point, action.screen_point):
             return _reject("settled_pointer_outside_verified_region")
         target_bounds: ScreenBounds | None
+        require_fresh_point = True
         if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
             if not action.target_key:
                 return _reject("target_missing")
             target = observation.object_by_key(action.target_key)
             if target is None:
                 return _reject("target_missing")
-            target_bounds = target.geometry.screen_bounds
-            fresh_point = target.geometry.screen_point
+            geometry = target.geometry
+            target_bounds = geometry.screen_bounds
+            fresh_point = geometry.screen_point
+            if (
+                geometry.geometry_source in {"clickbox", "convex_hull", "canvas_tile"}
+                and not geometry.screen_polygon
+            ):
+                return _reject("authoritative_polygon_missing")
+            if geometry.screen_polygon:
+                return _validate_polygon_point(
+                    point,
+                    geometry.screen_polygon,
+                    observation.canvas_bounds,
+                    target_bounds,
+                    allowed_reason="settled_pointer_safe",
+                )
         elif action.kind is ActionKind.CLICK_WIDGET:
             selected = _select_widget(action, observation)
             if selected is None:
                 return _reject("target_missing")
             target_bounds = selected[1].screen_bounds
             fresh_point = selected[1].screen_point
+            require_fresh_point = target_bounds is None
         else:
             return _reject("settled_pointer_unsupported")
-        if not _points_close(point, fresh_point):
+        if require_fresh_point and not _points_close(point, fresh_point):
             return _reject("settled_pointer_outside_fresh_region")
         if target_bounds is None and (
             point != action.screen_point or point != fresh_point
@@ -650,7 +683,11 @@ class SafetyGate:
             else result
         )
 
-    def _validate_observation(self, observation: Observation) -> SafetyResult:
+    def _validate_observation(
+        self,
+        observation: Observation,
+        action: Action | None = None,
+    ) -> SafetyResult:
         if not observation.source_coherent:
             return _reject("source_incoherent")
         if observation.status != "PASS":
@@ -673,6 +710,20 @@ class SafetyGate:
             return _reject("client_not_focused")
         if observation.client_process_id is None or observation.client_process_id <= 0:
             return _reject("client_process_missing")
+        if action is not None and action.kind is ActionKind.INTERACT_OBJECT:
+            census = getattr(observation, "scene_census", None)
+            if (
+                census is None
+                or getattr(census, "metadata_present", False) is not True
+                or getattr(census, "complete", None) is not True
+                or getattr(census, "scene_coverage_complete", None) is not True
+            ):
+                return _reject("scene_census_incomplete")
+            conflicting_keys = getattr(
+                census, "conflicting_duplicate_keys", ()
+            )
+            if action.target_key and action.target_key in conflicting_keys:
+                return _reject("target_identity_contradictory")
         return _allow("observation_safe")
 
     @staticmethod
@@ -690,6 +741,33 @@ class SafetyGate:
         *,
         allow_screen_point_drift: bool = False,
     ) -> SafetyResult:
+        timing_limits = {
+            "pre_move_delay_seconds": 4.0,
+            "settle_delay_seconds": 2.0,
+            "pre_click_delay_seconds": 2.0,
+            "post_action_delay_seconds": 2.0,
+        }
+        for field_name, maximum in timing_limits.items():
+            value = getattr(action, field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0.0
+                or value > maximum
+            ):
+                return _reject("timing_out_of_bounds")
+        if action.kind in {
+            ActionKind.INTERACT_OBJECT,
+            ActionKind.WALK,
+            ActionKind.CLICK_WIDGET,
+        }:
+            pointer_safe = _validate_pointer_safe_point(
+                action.screen_point,
+                observation,
+            )
+            if not pointer_safe.allowed:
+                return pointer_safe
         if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
             return self._validate_object_action(
                 action,
@@ -704,6 +782,10 @@ class SafetyGate:
             )
         if action.kind is ActionKind.PRESS_KEY:
             return self._validate_key_action(action)
+        if action.kind is ActionKind.CAMERA_HOLD:
+            return self._validate_camera_hold_action(action)
+        if action.kind is ActionKind.CAMERA_ZOOM:
+            return self._validate_camera_zoom_action(action, observation)
         if action.kind is ActionKind.WAIT:
             return _allow("wait_safe")
         return _reject("unsupported_action")
@@ -712,7 +794,6 @@ class SafetyGate:
     def _validate_key_action(action: Action) -> SafetyResult:
         dialogue = action.task_constraints.dialogue
         interface = _interface_close_constraint(action)
-        camera = action.task_constraints.camera
         if dialogue is not None:
             if action.key not in {str(value) for value in range(1, 10)}:
                 return _reject("unsafe_key")
@@ -740,34 +821,91 @@ class SafetyGate:
             ):
                 return _reject("interface_close_identity_mismatch")
             return _allow("interface_close_key_shape_safe")
-        if camera is not None:
-            if action.key not in {"left", "right"}:
-                return _reject("unsafe_key")
-            if (
-                action.key != camera.direction
-                or action.key_hold_millis != camera.hold_millis
-            ):
-                return _reject("camera_key_shape_mismatch")
-            if (
-                not action.option
-                or action.target_key != camera.target_key
-                or action.target_name != camera.target_key
-                or action.target_id != 0
-            ):
-                return _reject("camera_target_identity_mismatch")
-            verification = action.verification
-            if (
-                verification is None
-                or verification.kind is not VerificationKind.CAMERA_POSE_CHANGED
-                or verification.before_location != camera.source_location
-                or verification.before_camera_yaw != camera.before_yaw
-                or verification.before_geometry_frame_id
-                != camera.source_geometry_frame_id
-                or verification.camera_key != camera.direction
-            ):
-                return _reject("camera_verification_mismatch")
-            return _allow("camera_key_shape_safe")
         return _reject("key_constraint_missing")
+
+    @staticmethod
+    def _validate_camera_hold_action(action: Action) -> SafetyResult:
+        camera = action.task_constraints.camera
+        if camera is None:
+            return _reject("camera_constraint_missing")
+        if action.key not in {"left", "right", "up", "down"}:
+            return _reject("unsafe_camera_direction")
+        if (
+            action.key != camera.direction
+            or action.key_hold_millis != camera.hold_millis
+        ):
+            return _reject("camera_hold_shape_mismatch")
+        if (
+            not action.option
+            or action.target_key != camera.target_key
+            or action.target_name != (camera.target_name or camera.target_key)
+            or action.target_id != camera.target_id
+        ):
+            return _reject("camera_target_identity_mismatch")
+        verification = action.verification
+        if (
+            verification is None
+            or verification.kind is not VerificationKind.CAMERA_POSE_CHANGED
+            or verification.before_location != camera.source_location
+            or verification.before_camera_yaw != camera.before_yaw
+            or verification.before_camera_pitch != camera.before_pitch
+            or verification.before_geometry_frame_id
+            != camera.source_geometry_frame_id
+            or verification.camera_key != camera.direction
+        ):
+            return _reject("camera_verification_mismatch")
+        return _allow("camera_hold_shape_safe")
+
+    @staticmethod
+    def _validate_camera_zoom_action(
+        action: Action,
+        observation: Observation,
+    ) -> SafetyResult:
+        zoom = action.task_constraints.camera_zoom
+        if zoom is None:
+            return _reject("camera_zoom_constraint_missing")
+        if action.key is not None or action.screen_point is not None:
+            return _reject("camera_zoom_shape_mismatch")
+        if (
+            action.target_key != zoom.target_key
+            or action.target_name != (zoom.target_name or zoom.target_key)
+            or action.target_id != zoom.target_id
+        ):
+            return _reject("camera_target_identity_mismatch")
+        if zoom.amount > 0 and zoom.before_zoom >= zoom.desired_zoom_min:
+            return _reject("camera_zoom_direction_not_required")
+        if zoom.amount < 0 and zoom.before_zoom <= zoom.desired_zoom_max:
+            return _reject("camera_zoom_direction_not_required")
+        verification = action.verification
+        widgets = observation.widgets
+        if (
+            verification is None
+            or verification.kind is not VerificationKind.CAMERA_ZOOM_CHANGED
+            or verification.before_location != zoom.source_location
+            or verification.before_camera_yaw != zoom.before_yaw
+            or verification.before_camera_pitch != zoom.before_pitch
+            or verification.before_camera_zoom != zoom.before_zoom
+            or verification.before_geometry_frame_id
+            != zoom.source_geometry_frame_id
+            or verification.camera_zoom_amount != zoom.amount
+            or verification.before_process_id != observation.client_process_id
+            or verification.before_bank_known is not widgets.bank_known
+            or verification.before_bank_open is not widgets.bank_open
+            or verification.before_bank_pin_open is not widgets.bank_pin_open
+            or verification.before_bank_readable is not widgets.bank_readable
+            or verification.before_dialogue_active is not widgets.dialogue_active
+            or verification.before_dialogue_type != widgets.dialogue_type
+            or verification.before_text_input_active
+            is not observation.text_input_active
+        ):
+            return _reject("camera_zoom_verification_mismatch")
+        if not widgets.bank_known:
+            return _reject("camera_zoom_interface_state_unknown")
+        if widgets.bank_open or widgets.bank_pin_open or widgets.dialogue_active:
+            return _reject("camera_zoom_interface_unsafe")
+        if observation.text_input_active is not False:
+            return _reject("camera_zoom_text_input_state_unsafe")
+        return _allow("camera_zoom_shape_safe")
 
     def _validate_source_menu_sample(
         self, action: Action, observation: Observation
@@ -838,13 +976,27 @@ class SafetyGate:
             return _reject("target_not_actionable")
         if geometry.screen_point is None:
             return _reject("screen_point_missing")
-        point_result = _validate_reprojected_point(
-            action.screen_point,
-            geometry.screen_point,
-            observation.canvas_bounds,
-            geometry.screen_bounds,
-            allow_drift=allow_screen_point_drift,
-        )
+        if (
+            geometry.geometry_source in {"clickbox", "convex_hull", "canvas_tile"}
+            and not geometry.screen_polygon
+        ):
+            return _reject("authoritative_polygon_missing")
+        if geometry.screen_polygon:
+            point_result = _validate_polygon_point(
+                action.screen_point,
+                geometry.screen_polygon,
+                observation.canvas_bounds,
+                geometry.screen_bounds,
+                allowed_reason="screen_point_polygon_safe",
+            )
+        else:
+            point_result = _validate_reprojected_point(
+                action.screen_point,
+                geometry.screen_point,
+                observation.canvas_bounds,
+                geometry.screen_bounds,
+                allow_drift=allow_screen_point_drift,
+            )
         return point_result
 
     def _validate_widget_action(
@@ -866,12 +1018,20 @@ class SafetyGate:
             return _reject("target_name_mismatch")
         if widget.screen_point is None:
             return _reject("screen_point_missing")
-        point_result = _validate_reprojected_point(
-            action.screen_point,
-            widget.screen_point,
-            observation.canvas_bounds,
-            widget.screen_bounds,
-            allow_drift=allow_screen_point_drift,
+        point_result = (
+            _validate_point(
+                action.screen_point,
+                observation.canvas_bounds,
+                widget.screen_bounds,
+            )
+            if widget.screen_bounds is not None
+            else _validate_reprojected_point(
+                action.screen_point,
+                widget.screen_point,
+                observation.canvas_bounds,
+                widget.screen_bounds,
+                allow_drift=allow_screen_point_drift,
+            )
         )
         if not point_result.allowed:
             return point_result
@@ -917,6 +1077,14 @@ class SafetyGate:
             )
             if not camera.allowed:
                 return camera
+        if constraints.camera_zoom is not None:
+            zoom = self._validate_camera_zoom_constraint(
+                action,
+                constraints.camera_zoom,
+                observation,
+            )
+            if not zoom.allowed:
+                return zoom
         return _allow("task_constraints_satisfied")
 
     @staticmethod
@@ -931,6 +1099,11 @@ class SafetyGate:
             return _reject("camera_target_plane_mismatch")
         if observation.camera_yaw != constraint.before_yaw:
             return _reject("camera_pose_changed")
+        if (
+            constraint.before_pitch is not None
+            and observation.camera_pitch != constraint.before_pitch
+        ):
+            return _reject("camera_pose_changed")
         if observation.geometry_frame_id != constraint.source_geometry_frame_id:
             return _reject("camera_geometry_frame_changed")
         target = observation.object_by_key(constraint.target_key)
@@ -938,10 +1111,13 @@ class SafetyGate:
             return _reject("camera_target_missing")
         if (
             target.key != constraint.target_key
-            or target.object_id != 0
-            or target.name != constraint.target_key
-            or target.kind != "NAVIGATION_TILE"
-            or target.actions != ("Walk here",)
+            or target.object_id != constraint.target_id
+            or target.name != (constraint.target_name or constraint.target_key)
+            or target.kind != constraint.target_kind
+            or (
+                constraint.target_action is not None
+                and not target.supports(constraint.target_action)
+            )
             or target.location != constraint.target_location
             or target.scene_x is None
             or target.scene_y is None
@@ -949,9 +1125,76 @@ class SafetyGate:
             or action.target_param1 != target.scene_y
         ):
             return _reject("camera_target_identity_mismatch")
-        if target.geometry.actionable:
-            return _reject("camera_projection_already_actionable")
+        if (
+            target.geometry.actionable
+            and target.geometry.on_screen
+            and target.geometry.visible
+        ):
+            desired = constraint.desired_region
+            point = target.geometry.screen_point
+            proactive = constraint.framing_classification in {
+                "not_visible",
+                "barely_visible",
+                "usable",
+                "obscured_or_contradictory",
+            }
+            classification_requires_reframe = (
+                constraint.framing_classification
+                in {
+                    "not_visible",
+                    "barely_visible",
+                    "obscured_or_contradictory",
+                }
+            )
+            if (
+                not proactive
+                or desired is None
+                or point is None
+                or (
+                    desired.contains(point)
+                    and not classification_requires_reframe
+                )
+            ):
+                return _reject("camera_projection_already_actionable")
         return _allow("camera_constraint_satisfied")
+
+    @staticmethod
+    def _validate_camera_zoom_constraint(
+        action: Action,
+        constraint: CameraZoomConstraint,
+        observation: Observation,
+    ) -> SafetyResult:
+        if observation.location != constraint.source_location:
+            return _reject("camera_source_location_changed")
+        if observation.plane != constraint.target_location.plane:
+            return _reject("camera_target_plane_mismatch")
+        if (
+            observation.camera_yaw != constraint.before_yaw
+            or observation.camera_pitch != constraint.before_pitch
+            or observation.camera_zoom != constraint.before_zoom
+        ):
+            return _reject("camera_pose_changed")
+        if observation.geometry_frame_id != constraint.source_geometry_frame_id:
+            return _reject("camera_geometry_frame_changed")
+        target = observation.object_by_key(constraint.target_key)
+        if target is None:
+            return _reject("camera_target_missing")
+        if (
+            target.object_id != constraint.target_id
+            or target.name != (constraint.target_name or constraint.target_key)
+            or target.kind != constraint.target_kind
+            or (
+                constraint.target_action is not None
+                and not target.supports(constraint.target_action)
+            )
+            or target.location != constraint.target_location
+            or target.scene_x is None
+            or target.scene_y is None
+            or action.target_param0 != target.scene_x
+            or action.target_param1 != target.scene_y
+        ):
+            return _reject("camera_target_identity_mismatch")
+        return _allow("camera_zoom_constraint_satisfied")
 
     @staticmethod
     def _validate_interface_constraint(
@@ -1122,6 +1365,24 @@ def _validate_point(
     return _allow("screen_point_safe")
 
 
+def _validate_pointer_safe_point(
+    point: ScreenPoint | None,
+    observation: Observation,
+) -> SafetyResult:
+    if point is None:
+        return _reject("screen_point_missing")
+    viewport = observation.viewport_bounds
+    if viewport is None:
+        return _reject("viewport_bounds_missing")
+    try:
+        safe_bounds = gameplay_pointer_safe_bounds(viewport)
+    except (TypeError, ValueError):
+        return _reject("viewport_bounds_invalid")
+    if not safe_bounds.contains(point):
+        return _reject("screen_point_outside_pointer_safe_bounds")
+    return _allow("screen_point_inside_pointer_safe_bounds")
+
+
 def _validate_reprojected_point(
     source_point: ScreenPoint | None,
     fresh_point: ScreenPoint,
@@ -1143,6 +1404,24 @@ def _validate_reprojected_point(
         if drifted
         else result
     )
+
+
+def _validate_polygon_point(
+    point: ScreenPoint | None,
+    polygon: tuple[ScreenPoint, ...],
+    canvas_bounds: ScreenBounds | None,
+    target_bounds: ScreenBounds | None,
+    *,
+    allowed_reason: str,
+) -> SafetyResult:
+    if target_bounds is None:
+        return _reject("target_bounds_missing")
+    result = _validate_point(point, canvas_bounds, target_bounds)
+    if not result.allowed:
+        return result
+    if point is None or not point_in_polygon(point, polygon):
+        return _reject("screen_point_outside_polygon")
+    return _allow(allowed_reason)
 
 
 def _valid_coordinate(value: object) -> bool:

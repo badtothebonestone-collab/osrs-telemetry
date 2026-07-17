@@ -68,8 +68,12 @@ provenance. Begin with exactly one built-in Lumbridge definition.
 
 ### Runtime configuration
 
-Machine/session settings: endpoint, Arduino port, polling rate, and hard
-action/runtime limits.
+Machine/session settings: endpoint, Arduino port, polling rate, hard
+action/runtime limits, and one engine-owned behavior policy. Controlled route,
+camera, aim-point, pointer, and timing variation is bounded by that policy,
+adapts to current geometry and context, remains visible in diagnostics, and is
+reproducible when a recorded seed is supplied. Definitions retain route facts;
+tasks do not duplicate behavior-policy constants.
 
 ### Engine invariants
 
@@ -102,10 +106,11 @@ later outcome verification, and authoritative cleanup remain mandatory.
 
 ## Diagnostics, application facade, and operator GUI
 
-The runtime publishes one immutable `EngineFrame`. It includes
-task/state, definition/profile, progress, selected and rejected targets,
-ordered safety checks, pending and last verification, last execution receipt,
-cleanup status, and blockers.
+The runtime publishes one immutable `EngineFrame`. It includes task/state,
+definition/profile, route progress and selected lookahead target, camera
+framing, authoritative target geometry and aim candidates, pointer trajectory
+and selected timing evidence, ordered safety checks, pending and last
+verification, last execution receipt, cleanup status, and blockers.
 
 The implemented `EngineApplication` facade exposes the exact one-task catalog,
 profile schema/validation, tokenized start/pause/resume/safe-stop lifecycle,
@@ -158,3 +163,19 @@ contracts—without broadening into a generic control system.
 The first full operator GUI now consumes those same contracts without adding
 GUI-owned task, safety, input, or verification logic. The CLI remains a bounded
 diagnostic surface rather than a second control system.
+
+## Truthful waits and timing
+
+An operator should be able to distinguish an expected scene/coherence wait, a
+busy input transaction, cursor-feedback settlement, stale sensor or passive
+presentation data, stale Arduino health, and an actual Arduino command failure.
+The engine therefore emits immutable bounded phase timing and exact wait-state
+evidence from the owners that already perform the work. It does not infer
+engine behavior from GUI polling, add a second control loop, or relax any
+freshness, identity, focus, geometry, SafetyGate, verification, Arduino-only,
+or cleanup rule.
+
+Presentation may smooth a momentary passive stale label for no more than 500 ms
+while exact state and safety remain immediate. Expected waits are neutral, and
+an actual command/ACK failure is immediate. The GUI and overlay remain readers;
+these diagnostics never authorize input or change camera/pointer behavior.

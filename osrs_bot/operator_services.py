@@ -182,6 +182,20 @@ class ArduinoReadiness:
     lease_owner: str | None
     lease_owner_pid: int | None
     lease_reason: str
+    captured_at: datetime | None = None
+    max_age_millis: int = 2_000
+
+    def __post_init__(self) -> None:
+        if self.captured_at is not None and not isinstance(
+            self.captured_at, datetime
+        ):
+            raise TypeError("captured_at must be a datetime or None")
+        if (
+            not isinstance(self.max_age_millis, int)
+            or isinstance(self.max_age_millis, bool)
+            or self.max_age_millis < 0
+        ):
+            raise ValueError("max_age_millis must be a non-negative integer")
 
     @property
     def ready(self) -> bool:
@@ -198,6 +212,12 @@ class ArduinoReadiness:
             "leaseOwnerPid": self.lease_owner_pid,
             "leaseReason": self.lease_reason,
             "ready": self.ready,
+            "capturedAtUtc": (
+                self.captured_at.isoformat()
+                if self.captured_at is not None
+                else None
+            ),
+            "maxAgeMillis": self.max_age_millis,
         }
 
 
@@ -793,6 +813,11 @@ class OperatorServices:
         )
 
     def arduino_readiness(self, arduino_port: str | None) -> ArduinoReadiness:
+        try:
+            captured_at = self._aware_now()
+        except Exception:
+            # Additive presentation age cannot change the readiness probe.
+            captured_at = None
         port_error: str | None = None
         try:
             ports = tuple(
@@ -823,6 +848,7 @@ class OperatorServices:
                 None,
                 None,
                 port_error or "no Arduino port is selected",
+                captured_at=captured_at,
             )
         try:
             raw = self._lease_reader(selected)
@@ -842,6 +868,7 @@ class OperatorServices:
                 str(owner) if owner else None,
                 int(owner_pid) if isinstance(owner_pid, int) else None,
                 str(raw.get("reason") or "lease status did not provide a reason"),
+                captured_at=captured_at,
             )
         except Exception as error:
             return ArduinoReadiness(
@@ -853,6 +880,7 @@ class OperatorServices:
                 None,
                 None,
                 "; ".join(value for value in (port_error, _error_text(error)) if value),
+                captured_at=captured_at,
             )
 
     def enable_overlay(

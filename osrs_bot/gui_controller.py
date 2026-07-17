@@ -11,6 +11,12 @@ from queue import Empty, Queue
 
 from .application import ApplicationSnapshot, EngineApplication, LifecycleState
 from .engine_frame import EngineFrame
+from .frontend_presentation import (
+    FrontendPresentation,
+    PresentationHysteresisState,
+    apply_arduino_health_age,
+    apply_presentation_hysteresis,
+)
 from .gui_settings import GuiSettings, GuiSettingsStore
 
 
@@ -21,6 +27,10 @@ _TERMINAL_RUN_STATES = {
     LifecycleState.BLOCKED,
     LifecycleState.ERROR,
 }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class GuiControllerError(RuntimeError):
@@ -116,6 +126,8 @@ class GuiController:
         application: EngineApplication,
         *,
         settings_store: GuiSettingsStore | None = None,
+        presentation_clock: Callable[[], float] = time.monotonic,
+        presentation_wall_clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._application = application
         self._settings_store = settings_store or GuiSettingsStore()
@@ -133,6 +145,12 @@ class GuiController:
         self._close_requested = False
         self._close_ready = False
         self._close_terminal_failure = False
+        if not callable(presentation_clock):
+            raise TypeError("presentation_clock must be callable")
+        if not callable(presentation_wall_clock):
+            raise TypeError("presentation_wall_clock must be callable")
+        self._presentation_clock = presentation_clock
+        self._presentation_wall_clock = presentation_wall_clock
 
         catalog = application.catalog()
         if not isinstance(catalog, Mapping):
@@ -152,6 +170,9 @@ class GuiController:
         self._cleared_frame_key: tuple[str | None, int] | None = None
         self._frame_signature: tuple[object, ...] | None = None
         self._terminal_summary_evidence: TerminalSummaryEvidence | None = None
+        self._presentation_hysteresis = PresentationHysteresisState(
+            run_id=initial.run_id
+        )
         self._apply_application_snapshot_unlocked(initial, announce=False)
         self._record_event_unlocked("controller", "READY", "GUI controller ready")
 
@@ -176,6 +197,32 @@ class GuiController:
                 frame_run_id=self._engine_frame_run_id,
                 use_application_frame=False,
             )
+            if isinstance(presentation, FrontendPresentation):
+                try:
+                    readiness = self._results.get("arduinoReadiness")
+                    if readiness is not None:
+                        presentation = apply_arduino_health_age(
+                            presentation,
+                            readiness,
+                            now=self._presentation_wall_clock(),
+                        )
+                    presentation, self._presentation_hysteresis = (
+                        apply_presentation_hysteresis(
+                            presentation,
+                            self._presentation_hysteresis,
+                            now_monotonic=self._presentation_clock(),
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - display evidence has no authority
+                    # A diagnostic-only clock cannot affect exact state or any
+                    # safety/start gate.  Fall back to immediate presentation.
+                    presentation = replace(
+                        presentation, display_state=presentation.state
+                    )
+                    self._presentation_hysteresis = PresentationHysteresisState(
+                        run_id=presentation.run_id,
+                        displayed_state=presentation.state,
+                    )
             if (
                 getattr(presentation, "terminal_summary", False)
                 and self._engine_frame is not None
@@ -533,11 +580,17 @@ class GuiController:
 
     def inspect_demonstration(self, path: Path | str) -> OperationTicket:
         artifact = Path(path)
+        review = getattr(self._application, "review_demonstration", None)
+        inspect = (
+            (lambda: review(artifact))
+            if callable(review)
+            else (lambda: self._application.inspect_demonstration(artifact))
+        )
         return self._facade_result(
             "demonstration-inspection",
             "inspect-demonstration",
             "demonstrationInspection",
-            lambda: self._application.inspect_demonstration(artifact),
+            inspect,
             settings_patch=(("last_demo_directory", str(artifact)),),
         )
 
@@ -842,6 +895,11 @@ class GuiController:
             started = self._application.start(
                 profile_values=values,
                 execute=execute,
+                live_evidence_root=(
+                    Path("_run_proofs/movement_targeting_quality")
+                    if execute
+                    else None
+                ),
             )
             return _OperationValue(
                 application=started, settings_patch=tuple(settings_patch)
@@ -964,6 +1022,9 @@ class GuiController:
             self._engine_frame_run_id = None
             self._frame_signature = None
             self._cleared_frame_key = None
+            self._presentation_hysteresis = PresentationHysteresisState(
+                run_id=snapshot.run_id
+            )
         self._application_snapshot = snapshot
         frame = snapshot.engine_frame
         if frame is not None:

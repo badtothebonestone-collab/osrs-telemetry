@@ -17,6 +17,7 @@ from osrs_bot.model import (
     WorldPoint,
 )
 from osrs_bot.verification import (
+    CameraZoomResult,
     Outcome,
     OutcomeKind,
     VerificationFailureKind,
@@ -52,7 +53,10 @@ def observation(
     inventory: InventoryObservation | None = None,
     widgets: WidgetObservation | None = None,
     camera_yaw: int | None = None,
+    camera_pitch: int | None = None,
+    camera_zoom: int | None = None,
     geometry_frame_id: str | None = None,
+    text_input_active: bool | None = False,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -87,6 +91,9 @@ def observation(
         menu_session_id=session_id,
         menu_process_id=process_id,
         camera_yaw=camera_yaw,
+        camera_pitch=camera_pitch,
+        camera_zoom=camera_zoom,
+        text_input_active=text_input_active,
     )
 
 
@@ -248,6 +255,12 @@ class VerifierTest(unittest.TestCase):
         )
         self.assertTrue(changed.passed)
         self.assertEqual(OutcomeKind.CAMERA_POSE_CHANGED, changed.outcome.kind)
+        pose = changed.outcome.camera_pose_result
+        self.assertIsNotNone(pose)
+        self.assertEqual("right", pose.camera_key)
+        self.assertEqual(1_200, pose.yaw_delta)
+        self.assertEqual("camera-frame-0", pose.before_geometry_frame_id)
+        self.assertEqual("camera-frame-1200", pose.after_geometry_frame_id)
 
         left = replace(spec, before_camera_yaw=0, camera_key="left")
         wrapped_left = self.verifier.evaluate(
@@ -259,6 +272,40 @@ class VerifierTest(unittest.TestCase):
             ),
         )
         self.assertTrue(wrapped_left.passed)
+        self.assertEqual(-237, wrapped_left.outcome.camera_pose_result.yaw_delta)
+
+        pitch_up = replace(
+            spec,
+            before_camera_pitch=900,
+            camera_key="up",
+        )
+        pitch_up_result = self.verifier.evaluate(
+            pitch_up,
+            observation(
+                location=location,
+                camera_yaw=0,
+                camera_pitch=1_050,
+                geometry_frame_id="camera-pitch-1050",
+            ),
+        )
+        self.assertTrue(pitch_up_result.passed)
+        self.assertEqual(150, pitch_up_result.outcome.camera_pose_result.pitch_delta)
+        pitch_down = replace(
+            pitch_up,
+            before_camera_pitch=1_050,
+            camera_key="down",
+        )
+        self.assertTrue(
+            self.verifier.evaluate(
+                pitch_down,
+                observation(
+                    location=location,
+                    camera_yaw=0,
+                    camera_pitch=930,
+                    geometry_frame_id="camera-pitch-930",
+                ),
+            ).passed
+        )
 
         for candidate in (
             observation(
@@ -282,6 +329,239 @@ class VerifierTest(unittest.TestCase):
                     VerificationStatus.PENDING,
                     self.verifier.evaluate(spec, candidate).status,
                 )
+
+    def test_camera_zoom_change_requires_expected_signed_delta_and_retains_evidence(self) -> None:
+        location = WorldPoint(3195, 3248, 0)
+        base = specification(
+            VerificationKind.CAMERA_ZOOM_CHANGED,
+            before_location=location,
+            before_camera_yaw=640,
+            before_camera_pitch=900,
+            before_camera_zoom=300,
+            camera_zoom_amount=1,
+            before_process_id=1234,
+            before_geometry_frame_id="zoom-frame-100",
+            before_bank_known=False,
+            before_bank_open=False,
+            before_bank_pin_open=False,
+            before_bank_readable=False,
+            before_dialogue_active=False,
+            before_dialogue_type="none",
+            before_text_input_active=False,
+        )
+
+        increased = self.verifier.evaluate(
+            base,
+            observation(
+                location=location,
+                camera_yaw=640,
+                camera_pitch=900,
+                camera_zoom=324,
+                geometry_frame_id="zoom-frame-101",
+            ),
+        )
+        self.assertTrue(increased.passed)
+        self.assertEqual(OutcomeKind.CAMERA_ZOOM_CHANGED, increased.outcome.kind)
+        result = increased.outcome.camera_zoom_result
+        self.assertIsInstance(result, CameraZoomResult)
+        self.assertEqual(1, result.wheel_amount)
+        self.assertEqual(24, result.zoom_delta)
+        self.assertEqual(result.before_yaw, result.after_yaw)
+        self.assertEqual(result.before_pitch, result.after_pitch)
+        self.assertEqual(result.before_ui_state, result.after_ui_state)
+        self.assertNotEqual(
+            result.before_geometry_frame_id,
+            result.after_geometry_frame_id,
+        )
+
+        decreased = self.verifier.evaluate(
+            replace(base, camera_zoom_amount=-1),
+            observation(
+                location=location,
+                camera_yaw=640,
+                camera_pitch=900,
+                camera_zoom=276,
+                geometry_frame_id="zoom-frame-102",
+            ),
+        )
+        self.assertTrue(decreased.passed)
+        self.assertEqual(-24, decreased.outcome.camera_zoom_result.zoom_delta)
+
+    def test_camera_zoom_unchanged_waits_then_fails_typed(self) -> None:
+        spec = self._camera_zoom_specification()
+        before_deadline = self.verifier.evaluate(
+            spec,
+            observation(
+                tick=104,
+                location=spec.before_location,
+                camera_yaw=spec.before_camera_yaw,
+                camera_pitch=spec.before_camera_pitch,
+                camera_zoom=spec.before_camera_zoom,
+                geometry_frame_id="zoom-frame-104",
+            ),
+        )
+        at_deadline = self.verifier.evaluate(
+            spec,
+            observation(
+                tick=105,
+                location=spec.before_location,
+                camera_yaw=spec.before_camera_yaw,
+                camera_pitch=spec.before_camera_pitch,
+                camera_zoom=spec.before_camera_zoom,
+                geometry_frame_id="zoom-frame-105",
+            ),
+        )
+
+        self.assertTrue(before_deadline.pending)
+        self.assertEqual("condition_not_met", before_deadline.reason)
+        self.assertTrue(at_deadline.failed)
+        self.assertIs(
+            VerificationFailureKind.CAMERA_ZOOM_UNCHANGED_AT_DEADLINE,
+            at_deadline.failure_kind,
+        )
+
+        unavailable = self.verifier.evaluate(
+            spec,
+            observation(
+                tick=105,
+                location=spec.before_location,
+                camera_yaw=spec.before_camera_yaw,
+                camera_pitch=None,
+                camera_zoom=340,
+                geometry_frame_id="zoom-frame-105-missing-pose",
+            ),
+        )
+        self.assertIs(
+            VerificationFailureKind.CAMERA_ZOOM_EVIDENCE_UNAVAILABLE_AT_DEADLINE,
+            unavailable.failure_kind,
+        )
+
+    def test_camera_zoom_contradictory_direction_fails_immediately(self) -> None:
+        spec = self._camera_zoom_specification(camera_zoom_amount=1)
+        result = self.verifier.evaluate(
+            spec,
+            observation(
+                location=spec.before_location,
+                camera_yaw=spec.before_camera_yaw,
+                camera_pitch=spec.before_camera_pitch,
+                camera_zoom=280,
+                geometry_frame_id="zoom-frame-contradiction",
+            ),
+        )
+
+        self.assertTrue(result.failed)
+        self.assertEqual("camera_zoom_direction_contradicted", result.reason)
+        self.assertIs(
+            VerificationFailureKind.CAMERA_ZOOM_DIRECTION_CONTRADICTED,
+            result.failure_kind,
+        )
+
+    def test_camera_zoom_rejects_pose_identity_and_ui_changes(self) -> None:
+        spec = self._camera_zoom_specification()
+        base = observation(
+            location=spec.before_location,
+            camera_yaw=spec.before_camera_yaw,
+            camera_pitch=spec.before_camera_pitch,
+            camera_zoom=340,
+            geometry_frame_id="zoom-frame-changed",
+        )
+        cases = {
+            "yaw": (
+                replace(base, camera_yaw=641),
+                VerificationFailureKind.CAMERA_POSE_CHANGED_DURING_ZOOM,
+            ),
+            "pitch": (
+                replace(base, camera_pitch=901),
+                VerificationFailureKind.CAMERA_POSE_CHANGED_DURING_ZOOM,
+            ),
+            "pid": (
+                replace(base, client_process_id=4321),
+                VerificationFailureKind.CAMERA_IDENTITY_CHANGED,
+            ),
+            "player": (
+                replace(base, location=WorldPoint(3196, 3248, 0)),
+                VerificationFailureKind.CAMERA_IDENTITY_CHANGED,
+            ),
+            "bank": (
+                replace(base, widgets=WidgetObservation(bank_known=True, bank_open=True)),
+                VerificationFailureKind.CAMERA_UI_STATE_CHANGED,
+            ),
+            "bank pin": (
+                replace(base, widgets=WidgetObservation(bank_pin_open=True)),
+                VerificationFailureKind.CAMERA_UI_STATE_CHANGED,
+            ),
+            "dialogue": (
+                replace(
+                    base,
+                    widgets=WidgetObservation(
+                        dialogue_active=True,
+                        dialogue_type="continue",
+                    ),
+                ),
+                VerificationFailureKind.CAMERA_UI_STATE_CHANGED,
+            ),
+            "text": (
+                replace(base, text_input_active=True),
+                VerificationFailureKind.CAMERA_UI_STATE_CHANGED,
+            ),
+        }
+        for label, (candidate, failure_kind) in cases.items():
+            with self.subTest(label=label):
+                result = self.verifier.evaluate(spec, candidate)
+                self.assertTrue(result.failed)
+                self.assertIs(failure_kind, result.failure_kind)
+
+    def test_camera_zoom_requires_later_fresh_coherent_changed_geometry(self) -> None:
+        spec = self._camera_zoom_specification()
+        changed = observation(
+            location=spec.before_location,
+            camera_yaw=spec.before_camera_yaw,
+            camera_pitch=spec.before_camera_pitch,
+            camera_zoom=340,
+            geometry_frame_id="zoom-frame-101",
+        )
+        same_tick = replace(changed, tick=100)
+        incoherent = replace(changed, source_coherent=False)
+        unchanged_geometry = replace(
+            changed,
+            geometry_frame_id=spec.before_geometry_frame_id,
+        )
+
+        self.assertEqual(
+            "awaiting_later_observation",
+            self.verifier.evaluate(spec, same_tick).reason,
+        )
+        self.assertEqual(
+            "observation_not_usable",
+            self.verifier.evaluate(spec, incoherent).reason,
+        )
+        self.assertEqual(
+            "condition_not_met",
+            self.verifier.evaluate(spec, unchanged_geometry).reason,
+        )
+
+    def _camera_zoom_specification(
+        self,
+        *,
+        camera_zoom_amount: int = 1,
+    ) -> VerificationSpec:
+        return specification(
+            VerificationKind.CAMERA_ZOOM_CHANGED,
+            before_location=WorldPoint(3195, 3248, 0),
+            before_camera_yaw=640,
+            before_camera_pitch=900,
+            before_camera_zoom=300,
+            camera_zoom_amount=camera_zoom_amount,
+            before_process_id=1234,
+            before_geometry_frame_id="zoom-frame-100",
+            before_bank_known=False,
+            before_bank_open=False,
+            before_bank_pin_open=False,
+            before_bank_readable=False,
+            before_dialogue_active=False,
+            before_dialogue_type="none",
+            before_text_input_active=False,
+        )
 
     def test_emits_plane_changed(self) -> None:
         result = self.verifier.evaluate(
@@ -593,6 +873,10 @@ class VerifierTest(unittest.TestCase):
                 expected_plane=0,
             ),
             "route": specification(VerificationKind.ROUTE_TRANSITION),
+            "camera zoom": specification(VerificationKind.CAMERA_ZOOM_CHANGED),
+            "camera zoom amount": self._camera_zoom_specification(
+                camera_zoom_amount=4
+            ),
             "unsupported": VerificationSpec(
                 "other", before_tick=100, deadline_tick=105, source_session_id="session-1"
             ),

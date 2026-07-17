@@ -8,6 +8,7 @@ from osrs_bot.model import (
     Action,
     ActionKind,
     CameraConstraint,
+    CameraZoomConstraint,
     DialogueOption,
     DialogueOptionConstraint,
     InterfaceConstraint,
@@ -20,6 +21,7 @@ from osrs_bot.model import (
     PlayerObservation,
     ScreenBounds,
     ScreenPoint,
+    SceneCensusEvidence,
     TargetGeometry,
     TaskConstraints,
     VerificationKind,
@@ -38,6 +40,14 @@ from osrs_bot.safety import (
 
 TREE_POINT = ScreenPoint(320, 240)
 CANVAS = ScreenBounds(0, 0, 765, 503)
+VIEWPORT = ScreenBounds(0, 0, 765, 503)
+POINTER_SAFE_INSET_DEVICE_PX = 16
+TREE_POLYGON = (
+    ScreenPoint(300, 220),
+    ScreenPoint(340, 220),
+    ScreenPoint(340, 260),
+    ScreenPoint(300, 260),
+)
 
 
 def tree(geometry: TargetGeometry | None = None) -> NearbyObject:
@@ -89,7 +99,11 @@ def observation(
     menu_bounds: ScreenBounds | None = None,
     location: WorldPoint = WorldPoint(3197, 3200, 0),
     camera_yaw: int | None = None,
+    camera_pitch: int | None = None,
+    camera_zoom: int | None = None,
+    text_input_active: bool | None = None,
     geometry_frame_id: str | None = None,
+    scene_census: SceneCensusEvidence | None = None,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -104,6 +118,7 @@ def observation(
         menus=menus,
         widgets=widgets or WidgetObservation(bank_known=True),
         canvas_bounds=CANVAS,
+        viewport_bounds=VIEWPORT,
         game_state="LOGGED_IN",
         timestamp=timestamp,
         tick=tick,
@@ -128,6 +143,45 @@ def observation(
         menu_session_id=session_id,
         menu_process_id=process_id,
         camera_yaw=camera_yaw,
+        camera_pitch=camera_pitch,
+        camera_zoom=camera_zoom,
+        text_input_active=text_input_active,
+        scene_census=(
+            scene_census
+            if scene_census is not None
+            else SceneCensusEvidence(
+                metadata_present=True,
+                complete=True,
+                scene_coverage_complete=True,
+                authoritative_absence_eligible=True,
+                priority_absence_eligible=True,
+            )
+        ),
+    )
+
+
+def pointer_observation(
+    point: ScreenPoint,
+    *,
+    tick: int = 100,
+    menus: tuple[MenuEntry, ...] = (),
+    canvas_bounds: ScreenBounds = CANVAS,
+    viewport_bounds: ScreenBounds = VIEWPORT,
+) -> Observation:
+    geometry = replace(
+        tree().geometry,
+        screen_point=point,
+        screen_bounds=canvas_bounds,
+    )
+    return replace(
+        observation(
+            tick=tick,
+            menus=menus,
+            nearby_objects=(tree(geometry),),
+            menu_point=point,
+        ),
+        canvas_bounds=canvas_bounds,
+        viewport_bounds=viewport_bounds,
     )
 
 
@@ -231,7 +285,7 @@ def camera_action() -> Action:
         camera_key="left",
     )
     return Action(
-        ActionKind.PRESS_KEY,
+        ActionKind.CAMERA_HOLD,
         "Turn camera toward west_approach_bridge",
         100,
         option="Turn camera left",
@@ -258,9 +312,404 @@ def camera_action() -> Action:
     )
 
 
+def camera_zoom_action() -> Action:
+    source = WorldPoint(3195, 3248, 0)
+    target = WorldPoint(3200, 3238, 0)
+    target_key = "route:west_approach_bridge"
+    verification = VerificationSpec(
+        VerificationKind.CAMERA_ZOOM_CHANGED,
+        before_tick=100,
+        deadline_tick=110,
+        before_location=source,
+        source_session_id="session-1",
+        before_camera_yaw=0,
+        before_camera_pitch=900,
+        before_geometry_frame_id="camera-frame-0",
+        before_camera_zoom=200,
+        camera_zoom_amount=1,
+        before_process_id=1234,
+        before_bank_known=True,
+        before_bank_open=False,
+        before_bank_pin_open=False,
+        before_bank_readable=False,
+        before_dialogue_active=False,
+        before_dialogue_type="none",
+        before_text_input_active=False,
+    )
+    return Action(
+        ActionKind.CAMERA_ZOOM,
+        "Zoom camera toward target range",
+        100,
+        option="Zoom camera in",
+        target_key=target_key,
+        target_name=target_key,
+        target_id=0,
+        verification=verification,
+        target_param0=56,
+        target_param1=38,
+        source_session_id="session-1",
+        task_constraints=TaskConstraints(
+            camera_zoom=CameraZoomConstraint(
+                target_key=target_key,
+                target_location=target,
+                source_location=source,
+                source_geometry_frame_id="camera-frame-0",
+                before_yaw=0,
+                before_pitch=900,
+                before_zoom=200,
+                amount=1,
+                desired_zoom_min=320,
+                desired_zoom_max=448,
+                target_action="Walk here",
+            )
+        ),
+    )
+
+
 class SafetyGateTest(unittest.TestCase):
+    def test_action_timing_is_finite_nonnegative_and_bounded(self) -> None:
+        state = observation(tick=100)
+        gate = SafetyGate()
+        valid = tree_action(
+            pre_move_delay_seconds=0.25,
+            settle_delay_seconds=0.1,
+            pre_click_delay_seconds=0.05,
+            post_action_delay_seconds=0.2,
+        )
+        self.assertTrue(gate.validate_pre_move(valid, state).allowed)
+        for field_name, value in (
+            ("pre_move_delay_seconds", -0.01),
+            ("settle_delay_seconds", float("nan")),
+            ("pre_click_delay_seconds", float("inf")),
+            ("post_action_delay_seconds", 2.01),
+        ):
+            with self.subTest(field=field_name):
+                result = gate.validate_pre_move(
+                    replace(valid, **{field_name: value}), state
+                )
+                self.assertFalse(result.allowed)
+                self.assertEqual("timing_out_of_bounds", result.reason)
+
     def setUp(self) -> None:
         self.gate = SafetyGate(max_observation_age_seconds=2.0)
+
+    def test_camera_zoom_requires_exact_safe_ui_pose_identity_and_geometry(self) -> None:
+        action = camera_zoom_action()
+        source = WorldPoint(3195, 3248, 0)
+        baseline = observation(
+            tick=100,
+            nearby_objects=(camera_target(),),
+            location=source,
+            camera_yaw=0,
+            camera_pitch=900,
+            camera_zoom=200,
+            text_input_active=False,
+            geometry_frame_id="camera-frame-0",
+        )
+
+        self.assertTrue(self.gate.validate_pre_move(action, baseline).allowed)
+
+        unsafe_cases = (
+            ("focus", replace(baseline, client_focused=False)),
+            ("pid", replace(baseline, client_process_id=4321)),
+            ("geometry", replace(baseline, geometry_frame_id="camera-frame-other")),
+            ("target", replace(baseline, nearby_objects=())),
+        )
+        for name, state in unsafe_cases:
+            with self.subTest(name=name):
+                result = self.gate.validate_pre_move(action, state)
+                self.assertFalse(result.allowed)
+
+    def test_camera_zoom_blocks_interface_pin_dialogue_and_text_input_states(self) -> None:
+        action = camera_zoom_action()
+        source = WorldPoint(3195, 3248, 0)
+
+        def with_verification(**changes: object) -> Action:
+            assert action.verification is not None
+            return replace(
+                action,
+                verification=replace(action.verification, **changes),
+            )
+
+        cases = (
+            (
+                "unknown",
+                WidgetObservation(bank_known=False),
+                None,
+                with_verification(before_bank_known=False),
+            ),
+            (
+                "bank",
+                WidgetObservation(bank_known=True, bank_open=True, bank_readable=True),
+                False,
+                with_verification(
+                    before_bank_open=True,
+                    before_bank_readable=True,
+                ),
+            ),
+            (
+                "pin",
+                WidgetObservation(bank_known=True, bank_pin_open=True),
+                False,
+                with_verification(before_bank_pin_open=True),
+            ),
+            (
+                "dialogue",
+                WidgetObservation(
+                    bank_known=True,
+                    dialogue_active=True,
+                    dialogue_type="options",
+                ),
+                False,
+                with_verification(
+                    before_dialogue_active=True,
+                    before_dialogue_type="options",
+                ),
+            ),
+            (
+                "text",
+                WidgetObservation(bank_known=True),
+                True,
+                with_verification(before_text_input_active=True),
+            ),
+            (
+                "text_unknown",
+                WidgetObservation(bank_known=True),
+                None,
+                with_verification(before_text_input_active=None),
+            ),
+        )
+        for name, widgets, text_input_active, bound_action in cases:
+            with self.subTest(name=name):
+                state = observation(
+                    tick=100,
+                    nearby_objects=(camera_target(),),
+                    widgets=widgets,
+                    location=source,
+                    camera_yaw=0,
+                    camera_pitch=900,
+                    camera_zoom=200,
+                    text_input_active=text_input_active,
+                    geometry_frame_id="camera-frame-0",
+                )
+                result = self.gate.validate_pre_move(bound_action, state)
+                self.assertFalse(result.allowed)
+
+    def test_camera_zoom_rejects_a_semantically_unneeded_direction(self) -> None:
+        action = camera_zoom_action()
+        zoom = action.task_constraints.camera_zoom
+        assert zoom is not None
+        assert action.verification is not None
+        action = replace(
+            action,
+            verification=replace(action.verification, camera_zoom_amount=-1),
+            task_constraints=TaskConstraints(
+                camera_zoom=replace(zoom, amount=-1),
+            ),
+        )
+        state = observation(
+            tick=100,
+            nearby_objects=(camera_target(),),
+            location=WorldPoint(3195, 3248, 0),
+            camera_yaw=0,
+            camera_pitch=900,
+            camera_zoom=200,
+            text_input_active=False,
+            geometry_frame_id="camera-frame-0",
+        )
+
+        result = self.gate.validate_pre_move(action, state)
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("camera_zoom_direction_not_required", result.reason)
+
+    def test_pointer_safe_inset_accepts_every_edge_and_corner(self) -> None:
+        left = VIEWPORT.x + POINTER_SAFE_INSET_DEVICE_PX
+        top = VIEWPORT.y + POINTER_SAFE_INSET_DEVICE_PX
+        right = VIEWPORT.x + VIEWPORT.width - POINTER_SAFE_INSET_DEVICE_PX - 1
+        bottom = VIEWPORT.y + VIEWPORT.height - POINTER_SAFE_INSET_DEVICE_PX - 1
+        middle_x = (left + right) // 2
+        middle_y = (top + bottom) // 2
+        points = (
+            ScreenPoint(left, top),
+            ScreenPoint(right, top),
+            ScreenPoint(left, bottom),
+            ScreenPoint(right, bottom),
+            ScreenPoint(middle_x, top),
+            ScreenPoint(middle_x, bottom),
+            ScreenPoint(left, middle_y),
+            ScreenPoint(right, middle_y),
+        )
+
+        for point in points:
+            with self.subTest(point=point):
+                result = self.gate.validate_pre_move(
+                    tree_action(screen_point=point),
+                    pointer_observation(point),
+                )
+                self.assertTrue(result.allowed)
+                self.assertEqual("pre_move_safe", result.reason)
+
+    def test_pointer_safe_inset_rejects_one_pixel_beyond_every_edge_and_corner(
+        self,
+    ) -> None:
+        left = VIEWPORT.x + POINTER_SAFE_INSET_DEVICE_PX
+        top = VIEWPORT.y + POINTER_SAFE_INSET_DEVICE_PX
+        right = VIEWPORT.x + VIEWPORT.width - POINTER_SAFE_INSET_DEVICE_PX - 1
+        bottom = VIEWPORT.y + VIEWPORT.height - POINTER_SAFE_INSET_DEVICE_PX - 1
+        middle_x = (left + right) // 2
+        middle_y = (top + bottom) // 2
+        points = (
+            ScreenPoint(left - 1, top - 1),
+            ScreenPoint(right + 1, top - 1),
+            ScreenPoint(left - 1, bottom + 1),
+            ScreenPoint(right + 1, bottom + 1),
+            ScreenPoint(middle_x, top - 1),
+            ScreenPoint(middle_x, bottom + 1),
+            ScreenPoint(left - 1, middle_y),
+            ScreenPoint(right + 1, middle_y),
+        )
+
+        for point in points:
+            with self.subTest(point=point):
+                result = self.gate.validate_pre_move(
+                    tree_action(screen_point=point),
+                    pointer_observation(point),
+                )
+                self.assertFalse(result.allowed)
+                self.assertEqual(
+                    "screen_point_outside_pointer_safe_bounds",
+                    result.reason,
+                )
+
+    def test_settled_pointer_must_remain_inside_pointer_safe_inset(self) -> None:
+        safe_point = ScreenPoint(
+            VIEWPORT.x + POINTER_SAFE_INSET_DEVICE_PX,
+            VIEWPORT.y + VIEWPORT.height // 2,
+        )
+        outside = ScreenPoint(safe_point.x - 1, safe_point.y)
+        action = tree_action(screen_point=safe_point)
+        post = pointer_observation(
+            safe_point,
+            tick=101,
+            menus=(exact_hover(),),
+        )
+
+        self.assertTrue(
+            self.gate.validate_post_move(
+                action,
+                post,
+                settled_pointer=safe_point,
+            ).allowed
+        )
+        outside_post = replace(post, menu_mouse_screen_point=outside)
+        result = self.gate.validate_post_move(
+            action,
+            outside_post,
+            settled_pointer=outside,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            "screen_point_outside_pointer_safe_bounds",
+            result.reason,
+        )
+
+    def test_context_row_pointer_must_remain_inside_pointer_safe_inset(self) -> None:
+        safe_row_point = ScreenPoint(
+            VIEWPORT.x + POINTER_SAFE_INSET_DEVICE_PX,
+            VIEWPORT.y + 100,
+        )
+        outside = ScreenPoint(safe_row_point.x - 1, safe_row_point.y)
+        row_bounds = ScreenBounds(
+            safe_row_point.x - 6,
+            safe_row_point.y - 6,
+            20,
+            13,
+        )
+        candidate = observation(
+            tick=102,
+            menus=(replace(exact_hover(), row_bounds=row_bounds),),
+            menu_point=safe_row_point,
+            menu_open=True,
+            menu_bounds=CANVAS,
+        )
+
+        self.assertTrue(
+            self.gate.validate_context_menu(
+                tree_action(),
+                candidate,
+                minimum_menu_client_tick=1101,
+                row_point=safe_row_point,
+            ).allowed
+        )
+        outside_candidate = replace(
+            candidate,
+            menu_mouse_screen_point=outside,
+        )
+        evaluation = self.gate.evaluate_context_menu(
+            tree_action(),
+            outside_candidate,
+            minimum_menu_client_tick=1101,
+            row_point=outside,
+        )
+
+        self.assertFalse(evaluation.result.allowed)
+        self.assertEqual(
+            "screen_point_outside_pointer_safe_bounds",
+            evaluation.result.reason,
+        )
+        self.assertEqual(
+            "context_menu.row_pointer_safe_inset",
+            evaluation.checks[-1].stage,
+        )
+
+    def test_pointer_safe_inset_is_fixed_in_authoritative_device_pixels(self) -> None:
+        # These non-zero coordinates model a PMv2/high-DPI converted viewport.
+        # SafetyGate receives device pixels, so the inset remains exactly 16
+        # pixels and is not multiplied by the display scale a second time.
+        viewport = ScreenBounds(101, 203, 400, 300)
+        canvas = ScreenBounds(80, 180, 500, 400)
+        allowed_points = (
+            ScreenPoint(117, 219),
+            ScreenPoint(484, 219),
+            ScreenPoint(117, 486),
+            ScreenPoint(484, 486),
+        )
+        rejected_points = (
+            ScreenPoint(116, 219),
+            ScreenPoint(485, 219),
+            ScreenPoint(117, 218),
+            ScreenPoint(117, 487),
+        )
+
+        for point in allowed_points:
+            with self.subTest(boundary="inside", point=point):
+                self.assertTrue(
+                    self.gate.validate_pre_move(
+                        tree_action(screen_point=point),
+                        pointer_observation(
+                            point,
+                            canvas_bounds=canvas,
+                            viewport_bounds=viewport,
+                        ),
+                    ).allowed
+                )
+        for point in rejected_points:
+            with self.subTest(boundary="outside", point=point):
+                result = self.gate.validate_pre_move(
+                    tree_action(screen_point=point),
+                    pointer_observation(
+                        point,
+                        canvas_bounds=canvas,
+                        viewport_bounds=viewport,
+                    ),
+                )
+                self.assertFalse(result.allowed)
+                self.assertEqual(
+                    "screen_point_outside_pointer_safe_bounds",
+                    result.reason,
+                )
 
     def test_validates_pre_move_and_exact_post_move_hover_separately(self) -> None:
         self.assertTrue(self.gate.validate_pre_move(tree_action(), observation()).allowed)
@@ -296,6 +745,136 @@ class SafetyGateTest(unittest.TestCase):
             ),
             evaluation.checks,
         )
+
+    def test_authoritative_polygon_accepts_multiple_interior_points_with_exact_hover(self) -> None:
+        geometry = replace(
+            tree().geometry,
+            geometry_source="clickbox",
+            screen_polygon=TREE_POLYGON,
+        )
+        target = tree(geometry)
+        for selected in (ScreenPoint(306, 228), ScreenPoint(334, 252)):
+            with self.subTest(selected=selected):
+                action = tree_action(screen_point=selected)
+                pre = observation(nearby_objects=(target,), menu_point=selected)
+                post = observation(
+                    tick=101,
+                    menus=(exact_hover(),),
+                    nearby_objects=(target,),
+                    menu_point=selected,
+                )
+
+                self.assertTrue(self.gate.validate_pre_move(action, pre).allowed)
+                result = self.gate.validate_post_move(
+                    action, post, settled_pointer=selected
+                )
+                self.assertTrue(result.allowed)
+                self.assertEqual("post_move_safe", result.reason)
+
+    def test_authoritative_source_without_polygon_is_rejected(self) -> None:
+        target = tree(replace(
+            tree().geometry,
+            geometry_source="clickbox",
+            screen_polygon=(),
+        ))
+
+        result = self.gate.validate_pre_move(
+            tree_action(),
+            observation(nearby_objects=(target,)),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("authoritative_polygon_missing", result.reason)
+
+    def test_authoritative_polygon_rejects_outside_or_occluded_point(self) -> None:
+        outside = ScreenPoint(345, 240)
+        geometry = replace(
+            tree().geometry,
+            screen_bounds=ScreenBounds(295, 215, 60, 50),
+            geometry_source="clickbox",
+            screen_polygon=TREE_POLYGON,
+        )
+        target = tree(geometry)
+        result = self.gate.validate_pre_move(
+            tree_action(screen_point=outside),
+            observation(nearby_objects=(target,), menu_point=outside),
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual("screen_point_outside_polygon", result.reason)
+
+        occluded = tree(replace(geometry, visible=False))
+        result = self.gate.validate_pre_move(
+            tree_action(screen_point=ScreenPoint(306, 228)),
+            observation(nearby_objects=(occluded,)),
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual("target_not_visible", result.reason)
+
+    def test_fresh_polygon_change_invalidates_selected_point(self) -> None:
+        selected = ScreenPoint(306, 228)
+        source_geometry = replace(
+            tree().geometry,
+            geometry_source="clickbox",
+            screen_polygon=TREE_POLYGON,
+        )
+        action = tree_action(screen_point=selected)
+        self.assertTrue(
+            self.gate.validate_pre_move(
+                action,
+                observation(
+                    nearby_objects=(tree(source_geometry),),
+                    menu_point=selected,
+                ),
+            ).allowed
+        )
+
+        moved_polygon = tuple(
+            ScreenPoint(point.x + 40, point.y) for point in TREE_POLYGON
+        )
+        fresh_geometry = replace(
+            source_geometry,
+            screen_point=ScreenPoint(TREE_POINT.x + 40, TREE_POINT.y),
+            # Keep both old and new points inside the broad bounds so the
+            # fresh polygon, not a coincidental rectangle shift, is the veto.
+            screen_bounds=ScreenBounds(295, 215, 90, 50),
+            screen_polygon=moved_polygon,
+        )
+        post = observation(
+            tick=101,
+            menus=(exact_hover(),),
+            nearby_objects=(tree(fresh_geometry),),
+            menu_point=selected,
+        )
+
+        result = self.gate.validate_post_move(
+            action, post, settled_pointer=selected
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("screen_point_outside_polygon", result.reason)
+
+    def test_authoritative_polygon_still_requires_exact_fresh_hover(self) -> None:
+        selected = ScreenPoint(306, 228)
+        target = tree(replace(
+            tree().geometry,
+            geometry_source="clickbox",
+            screen_polygon=TREE_POLYGON,
+        ))
+        post = observation(
+            tick=101,
+            menus=(replace(exact_hover(), target="Oak"),),
+            nearby_objects=(target,),
+            menu_point=selected,
+        )
+
+        result = self.gate.validate_post_move(
+            tree_action(screen_point=selected),
+            post,
+            settled_pointer=selected,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("hover_menu_mismatch", result.reason)
 
     def test_menu_pointer_correlation_has_separate_four_pixel_bound(self) -> None:
         settled = ScreenPoint(TREE_POINT.x + 3, TREE_POINT.y)
@@ -924,6 +1503,61 @@ class SafetyGateTest(unittest.TestCase):
                     self.gate.validate_pre_move(action, observation()).allowed
                 )
 
+    def test_object_activation_fails_closed_on_explicitly_incomplete_census(self) -> None:
+        incomplete = replace(
+            observation(),
+            scene_census=SceneCensusEvidence(
+                metadata_present=True,
+                complete=False,
+                scene_coverage_complete=False,
+                response_cap_hit=True,
+            ),
+        )
+
+        result = self.gate.validate_pre_move(tree_action(), incomplete)
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("scene_census_incomplete", result.reason)
+
+    def test_object_activation_fails_closed_when_legacy_census_authority_is_unknown(self) -> None:
+        result = self.gate.validate_pre_move(
+            tree_action(),
+            observation(scene_census=SceneCensusEvidence()),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("scene_census_incomplete", result.reason)
+
+    def test_object_activation_rejects_conflicting_exact_identity(self) -> None:
+        contradictory = replace(
+            observation(),
+            scene_census=SceneCensusEvidence(
+                metadata_present=True,
+                complete=True,
+                scene_coverage_complete=True,
+                conflicting_duplicate_keys=("tree:1276:3200:3200:0",),
+            ),
+        )
+
+        result = self.gate.validate_pre_move(tree_action(), contradictory)
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("target_identity_contradictory", result.reason)
+
+    def test_complete_capped_census_can_activate_a_present_exact_target(self) -> None:
+        bounded = replace(
+            observation(),
+            scene_census=SceneCensusEvidence(
+                metadata_present=True,
+                complete=True,
+                scene_coverage_complete=True,
+                response_cap_hit=True,
+                authoritative_absence_eligible=False,
+            ),
+        )
+
+        self.assertTrue(self.gate.validate_pre_move(tree_action(), bounded).allowed)
+
     def test_rejects_unusable_geometry(self) -> None:
         base = tree().geometry
         cases = {
@@ -1287,17 +1921,41 @@ class SafetyGateTest(unittest.TestCase):
         )
 
         self.assertTrue(self.gate.validate_pre_move(action, before).allowed)
+        camera_constraint = action.task_constraints.camera
+        assert camera_constraint is not None
+        pitch_action = replace(
+            action,
+            key="up",
+            verification=replace(
+                action.verification,
+                camera_key="up",
+                before_camera_pitch=900,
+            ),
+            task_constraints=TaskConstraints(
+                camera=replace(
+                    camera_constraint,
+                    direction="up",
+                    before_pitch=900,
+                )
+            ),
+        )
+        self.assertTrue(
+            self.gate.validate_pre_move(
+                pitch_action,
+                replace(before, camera_pitch=900),
+            ).allowed
+        )
         self.assertEqual(
             "camera_sample_not_newer",
             self.gate.validate_post_move(action, before).reason,
         )
         self.assertTrue(self.gate.validate_post_move(action, later).allowed)
         self.assertEqual(
-            "unsafe_key",
+            "camera_hold_shape_mismatch",
             self.gate.validate_pre_move(replace(action, key="up"), before).reason,
         )
         self.assertEqual(
-            "camera_key_shape_mismatch",
+            "camera_hold_shape_mismatch",
             self.gate.validate_pre_move(
                 replace(action, key_hold_millis=50), before
             ).reason,
@@ -1308,6 +1966,47 @@ class SafetyGateTest(unittest.TestCase):
                 action,
                 replace(later, nearby_objects=(camera_target(actionable=True),)),
             ).reason,
+        )
+        proactive_constraint = replace(
+            camera_constraint,
+            desired_region=ScreenBounds(200, 180, 300, 200),
+            framing_classification="barely_visible",
+        )
+        proactive_action = replace(
+            action,
+            task_constraints=TaskConstraints(camera=proactive_constraint),
+        )
+        self.assertTrue(
+            self.gate.validate_post_move(
+                proactive_action,
+                replace(later, nearby_objects=(camera_target(actionable=True),)),
+            ).allowed
+        )
+        contradictory = camera_target(actionable=True)
+        contradictory = replace(
+            contradictory,
+            geometry=replace(
+                contradictory.geometry,
+                on_screen=False,
+                visible=False,
+                screen_point=None,
+            ),
+        )
+        not_visible_action = replace(
+            action,
+            task_constraints=TaskConstraints(
+                camera=replace(
+                    camera_constraint,
+                    desired_region=ScreenBounds(200, 180, 300, 200),
+                    framing_classification="not_visible",
+                )
+            ),
+        )
+        self.assertTrue(
+            self.gate.validate_post_move(
+                not_visible_action,
+                replace(later, nearby_objects=(contradictory,)),
+            ).allowed
         )
         self.assertEqual(
             "camera_pose_changed",

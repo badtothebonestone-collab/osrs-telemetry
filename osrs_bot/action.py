@@ -6,8 +6,12 @@ from enum import Enum
 from typing import Callable
 
 from .input_coordinator import (
+    ApprovedCameraHoldIntent,
+    ApprovedCameraZoomIntent,
+    ApprovedCursorRecoveryIntent,
     ApprovedKeyIntent,
     ApprovedPointerIntent,
+    CursorInvalidationCause,
     InputCoordinator,
     InputFailureKind,
     InputPurpose,
@@ -16,6 +20,7 @@ from .input_coordinator import (
     MouseButton,
     PointerActivation,
     PointerActivationDecision,
+    RuneLiteGeometryEvidence,
 )
 from .model import (
     Action,
@@ -28,6 +33,14 @@ from .model import (
     ScreenPoint,
     WidgetTarget,
 )
+from .observability import (
+    ObservabilityEvidence,
+    TimingEvidence,
+    TimingPhase,
+    WaitState,
+    safe_elapsed_millis,
+)
+from .pointer import gameplay_pointer_safe_bounds
 from .safety import (
     POINTER_MATCH_TOLERANCE_PX,
     SafetyCheck,
@@ -62,6 +75,7 @@ class UnsentActionDisposition(str, Enum):
     NONE = "none"
     TARGET_EVIDENCE_INVALIDATED = "target_evidence_invalidated"
     CURSOR_STATE_INVALIDATED = "cursor_state_invalidated"
+    CAMERA_FRAMING_SATISFIED = "camera_framing_satisfied"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +91,7 @@ class ExecutionResult:
     safety_checks: tuple[SafetyCheck, ...] = ()
     unsent_disposition: UnsentActionDisposition = UnsentActionDisposition.NONE
     activation_attempted: bool = False
+    observability: ObservabilityEvidence = ObservabilityEvidence()
 
     def __post_init__(self) -> None:
         if self.local_status not in {"BLOCKED", "ERROR", "NO_ACTION"}:
@@ -95,6 +110,8 @@ class ExecutionResult:
             )
         if not isinstance(self.activation_attempted, bool):
             raise TypeError("activation_attempted must be bool")
+        if not isinstance(self.observability, ObservabilityEvidence):
+            raise TypeError("observability must be ObservabilityEvidence")
         if (
             self.activation_attempted
             and self.unsent_disposition is not UnsentActionDisposition.NONE
@@ -159,6 +176,13 @@ class ExecutionResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _PinnedPointerRecovery:
+    geometry: RuneLiteGeometryEvidence
+    observed_outer_bounds: ScreenBounds
+    viewport_bounds: ScreenBounds
+
+
 class CoordinatedActionInterface:
     """Submit gameplay intents through the sole automated-input owner.
 
@@ -176,6 +200,8 @@ class CoordinatedActionInterface:
         sleep: Callable[[float], None] = time.sleep,
         evidence_attempts: int = 12,
         evidence_delay_seconds: float = 0.1,
+        evidence_clock: Callable[[], float] = time.monotonic,
+        wait_state_observer: Callable[[WaitState | None], None] | None = None,
     ) -> None:
         if not callable(observe):
             raise TypeError("observe must be callable")
@@ -185,10 +211,23 @@ class CoordinatedActionInterface:
         self._sleep = sleep
         self._evidence_attempts = max(1, evidence_attempts)
         self._evidence_delay_seconds = max(0.0, evidence_delay_seconds)
+        if not callable(evidence_clock):
+            raise TypeError("evidence_clock must be callable")
+        if wait_state_observer is not None and not callable(wait_state_observer):
+            raise TypeError("wait_state_observer must be callable or None")
+        self._evidence_clock = evidence_clock
+        self._wait_state_observer = wait_state_observer
+        self._pinned_pointer_recovery: _PinnedPointerRecovery | None = None
 
     def execute(self, action: Action, observation: Observation) -> ExecutionResult:
         safety_checks: list[SafetyCheck] = []
-        preflight_evaluation = self._safety.evaluate_pre_move(action, observation)
+        timing = [TimingEvidence()]
+        preflight_evaluation = self._timed_safety_evaluation(
+            timing,
+            self._safety.evaluate_pre_move,
+            action,
+            observation,
+        )
         self._extend_safety_checks(safety_checks, preflight_evaluation)
         preflight = preflight_evaluation.result
         if not preflight.allowed:
@@ -198,6 +237,7 @@ class CoordinatedActionInterface:
                 "BLOCKED",
                 preflight.reason,
                 safety_checks,
+                observability=ObservabilityEvidence(timing=timing[0]),
             )
 
         if action.kind is ActionKind.WAIT:
@@ -207,6 +247,38 @@ class CoordinatedActionInterface:
                 "NO_ACTION",
                 "wait_action",
                 safety_checks,
+                observability=ObservabilityEvidence(timing=timing[0]),
+            )
+
+        if (
+            self._pinned_pointer_recovery is not None
+            and action.kind in {
+                ActionKind.PRESS_KEY,
+                ActionKind.CAMERA_HOLD,
+                ActionKind.CAMERA_ZOOM,
+            }
+        ):
+            # The one retry after cursor recovery must re-recognize a pointer
+            # target and pass the exact HWND/native-geometry lane.  A key has
+            # no point-owner proof and cannot safely stand in for that retry.
+            try:
+                self._required_pinned_pointer_binding(observation)
+            except (TypeError, ValueError) as error:
+                return self._local_result(
+                    action,
+                    observation,
+                    "BLOCKED",
+                    str(error),
+                    safety_checks,
+                    observability=ObservabilityEvidence(timing=timing[0]),
+                )
+            return self._local_result(
+                action,
+                observation,
+                "BLOCKED",
+                "cursor_recovery_retry_requires_pointer_target",
+                safety_checks,
+                observability=ObservabilityEvidence(timing=timing[0]),
             )
 
         last_observation: list[Observation | None] = [None]
@@ -223,6 +295,7 @@ class CoordinatedActionInterface:
                     observation,
                     last_observation,
                     safety_checks,
+                    timing,
                 )
             elif action.kind is ActionKind.CLICK_WIDGET:
                 receipt = self._execute_direct_pointer(
@@ -230,6 +303,7 @@ class CoordinatedActionInterface:
                     observation,
                     last_observation,
                     safety_checks,
+                    timing,
                 )
                 activation_attempted = self._command_may_have_taken_effect(
                     receipt,
@@ -241,15 +315,43 @@ class CoordinatedActionInterface:
                     observation,
                     last_observation,
                     safety_checks,
+                    timing,
                 )
                 activation_attempted = self._command_may_have_taken_effect(
                     receipt,
                     "KEY_PRESS",
                 )
+            elif action.kind is ActionKind.CAMERA_HOLD:
+                receipt = self._execute_camera_hold(
+                    action,
+                    observation,
+                    last_observation,
+                    safety_checks,
+                    timing,
+                )
+                activation_attempted = self._command_may_have_taken_effect(
+                    receipt,
+                    "CAMERA_HOLD",
+                )
+            elif action.kind is ActionKind.CAMERA_ZOOM:
+                receipt = self._execute_camera_zoom(
+                    action,
+                    observation,
+                    last_observation,
+                    safety_checks,
+                    timing,
+                )
+                activation_attempted = self._command_may_have_taken_effect(
+                    receipt,
+                    "WHEEL",
+                )
             else:
                 raise ValueError(f"unsupported live action: {action.kind.value}")
             if not isinstance(receipt, InputReceipt):
                 raise TypeError("InputCoordinator returned no immutable InputReceipt")
+            self._remember_completed_reacquisition(observation, receipt)
+            if activation_attempted and action.post_action_delay_seconds > 0.0:
+                self._sleep(action.post_action_delay_seconds)
         except Exception as error:  # fail closed before or at the coordinator API
             return ExecutionResult(
                 action=action,
@@ -262,6 +364,7 @@ class CoordinatedActionInterface:
                     else None
                 ),
                 safety_checks=tuple(safety_checks),
+                observability=ObservabilityEvidence(timing=timing[0]),
             )
 
         if (
@@ -272,7 +375,38 @@ class CoordinatedActionInterface:
             unsent_disposition = (
                 UnsentActionDisposition.CURSOR_STATE_INVALIDATED
             )
+        elif (
+            not activation_attempted
+            and action.kind is ActionKind.CAMERA_HOLD
+            and action.task_constraints.camera is not None
+            and receipt.status == "BLOCKED"
+            and receipt.reason.endswith("camera_projection_already_actionable")
+        ):
+            # Fresh pre-key geometry can enter the desired framing region
+            # after the proposal was made.  No key was sent, so reobserve and
+            # replan instead of converting a satisfied camera objective into
+            # a terminal task failure.
+            unsent_disposition = (
+                UnsentActionDisposition.CAMERA_FRAMING_SATISFIED
+            )
 
+        receipt_observability = getattr(
+            receipt,
+            "observability",
+            ObservabilityEvidence(),
+        )
+        combined_timing = timing[0]
+        try:
+            combined_timing = combined_timing.merge(
+                receipt_observability.timing
+            )
+        except Exception:
+            # Receipt diagnostics cannot alter an already completed input result.
+            pass
+        combined_observability = ObservabilityEvidence(
+            timing=combined_timing,
+            observed_wait_states=receipt_observability.observed_wait_states,
+        )
         return ExecutionResult(
             action=action,
             pre_move_tick=observation.tick,
@@ -287,7 +421,73 @@ class CoordinatedActionInterface:
             safety_checks=tuple(safety_checks),
             unsent_disposition=unsent_disposition,
             activation_attempted=activation_attempted,
+            observability=combined_observability,
         )
+
+    def recover_cursor(
+        self,
+        observation: Observation,
+        invalidated_receipt: InputReceipt,
+    ) -> InputReceipt:
+        """Run one geometry-only Arduino MOVE recovery for a discarded intent."""
+
+        if not isinstance(observation, Observation):
+            raise TypeError("observation must be an Observation")
+        if not isinstance(invalidated_receipt, InputReceipt):
+            raise TypeError("invalidated_receipt must be an InputReceipt")
+        if (
+            invalidated_receipt.failure_kind
+            is not InputFailureKind.CURSOR_STATE_INVALIDATED
+        ):
+            raise ValueError("cursor recovery requires a typed invalidation receipt")
+        cause = invalidated_receipt.cursor_invalidation_cause
+        if cause is None or not cause.recovery_eligible:
+            raise ValueError("cursor invalidation cause is not recovery eligible")
+        if (
+            invalidated_receipt.status != "BLOCKED"
+            or not self._receipt_cleanup_confirmed(invalidated_receipt)
+            or any(
+                command.command in {"MOUSE_DOWN", "MOUSE_UP", "KEY_PRESS"}
+                for command in invalidated_receipt.commands
+            )
+        ):
+            raise ValueError(
+                "cursor recovery requires complete pre-activation cleanup"
+            )
+        geometry = invalidated_receipt.pointer_geometry
+        if geometry is None:
+            raise ValueError("cursor recovery requires pinned native geometry")
+        process_id = self._required_pid(observation)
+        canvas = self._required_canvas(observation)
+        viewport = self._required_viewport(observation)
+        observed_outer = self._required_outer_window(observation)
+        if process_id != geometry.expected_pid:
+            raise ValueError("RuneLite PID changed before cursor recovery")
+        if canvas != geometry.canvas_bounds:
+            raise ValueError("RuneLite canvas geometry changed before cursor recovery")
+        if not self._outer_quantization_compatible(
+            observed_outer,
+            geometry.outer_bounds,
+        ):
+            raise ValueError("RuneLite outer geometry changed before cursor recovery")
+        safe_bounds = gameplay_pointer_safe_bounds(viewport)
+        receipt = self._coordinator.execute_cursor_reacquisition(
+            ApprovedCursorRecoveryIntent(
+                recovery_id=(
+                    f"cursor-recovery-{invalidated_receipt.transaction_id}"
+                ),
+                expected_pid=process_id,
+                expected_hwnd=geometry.expected_hwnd,
+                expected_outer_bounds=observed_outer,
+                expected_native_outer_bounds=geometry.outer_bounds,
+                expected_native_client_bounds=geometry.client_bounds,
+                canvas_bounds=canvas,
+                viewport_bounds=viewport,
+                pointer_safe_bounds=safe_bounds,
+            )
+        )
+        self._remember_completed_reacquisition(observation, receipt)
+        return receipt
 
     def _execute_direct_pointer(
         self,
@@ -295,13 +495,18 @@ class CoordinatedActionInterface:
         observation: Observation,
         last_observation: list[Observation | None],
         safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
     ) -> InputReceipt:
         intent = self._pointer_intent(action, observation)
+        if action.pre_move_delay_seconds > 0.0:
+            self._sleep(action.pre_move_delay_seconds)
 
         def validate(
             _intent: ApprovedPointerIntent,
             actual_point: ScreenPoint,
         ) -> InputValidation:
+            if action.settle_delay_seconds > 0.0:
+                self._sleep(action.settle_delay_seconds)
             post, result, _ = self._await_post_move(
                 action,
                 {
@@ -310,8 +515,22 @@ class CoordinatedActionInterface:
                     "hover_menu_mismatch",
                 },
                 safety_checks,
+                timing,
                 settled_pointer=actual_point,
             )
+            if result.allowed and action.pre_click_delay_seconds > 0.0:
+                self._sleep(action.pre_click_delay_seconds)
+                post, result, _ = self._await_post_move(
+                    action,
+                    {
+                        "menu_sample_not_newer",
+                        "hover_pointer_mismatch",
+                        "hover_menu_mismatch",
+                    },
+                    safety_checks,
+                    timing,
+                    settled_pointer=actual_point,
+                )
             last_observation[0] = post
             return self._input_validation(result)
 
@@ -323,8 +542,11 @@ class CoordinatedActionInterface:
         observation: Observation,
         last_observation: list[Observation | None],
         safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
     ) -> tuple[InputReceipt, UnsentActionDisposition, bool]:
         intent = self._pointer_intent(action, observation)
+        if action.pre_move_delay_seconds > 0.0:
+            self._sleep(action.pre_move_delay_seconds)
         canvas = self._required_canvas(observation)
         context_minimum_tick: list[int | None] = [None]
         row_minimum_tick: list[int | None] = [None]
@@ -337,6 +559,8 @@ class CoordinatedActionInterface:
             actual_point: ScreenPoint,
         ) -> PointerActivationDecision:
             validated_action[0] = action
+            if action.settle_delay_seconds > 0.0:
+                self._sleep(action.settle_delay_seconds)
             post, hover, context = self._await_post_move(
                 action,
                 {
@@ -345,8 +569,25 @@ class CoordinatedActionInterface:
                     "hover_menu_mismatch",
                 },
                 safety_checks,
+                timing,
                 settled_pointer=actual_point,
             )
+            if (
+                (hover.allowed or context.allowed)
+                and action.pre_click_delay_seconds > 0.0
+            ):
+                self._sleep(action.pre_click_delay_seconds)
+                post, hover, context = self._await_post_move(
+                    action,
+                    {
+                        "menu_sample_not_newer",
+                        "hover_pointer_mismatch",
+                        "hover_menu_mismatch",
+                    },
+                    safety_checks,
+                    timing,
+                    settled_pointer=actual_point,
+                )
             last_observation[0] = post
             if hover.allowed:
                 selected_activation[0] = PointerActivation.DIRECT_LEFT
@@ -372,6 +613,7 @@ class CoordinatedActionInterface:
                 canonical_action,
                 minimum_tick=minimum_tick,
                 safety_checks=safety_checks,
+                timing=timing,
             )
             last_observation[0] = opened
             if not result.allowed:
@@ -382,21 +624,34 @@ class CoordinatedActionInterface:
             if opened.menu_client_tick is None:
                 raise _ActionBlocked("menu_sample_missing")
             point = entry.row_bounds.center
-            if not canvas.contains(point):
-                raise _ActionBlocked("context_row_outside_canvas")
+            safe_bounds = self._required_pointer_safe_bounds(opened)
+            if not safe_bounds.contains(point):
+                raise _ActionBlocked("context_row_outside_pointer_safe_bounds")
             row_minimum_tick[0] = opened.menu_client_tick
             return ApprovedPointerIntent(
                 intent_id=self._intent_id(action, "context-row"),
                 purpose=InputPurpose.CONTEXT_ROW,
                 target=point,
-                movement_bounds=canvas,
+                movement_bounds=safe_bounds,
                 target_bounds=self._bounded_target_region(
                     entry.row_bounds,
                     point,
-                    canvas,
+                    safe_bounds,
+                ),
+                motion_target_bounds=self._canvas_intersection(
+                    entry.row_bounds, safe_bounds, point
                 ),
                 expected_pid=self._required_pid(opened),
                 button=MouseButton.LEFT,
+                canvas_bounds=canvas,
+                viewport_bounds=self._required_viewport(opened),
+                motion_seed=canonical_action.behavior_seed,
+                motion_decision_id=(
+                    f"{canonical_action.decision_id}:context-row"
+                    if canonical_action.decision_id is not None
+                    else None
+                ),
+                motion_context="context_row",
             )
 
         def validate_row(
@@ -414,6 +669,7 @@ class CoordinatedActionInterface:
                 minimum_tick=minimum_tick,
                 row_point=actual_point,
                 safety_checks=safety_checks,
+                timing=timing,
             )
             last_observation[0] = row_observation
             return self._input_validation(result)
@@ -468,9 +724,12 @@ class CoordinatedActionInterface:
         observation: Observation,
         last_observation: list[Observation | None],
         safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
     ) -> InputReceipt:
         if not action.key:
             raise ValueError("press_key action has no key")
+        if action.pre_move_delay_seconds > 0.0:
+            self._sleep(action.pre_move_delay_seconds)
         intent = ApprovedKeyIntent(
             intent_id=self._intent_id(action, "key"),
             purpose=InputPurpose.GAMEPLAY_KEY,
@@ -488,12 +747,98 @@ class CoordinatedActionInterface:
 
         def validate(_intent: ApprovedKeyIntent) -> InputValidation:
             post, result, _ = self._await_post_move(
-                action, {retry_reason}, safety_checks
+                action, {retry_reason}, safety_checks, timing
             )
             last_observation[0] = post
             return self._input_validation(result)
 
         return self._coordinator.execute_key(intent, validate=validate)
+
+    def _execute_camera_hold(
+        self,
+        action: Action,
+        observation: Observation,
+        last_observation: list[Observation | None],
+        safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
+    ) -> InputReceipt:
+        constraint = action.task_constraints.camera
+        if constraint is None:
+            raise ValueError("camera_hold action has no camera constraint")
+        if action.pre_move_delay_seconds > 0.0:
+            self._sleep(action.pre_move_delay_seconds)
+        intent = ApprovedCameraHoldIntent(
+            intent_id=self._intent_id(action, "camera-hold"),
+            purpose=InputPurpose.CAMERA_HOLD,
+            direction=constraint.direction,
+            expected_pid=self._required_pid(observation),
+            hold_millis=constraint.hold_millis,
+            before_yaw=constraint.before_yaw,
+            before_pitch=constraint.before_pitch,
+            before_zoom=observation.camera_zoom,
+            source_geometry_frame_id=constraint.source_geometry_frame_id,
+        )
+
+        def validate(_intent: ApprovedCameraHoldIntent) -> InputValidation:
+            post, result, _ = self._await_post_move(
+                action,
+                {"camera_sample_not_newer"},
+                safety_checks,
+                timing,
+            )
+            last_observation[0] = post
+            return self._input_validation(result)
+
+        return self._coordinator.execute_camera_hold(intent, validate=validate)
+
+    def _execute_camera_zoom(
+        self,
+        action: Action,
+        observation: Observation,
+        last_observation: list[Observation | None],
+        safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
+    ) -> InputReceipt:
+        constraint = action.task_constraints.camera_zoom
+        if constraint is None:
+            raise ValueError("camera_zoom action has no camera zoom constraint")
+        if action.pre_move_delay_seconds > 0.0:
+            self._sleep(action.pre_move_delay_seconds)
+        canvas = self._required_canvas(observation)
+        viewport = self._required_viewport(observation)
+        outer = self._required_outer_window(observation)
+        expected_hwnd, native_outer, native_client = (
+            self._required_pinned_pointer_binding(observation)
+        )
+        intent = ApprovedCameraZoomIntent(
+            intent_id=self._intent_id(action, "camera-zoom"),
+            purpose=InputPurpose.CAMERA_ZOOM,
+            amount=constraint.amount,
+            expected_pid=self._required_pid(observation),
+            expected_hwnd=expected_hwnd,
+            expected_outer_bounds=outer,
+            expected_native_outer_bounds=native_outer,
+            expected_native_client_bounds=native_client,
+            canvas_bounds=canvas,
+            viewport_bounds=viewport,
+            pointer_safe_bounds=gameplay_pointer_safe_bounds(viewport),
+            before_yaw=constraint.before_yaw,
+            before_pitch=constraint.before_pitch,
+            before_zoom=constraint.before_zoom,
+            source_geometry_frame_id=constraint.source_geometry_frame_id,
+        )
+
+        def validate(_intent: ApprovedCameraZoomIntent) -> InputValidation:
+            post, result, _ = self._await_post_move(
+                action,
+                {"camera_sample_not_newer"},
+                safety_checks,
+                timing,
+            )
+            last_observation[0] = post
+            return self._input_validation(result)
+
+        return self._coordinator.execute_camera_zoom(intent, validate=validate)
 
     def _pointer_intent(
         self,
@@ -503,29 +848,58 @@ class CoordinatedActionInterface:
         if action.screen_point is None:
             raise ValueError("pointer action has no verified screen point")
         canvas = self._required_canvas(observation)
-        outer_window = observation.client_window_bounds
-        if outer_window is None:
-            raise ValueError(
-                "RuneLite outer window geometry unavailable for pointer recovery"
-            )
+        viewport = self._required_viewport(observation)
+        safe_bounds = gameplay_pointer_safe_bounds(viewport)
+        outer_window = self._required_outer_window(observation)
+        (
+            expected_hwnd,
+            expected_native_outer,
+            expected_native_client,
+        ) = self._required_pinned_pointer_binding(observation)
         purpose = (
             InputPurpose.GAMEPLAY_WIDGET
             if action.kind is ActionKind.CLICK_WIDGET
             else InputPurpose.GAMEPLAY_OBJECT
         )
+        target_geometry_bounds = self._target_bounds(action, observation)
         return ApprovedPointerIntent(
             intent_id=self._intent_id(action, "target"),
             purpose=purpose,
             target=action.screen_point,
-            movement_bounds=canvas,
+            movement_bounds=safe_bounds,
             target_bounds=self._bounded_target_region(
-                self._target_bounds(action, observation),
+                target_geometry_bounds,
                 action.screen_point,
-                canvas,
+                safe_bounds,
             ),
             expected_pid=self._required_pid(observation),
+            expected_hwnd=expected_hwnd,
             button=MouseButton.LEFT,
             reacquisition_bounds=outer_window,
+            canvas_bounds=canvas,
+            viewport_bounds=viewport,
+            expected_native_outer_bounds=expected_native_outer,
+            expected_native_client_bounds=expected_native_client,
+            motion_target_bounds=(
+                self._canvas_intersection(
+                    target_geometry_bounds,
+                    safe_bounds,
+                    action.screen_point,
+                )
+                if target_geometry_bounds is not None
+                else None
+            ),
+            motion_seed=action.behavior_seed,
+            motion_decision_id=action.decision_id,
+            motion_context=(
+                "walk"
+                if action.kind is ActionKind.WALK
+                else (
+                    "widget"
+                    if action.kind is ActionKind.CLICK_WIDGET
+                    else "object"
+                )
+            ),
         )
 
     @staticmethod
@@ -537,6 +911,123 @@ class CoordinatedActionInterface:
         if observation.canvas_bounds is None:
             raise ValueError("canvas bounds unavailable")
         return observation.canvas_bounds
+
+    @staticmethod
+    def _required_viewport(observation: Observation) -> ScreenBounds:
+        if observation.viewport_bounds is None:
+            raise ValueError("authoritative viewport bounds unavailable")
+        return observation.viewport_bounds
+
+    @staticmethod
+    def _required_outer_window(observation: Observation) -> ScreenBounds:
+        if observation.client_window_bounds is None:
+            raise ValueError(
+                "RuneLite outer window geometry unavailable for pointer recovery"
+            )
+        return observation.client_window_bounds
+
+    @staticmethod
+    def _outer_quantization_compatible(
+        observed: ScreenBounds,
+        native: ScreenBounds,
+    ) -> bool:
+        return bool(
+            observed.width == native.width
+            and observed.height == native.height
+            and abs(observed.x - native.x) <= 1
+            and abs(observed.y - native.y) <= 1
+        )
+
+    def _required_pointer_safe_bounds(
+        self,
+        observation: Observation,
+    ) -> ScreenBounds:
+        self._required_pinned_pointer_binding(observation)
+        return gameplay_pointer_safe_bounds(self._required_viewport(observation))
+
+    def _required_pinned_pointer_binding(
+        self,
+        observation: Observation,
+    ) -> tuple[int | None, ScreenBounds | None, ScreenBounds | None]:
+        pinned = self._pinned_pointer_recovery
+        if pinned is None:
+            return None, None, None
+        geometry = pinned.geometry
+        if self._required_pid(observation) != geometry.expected_pid:
+            raise ValueError("RuneLite PID changed after cursor recovery")
+        if self._required_canvas(observation) != geometry.canvas_bounds:
+            raise ValueError("RuneLite canvas geometry changed after cursor recovery")
+        if self._required_viewport(observation) != pinned.viewport_bounds:
+            raise ValueError("RuneLite viewport geometry changed after cursor recovery")
+        if self._required_outer_window(observation) != pinned.observed_outer_bounds:
+            raise ValueError("RuneLite outer geometry changed after cursor recovery")
+        return (
+            geometry.expected_hwnd,
+            geometry.outer_bounds,
+            geometry.client_bounds,
+        )
+
+    def _remember_completed_reacquisition(
+        self,
+        observation: Observation,
+        receipt: InputReceipt,
+    ) -> None:
+        evidence = receipt.cursor_reacquisition
+        if evidence is None or not evidence.completed:
+            return
+        geometry = receipt.pointer_geometry
+        if (
+            receipt.status != "BLOCKED"
+            or receipt.failure_kind
+            is not InputFailureKind.CURSOR_STATE_INVALIDATED
+            or receipt.cursor_invalidation_cause
+            is not CursorInvalidationCause.CURSOR_REACQUIRED
+            or not self._receipt_cleanup_confirmed(receipt)
+            or geometry is None
+            or evidence.before_geometry != geometry
+            or evidence.after_geometry != geometry
+            or not evidence.geometry_unchanged
+            or not evidence.no_activation_sent
+        ):
+            return
+        try:
+            process_id = self._required_pid(observation)
+            canvas = self._required_canvas(observation)
+            viewport = self._required_viewport(observation)
+            observed_outer = self._required_outer_window(observation)
+        except (TypeError, ValueError):
+            return
+        if (
+            process_id != geometry.expected_pid
+            or canvas != geometry.canvas_bounds
+            or not self._outer_quantization_compatible(
+                observed_outer,
+                geometry.outer_bounds,
+            )
+        ):
+            return
+        self._pinned_pointer_recovery = _PinnedPointerRecovery(
+            geometry=geometry,
+            observed_outer_bounds=observed_outer,
+            viewport_bounds=viewport,
+        )
+
+    @staticmethod
+    def _receipt_cleanup_confirmed(receipt: InputReceipt) -> bool:
+        return bool(
+            receipt.stop_all_acknowledged
+            and receipt.disarm_acknowledged
+            and receipt.firmware_status_acknowledged
+            and receipt.firmware_status is not None
+            and receipt.firmware_status.safe
+            and receipt.unresolved_command_count == 0
+            and receipt.failed_command_count == 0
+            and receipt.ack_missing_count == 0
+            and receipt.ledger_complete
+            and receipt.ledger_closed
+            and receipt.backend_closed
+            and all(command.successful for command in receipt.commands)
+        )
 
     @staticmethod
     def _required_pid(observation: Observation) -> int:
@@ -615,6 +1106,29 @@ class CoordinatedActionInterface:
         return bounded
 
     @staticmethod
+    def _canvas_intersection(
+        target_bounds: ScreenBounds,
+        canvas: ScreenBounds,
+        point: ScreenPoint,
+    ) -> ScreenBounds:
+        left = max(target_bounds.x, canvas.x)
+        top = max(target_bounds.y, canvas.y)
+        right = min(
+            target_bounds.x + target_bounds.width,
+            canvas.x + canvas.width,
+        )
+        bottom = min(
+            target_bounds.y + target_bounds.height,
+            canvas.y + canvas.height,
+        )
+        if right <= left or bottom <= top:
+            raise ValueError("target bounds do not intersect canvas")
+        clipped = ScreenBounds(left, top, right - left, bottom - top)
+        if not clipped.contains(point):
+            raise ValueError("target point is outside clipped target bounds")
+        return clipped
+
+    @staticmethod
     def _input_validation(result: SafetyResult) -> InputValidation:
         if result.allowed:
             return InputValidation.allow(result.reason)
@@ -625,18 +1139,27 @@ class CoordinatedActionInterface:
         action: Action,
         retry_reasons: set[str],
         safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
         *,
         settled_pointer: ScreenPoint | None = None,
     ) -> tuple[Observation, SafetyResult, SafetyResult]:
         bounded_retry_reasons = (
             set(retry_reasons) | TRANSIENT_POST_MOVE_RETRY_REASONS
         )
-        observation = self._observe()
-        result_evaluation = self._safety.evaluate_post_move(
-            action, observation, settled_pointer=settled_pointer
+        observation = self._timed_observe(timing)
+        result_evaluation = self._timed_safety_evaluation(
+            timing,
+            self._safety.evaluate_post_move,
+            action,
+            observation,
+            settled_pointer=settled_pointer,
         )
-        context_evaluation = self._safety.evaluate_context_candidate(
-            action, observation, settled_pointer=settled_pointer
+        context_evaluation = self._timed_safety_evaluation(
+            timing,
+            self._safety.evaluate_context_candidate,
+            action,
+            observation,
+            settled_pointer=settled_pointer,
         )
         self._extend_safety_checks(safety_checks, result_evaluation)
         self._extend_safety_checks(safety_checks, context_evaluation)
@@ -649,18 +1172,39 @@ class CoordinatedActionInterface:
                 or result.reason not in bounded_retry_reasons
             ):
                 break
-            self._sleep(self._evidence_delay_seconds)
-            observation = self._observe()
-            result_evaluation = self._safety.evaluate_post_move(
-                action, observation, settled_pointer=settled_pointer
+            wait_started = self._evidence_now()
+            self._notify_wait_state(self._observation_wait_state(observation))
+            try:
+                self._sleep(self._evidence_delay_seconds)
+                observation = self._timed_observe(timing)
+            finally:
+                self._record_timing(
+                    timing,
+                    TimingPhase.SOURCE_COHERENCE_FRESHNESS_WAIT,
+                    safe_elapsed_millis(
+                        wait_started,
+                        self._evidence_now(),
+                    ),
+                )
+            result_evaluation = self._timed_safety_evaluation(
+                timing,
+                self._safety.evaluate_post_move,
+                action,
+                observation,
+                settled_pointer=settled_pointer,
             )
-            context_evaluation = self._safety.evaluate_context_candidate(
-                action, observation, settled_pointer=settled_pointer
+            context_evaluation = self._timed_safety_evaluation(
+                timing,
+                self._safety.evaluate_context_candidate,
+                action,
+                observation,
+                settled_pointer=settled_pointer,
             )
             self._extend_safety_checks(safety_checks, result_evaluation)
             self._extend_safety_checks(safety_checks, context_evaluation)
             result = result_evaluation.result
             context = context_evaluation.result
+        self._notify_wait_state(WaitState.INPUT_TRANSACTION_BUSY)
         return observation, result, context
 
     def _await_context_menu(
@@ -670,14 +1214,17 @@ class CoordinatedActionInterface:
         minimum_tick: int,
         row_point: ScreenPoint | None = None,
         safety_checks: list[SafetyCheck],
+        timing: list[TimingEvidence],
     ) -> tuple[Observation, SafetyResult]:
         retry_reasons = {
             "menu_sample_not_newer",
             "context_menu_not_open",
             "context_row_pointer_mismatch",
         } | TRANSIENT_POST_MOVE_RETRY_REASONS
-        observation = self._observe()
-        evaluation = self._safety.evaluate_context_menu(
+        observation = self._timed_observe(timing)
+        evaluation = self._timed_safety_evaluation(
+            timing,
+            self._safety.evaluate_context_menu,
             action,
             observation,
             minimum_menu_client_tick=minimum_tick,
@@ -688,9 +1235,23 @@ class CoordinatedActionInterface:
         for _ in range(1, self._evidence_attempts):
             if result.allowed or result.reason not in retry_reasons:
                 break
-            self._sleep(self._evidence_delay_seconds)
-            observation = self._observe()
-            evaluation = self._safety.evaluate_context_menu(
+            wait_started = self._evidence_now()
+            self._notify_wait_state(self._observation_wait_state(observation))
+            try:
+                self._sleep(self._evidence_delay_seconds)
+                observation = self._timed_observe(timing)
+            finally:
+                self._record_timing(
+                    timing,
+                    TimingPhase.SOURCE_COHERENCE_FRESHNESS_WAIT,
+                    safe_elapsed_millis(
+                        wait_started,
+                        self._evidence_now(),
+                    ),
+                )
+            evaluation = self._timed_safety_evaluation(
+                timing,
+                self._safety.evaluate_context_menu,
                 action,
                 observation,
                 minimum_menu_client_tick=minimum_tick,
@@ -698,7 +1259,73 @@ class CoordinatedActionInterface:
             )
             self._extend_safety_checks(safety_checks, evaluation)
             result = evaluation.result
+        self._notify_wait_state(WaitState.INPUT_TRANSACTION_BUSY)
         return observation, result
+
+    def _timed_safety_evaluation(
+        self,
+        timing: list[TimingEvidence],
+        evaluate: Callable[..., SafetyEvaluation],
+        *args: object,
+        **kwargs: object,
+    ) -> SafetyEvaluation:
+        started = self._evidence_now()
+        try:
+            return evaluate(*args, **kwargs)
+        finally:
+            finished = self._evidence_now()
+            self._record_timing(
+                timing,
+                TimingPhase.SAFETY_GATE_EVALUATION,
+                safe_elapsed_millis(started, finished),
+            )
+
+    def _timed_observe(
+        self,
+        timing: list[TimingEvidence],
+    ) -> Observation:
+        started = self._evidence_now()
+        try:
+            return self._observe()
+        finally:
+            self._record_timing(
+                timing,
+                TimingPhase.OBSERVATION_REQUEST_FETCH,
+                safe_elapsed_millis(started, self._evidence_now()),
+            )
+
+    @staticmethod
+    def _record_timing(
+        timing: list[TimingEvidence],
+        phase: TimingPhase,
+        duration_millis: int,
+    ) -> None:
+        try:
+            timing[0] = timing[0].record(phase, duration_millis)
+        except Exception:
+            return
+
+    def _evidence_now(self) -> object:
+        try:
+            return self._evidence_clock()
+        except Exception:
+            return float("nan")
+
+    def _notify_wait_state(self, state: WaitState | None) -> None:
+        observer = self._wait_state_observer
+        if observer is None:
+            return
+        try:
+            observer(state)
+        except Exception:
+            # Presentation evidence is diagnostic and cannot influence input.
+            return
+
+    @staticmethod
+    def _observation_wait_state(observation: Observation) -> WaitState:
+        if not observation.source_coherent:
+            return WaitState.WAITING_FOR_SOURCE_COHERENCE
+        return WaitState.WAITING_FOR_NEXT_SCENE_UPDATE
 
     @staticmethod
     def _exact_context_entry(
@@ -736,6 +1363,8 @@ class CoordinatedActionInterface:
         status: str,
         reason: str,
         safety_checks: list[SafetyCheck],
+        *,
+        observability: ObservabilityEvidence = ObservabilityEvidence(),
     ) -> ExecutionResult:
         return ExecutionResult(
             action=action,
@@ -743,4 +1372,5 @@ class CoordinatedActionInterface:
             local_status=status,
             local_reason=reason,
             safety_checks=tuple(safety_checks),
+            observability=observability,
         )

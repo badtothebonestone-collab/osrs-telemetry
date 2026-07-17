@@ -13,9 +13,14 @@ from osrs_bot.action import (
     UnsentActionDisposition,
 )
 from osrs_bot.input_coordinator import (
+    ApprovedCameraHoldIntent,
+    ApprovedCameraZoomIntent,
+    ApprovedCursorRecoveryIntent,
     ApprovedKeyIntent,
     ApprovedPointerIntent,
     CommandEvidence,
+    CursorInvalidationCause,
+    CursorReacquisitionEvidence,
     FirmwareSafetyStatus,
     InputFailureKind,
     InputPurpose,
@@ -24,11 +29,13 @@ from osrs_bot.input_coordinator import (
     InputValidation,
     PointerActivation,
     PointerActivationDecision,
+    RuneLiteGeometryEvidence,
 )
 from osrs_bot.model import (
     Action,
     ActionKind,
     CameraConstraint,
+    CameraZoomConstraint,
     CLOSE_BANK_WIDGET_KEY,
     DialogueOption,
     DialogueOptionConstraint,
@@ -38,6 +45,7 @@ from osrs_bot.model import (
     NearbyObject,
     Observation,
     PlayerObservation,
+    SceneCensusEvidence,
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
@@ -48,11 +56,18 @@ from osrs_bot.model import (
     WidgetTarget,
     WorldPoint,
 )
+from osrs_bot.observability import TimingPhase
+from osrs_bot.pointer import gameplay_pointer_safe_bounds
 from osrs_bot.safety import SafetyCheck, SafetyGate
 
 
 POINT = ScreenPoint(110, 110)
 CANVAS = ScreenBounds(50, 50, 500, 400)
+VIEWPORT = ScreenBounds(60, 60, 470, 360)
+POINTER_SAFE = gameplay_pointer_safe_bounds(VIEWPORT)
+OUTER = ScreenBounds(40, 40, 520, 430)
+NATIVE_CLIENT = ScreenBounds(45, 45, 510, 415)
+ROOT_HWND = 9001
 
 
 def observation(
@@ -66,7 +81,11 @@ def observation(
     location: WorldPoint = WorldPoint(3192, 3244, 0),
     nearby_objects: tuple[NearbyObject, ...] | None = None,
     camera_yaw: int | None = None,
+    camera_pitch: int | None = None,
+    camera_zoom: int | None = None,
+    text_input_active: bool | None = None,
     geometry_frame_id: str | None = None,
+    viewport_bounds: ScreenBounds | None = VIEWPORT,
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -101,13 +120,14 @@ def observation(
         menus=menus,
         widgets=widgets or WidgetObservation(bank_known=True),
         canvas_bounds=CANVAS,
+        viewport_bounds=viewport_bounds,
         game_state="LOGGED_IN",
         timestamp=timestamp,
         tick=tick,
         status="PASS",
         fresh=True,
         cache_wall_clock_fresh=True,
-        client_window_bounds=ScreenBounds(40, 40, 520, 430),
+        client_window_bounds=OUTER,
         scene_playable=True,
         session_id=session_id,
         menu_client_tick=1000 + tick,
@@ -126,6 +146,16 @@ def observation(
         menu_session_id=session_id,
         menu_process_id=process_id,
         camera_yaw=camera_yaw,
+        camera_pitch=camera_pitch,
+        camera_zoom=camera_zoom,
+        text_input_active=text_input_active,
+        scene_census=SceneCensusEvidence(
+            metadata_present=True,
+            complete=True,
+            scene_coverage_complete=True,
+            authoritative_absence_eligible=True,
+            priority_absence_eligible=True,
+        ),
     )
 
 
@@ -219,6 +249,9 @@ def input_receipt(
     context_cancel_attempted: bool = False,
     context_cancel_acknowledged: bool = False,
     failure_kind: InputFailureKind = InputFailureKind.NONE,
+    cursor_invalidation_cause: CursorInvalidationCause | None = None,
+    pointer_geometry: RuneLiteGeometryEvidence | None = None,
+    cursor_reacquisition: CursorReacquisitionEvidence | None = None,
 ) -> InputReceipt:
     evidence = tuple(
         command_evidence(index, command)
@@ -244,9 +277,35 @@ def input_receipt(
         ledger_closed=True,
         backend_closed=True,
         failure_kind=failure_kind,
+        cursor_invalidation_cause=cursor_invalidation_cause,
         context_cancel_attempted=context_cancel_attempted,
         context_cancel_acknowledged=context_cancel_acknowledged,
+        pointer_geometry=pointer_geometry,
+        cursor_reacquisition=cursor_reacquisition,
         errors=() if status == "PASS" else (reason,),
+    )
+
+
+def runelite_geometry() -> RuneLiteGeometryEvidence:
+    return RuneLiteGeometryEvidence(
+        expected_pid=1234,
+        expected_hwnd=ROOT_HWND,
+        outer_bounds=OUTER,
+        client_bounds=NATIVE_CLIENT,
+        canvas_bounds=CANVAS,
+    )
+
+
+def recoverable_cursor_invalidation() -> InputReceipt:
+    return input_receipt(
+        status="BLOCKED",
+        reason="actual_position_outside_padded_viewport",
+        commands=("ARM", "MOVE", "STOP_ALL", "DISARM", "STATUS"),
+        failure_kind=InputFailureKind.CURSOR_STATE_INVALIDATED,
+        cursor_invalidation_cause=(
+            CursorInvalidationCause.OUTSIDE_PADDED_VIEWPORT
+        ),
+        pointer_geometry=runelite_geometry(),
     )
 
 
@@ -307,14 +366,19 @@ class FakeCoordinator:
         self,
         *,
         forced_receipt: InputReceipt | None = None,
+        forced_recovery_receipt: InputReceipt | None = None,
         actual_pointer: ScreenPoint | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.pointer_intents: list[ApprovedPointerIntent] = []
+        self.recovery_intents: list[ApprovedCursorRecoveryIntent] = []
         self.key_intents: list[ApprovedKeyIntent] = []
+        self.camera_hold_intents: list[ApprovedCameraHoldIntent] = []
+        self.camera_zoom_intents: list[ApprovedCameraZoomIntent] = []
         self.decisions: list[PointerActivationDecision] = []
         self.row_intents: list[ApprovedPointerIntent] = []
         self.forced_receipt = forced_receipt
+        self.forced_recovery_receipt = forced_recovery_receipt
         self.actual_pointer = actual_pointer
 
     @staticmethod
@@ -360,6 +424,82 @@ class FakeCoordinator:
             mode="key",
             intent_ids=(intent.intent_id,),
             commands=("ARM", "KEY_PRESS", "STOP_ALL", "DISARM", "STATUS"),
+        )
+
+    def execute_camera_hold(self, intent, *, validate):  # type: ignore[no-untyped-def]
+        self.calls.append("camera_hold")
+        self.camera_hold_intents.append(intent)
+        decision = validate(intent)
+        if self.forced_receipt is not None:
+            return self.forced_receipt
+        if not isinstance(decision, InputValidation) or not decision.allowed:
+            reason = decision.reason if isinstance(decision, InputValidation) else "invalid"
+            return self._denied(
+                reason,
+                intent_ids=(intent.intent_id,),
+                mode="camera_hold",
+            )
+        return input_receipt(
+            mode="camera_hold",
+            intent_ids=(intent.intent_id,),
+            commands=("ARM", "CAMERA_HOLD", "STOP_ALL", "DISARM", "STATUS"),
+        )
+
+    def execute_camera_zoom(self, intent, *, validate):  # type: ignore[no-untyped-def]
+        self.calls.append("camera_zoom")
+        self.camera_zoom_intents.append(intent)
+        decision = validate(intent)
+        if self.forced_receipt is not None:
+            return self.forced_receipt
+        if not isinstance(decision, InputValidation) or not decision.allowed:
+            reason = decision.reason if isinstance(decision, InputValidation) else "invalid"
+            return self._denied(
+                reason,
+                intent_ids=(intent.intent_id,),
+                mode="camera_zoom",
+            )
+        return input_receipt(
+            mode="camera_zoom",
+            intent_ids=(intent.intent_id,),
+            commands=("ARM", "WHEEL", "STOP_ALL", "DISARM", "STATUS"),
+        )
+
+    def execute_cursor_reacquisition(
+        self,
+        intent: ApprovedCursorRecoveryIntent,
+    ) -> InputReceipt:
+        self.calls.append("reacquire")
+        self.recovery_intents.append(intent)
+        if self.forced_recovery_receipt is not None:
+            return self.forced_recovery_receipt
+        geometry = RuneLiteGeometryEvidence(
+            expected_pid=intent.expected_pid,
+            expected_hwnd=intent.expected_hwnd,
+            outer_bounds=intent.expected_native_outer_bounds,
+            client_bounds=intent.expected_native_client_bounds,
+            canvas_bounds=intent.canvas_bounds,
+        )
+        center = intent.pointer_safe_bounds.center
+        neutral = ScreenBounds(center.x - 4, center.y - 4, 9, 9)
+        reacquisition = CursorReacquisitionEvidence(
+            coordinate_space="device_pixels_pm_v2",
+            virtual_desktop_bounds=ScreenBounds(0, 0, 1920, 1080),
+            neutral_bounds=neutral,
+            cursor_before=ScreenPoint(10, 10),
+            before_geometry=geometry,
+            cursor_after=center,
+            after_geometry=geometry,
+            completed=True,
+        )
+        return input_receipt(
+            status="BLOCKED",
+            reason="cursor_reacquired_replan_required",
+            intent_ids=(intent.recovery_id,),
+            commands=("ARM", "MOVE", "STOP_ALL", "DISARM", "STATUS"),
+            failure_kind=InputFailureKind.CURSOR_STATE_INVALIDATED,
+            cursor_invalidation_cause=CursorInvalidationCause.CURSOR_REACQUIRED,
+            pointer_geometry=geometry,
+            cursor_reacquisition=reacquisition,
         )
 
     def execute_adaptive_pointer(
@@ -503,7 +643,9 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         intent = coordinator.pointer_intents[0]
         self.assertEqual(InputPurpose.GAMEPLAY_OBJECT, intent.purpose)
         self.assertEqual(POINT, intent.target)
-        self.assertEqual(CANVAS, intent.movement_bounds)
+        self.assertEqual(POINTER_SAFE, intent.movement_bounds)
+        self.assertEqual(CANVAS, intent.canvas_bounds)
+        self.assertEqual(VIEWPORT, intent.viewport_bounds)
         self.assertEqual(ScreenBounds(107, 107, 7, 7), intent.target_bounds)
         self.assertEqual(1234, intent.expected_pid)
         self.assertEqual("pre_move.observation", result.safety_checks[0].stage)
@@ -524,6 +666,129 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             result.safety_checks[-1],
         )
 
+    def test_safety_timing_is_additive_and_diagnostic_callback_cannot_change_input(self) -> None:
+        coordinator = FakeCoordinator()
+        evidence_value = 0.0
+
+        def evidence_clock() -> float:
+            nonlocal evidence_value
+            evidence_value += 0.001
+            return evidence_value
+
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: self.hover,
+            sleep=lambda _seconds: None,
+            evidence_clock=evidence_clock,
+            wait_state_observer=lambda _state: (_ for _ in ()).throw(
+                RuntimeError("presentation unavailable")
+            ),
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        aggregate = result.observability.timing.for_phase(
+            TimingPhase.SAFETY_GATE_EVALUATION
+        )
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["adaptive"], coordinator.calls)
+        self.assertIsNotNone(aggregate)
+        self.assertGreaterEqual(aggregate.count, 3)
+        self.assertGreaterEqual(aggregate.total_millis, 0)
+        self.assertIsNotNone(
+            result.observability.timing.for_phase(
+                TimingPhase.OBSERVATION_REQUEST_FETCH
+            )
+        )
+
+    def test_failed_evidence_clock_cannot_change_action_result(self) -> None:
+        coordinator = FakeCoordinator()
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: self.hover,
+            sleep=lambda _seconds: None,
+            evidence_clock=lambda: (_ for _ in ()).throw(
+                RuntimeError("diagnostic clock failed")
+            ),
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["adaptive"], coordinator.calls)
+        safety = result.observability.timing.for_phase(
+            TimingPhase.SAFETY_GATE_EVALUATION
+        )
+        self.assertIsNotNone(safety)
+        self.assertEqual(0, safety.total_millis)
+
+    def test_preclick_delay_follows_confirmation_and_precedes_revalidation(self) -> None:
+        coordinator = FakeCoordinator()
+        samples = iter(
+            (
+                self.hover,
+                observation(menus=self.hover.menus, tick=12),
+            )
+        )
+        events: list[object] = []
+
+        def observe() -> Observation:
+            events.append("observe")
+            return next(samples)
+
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            observe,
+            sleep=lambda seconds: events.append(("sleep", seconds)),
+            evidence_attempts=1,
+        )
+        action = replace(
+            tree_action(),
+            settle_delay_seconds=0.05,
+            pre_click_delay_seconds=0.08,
+        )
+
+        result = interface.execute(action, self.pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(
+            [
+                ("sleep", 0.05),
+                "observe",
+                ("sleep", 0.08),
+                "observe",
+            ],
+            events,
+        )
+
+    def test_target_drift_during_preclick_delay_blocks_activation(self) -> None:
+        coordinator = FakeCoordinator()
+        samples = iter(
+            (
+                self.hover,
+                observation(menus=(), tick=12),
+            )
+        )
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _seconds: None,
+            evidence_attempts=1,
+        )
+
+        result = interface.execute(
+            replace(tree_action(), pre_click_delay_seconds=0.08),
+            self.pre,
+        )
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("hover_menu_mismatch", result.reason)
+        self.assertIsNone(coordinator.decisions[0].activation)
+
     def test_pointer_recovery_requires_outer_window_geometry_before_coordinator(self) -> None:
         coordinator = FakeCoordinator()
         result = self.interface(coordinator, self.hover).execute(
@@ -535,6 +800,157 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertIn("outer window geometry unavailable", result.reason)
         self.assertEqual([], coordinator.calls)
         self.assertIsNone(result.receipt)
+
+    def test_cursor_recovery_submits_only_geometry_to_movement_lane(self) -> None:
+        coordinator = FakeCoordinator()
+        interface = self.interface(coordinator, self.hover)
+
+        receipt = interface.recover_cursor(
+            self.pre,
+            recoverable_cursor_invalidation(),
+        )
+
+        self.assertEqual(["reacquire"], coordinator.calls)
+        self.assertEqual(1, len(coordinator.recovery_intents))
+        intent = coordinator.recovery_intents[0]
+        self.assertIsInstance(intent, ApprovedCursorRecoveryIntent)
+        self.assertEqual(1234, intent.expected_pid)
+        self.assertEqual(ROOT_HWND, intent.expected_hwnd)
+        self.assertEqual(OUTER, intent.expected_outer_bounds)
+        self.assertEqual(OUTER, intent.expected_native_outer_bounds)
+        self.assertEqual(NATIVE_CLIENT, intent.expected_native_client_bounds)
+        self.assertEqual(CANVAS, intent.canvas_bounds)
+        self.assertEqual(VIEWPORT, intent.viewport_bounds)
+        self.assertEqual(POINTER_SAFE, intent.pointer_safe_bounds)
+        self.assertFalse(hasattr(intent, "target"))
+        self.assertFalse(hasattr(intent, "button"))
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertIs(
+            CursorInvalidationCause.CURSOR_REACQUIRED,
+            receipt.cursor_invalidation_cause,
+        )
+        self.assertNotIn(
+            True,
+            tuple(
+                command.command in {"MOUSE_DOWN", "MOUSE_UP", "KEY_PRESS"}
+                for command in receipt.commands
+            ),
+        )
+        self.assertTrue(receipt.cursor_reacquisition.completed)
+        self.assertTrue(receipt.cursor_reacquisition.no_activation_sent)
+
+    def test_successful_recovery_pins_hwnd_and_native_geometry_on_retry(self) -> None:
+        coordinator = FakeCoordinator()
+        interface = self.interface(coordinator, self.hover)
+        interface.recover_cursor(self.pre, recoverable_cursor_invalidation())
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["reacquire", "adaptive"], coordinator.calls)
+        retry = coordinator.pointer_intents[0]
+        self.assertEqual(ROOT_HWND, retry.expected_hwnd)
+        self.assertEqual(OUTER, retry.expected_native_outer_bounds)
+        self.assertEqual(NATIVE_CLIENT, retry.expected_native_client_bounds)
+        self.assertEqual(CANVAS, retry.canvas_bounds)
+        self.assertEqual(VIEWPORT, retry.viewport_bounds)
+        self.assertEqual(POINTER_SAFE, retry.movement_bounds)
+
+    def test_post_recovery_retry_cannot_switch_to_key_lane(self) -> None:
+        widgets = WidgetObservation(
+            bank_known=True,
+            dialogue_active=True,
+            dialogue_type="options",
+            dialogue_prompt="Climb up or down the stairs?",
+            dialogue_options=(DialogueOption(1, "1", "Climb up the stairs."),),
+            dialogue_number_keys=True,
+            dialogue_client_tick=500,
+        )
+        pre = replace(self.pre, widgets=widgets)
+        action = Action(
+            ActionKind.PRESS_KEY,
+            "Choose climb up",
+            10,
+            option="Climb up the stairs.",
+            target_key="dialogue:1",
+            target_name="Climb up the stairs.",
+            target_id=1,
+            key="1",
+            source_session_id="session-1",
+            source_dialogue_client_tick=500,
+            task_constraints=TaskConstraints(
+                dialogue=DialogueOptionConstraint(
+                    "climb", "Climb up the stairs.", 1, "1"
+                )
+            ),
+        )
+        coordinator = FakeCoordinator()
+        interface = self.interface(coordinator, self.hover)
+        interface.recover_cursor(self.pre, recoverable_cursor_invalidation())
+
+        result = interface.execute(action, pre)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual(
+            "cursor_recovery_retry_requires_pointer_target",
+            result.reason,
+        )
+        self.assertEqual(["reacquire"], coordinator.calls)
+        self.assertEqual([], coordinator.key_intents)
+        self.assertEqual("pre_move_safe", result.safety_checks[-1].code)
+
+    def test_recovered_retry_blocks_pid_canvas_viewport_or_outer_drift(self) -> None:
+        cases = (
+            (
+                "pid",
+                replace(
+                    self.pre,
+                    client_process_id=4321,
+                    menu_process_id=4321,
+                ),
+                "RuneLite PID changed after cursor recovery",
+            ),
+            (
+                "canvas",
+                replace(
+                    self.pre,
+                    canvas_bounds=ScreenBounds(49, 50, 501, 400),
+                ),
+                "RuneLite canvas geometry changed after cursor recovery",
+            ),
+            (
+                "viewport",
+                replace(
+                    self.pre,
+                    viewport_bounds=ScreenBounds(61, 60, 469, 360),
+                ),
+                "RuneLite viewport geometry changed after cursor recovery",
+            ),
+            (
+                "outer",
+                replace(
+                    self.pre,
+                    client_window_bounds=ScreenBounds(41, 40, 520, 430),
+                ),
+                "RuneLite outer geometry changed after cursor recovery",
+            ),
+        )
+
+        for label, drifted, expected_reason in cases:
+            with self.subTest(label=label):
+                coordinator = FakeCoordinator()
+                interface = self.interface(coordinator, self.hover)
+                interface.recover_cursor(
+                    self.pre,
+                    recoverable_cursor_invalidation(),
+                )
+
+                result = interface.execute(tree_action(), drifted)
+
+                self.assertEqual("ERROR", result.status)
+                self.assertIn(expected_reason, result.reason)
+                self.assertEqual(["reacquire"], coordinator.calls)
+                self.assertIsNone(result.receipt)
 
     def test_fresh_hover_mismatch_denies_activation_but_preserves_cleanup_proof(self) -> None:
         coordinator = FakeCoordinator()
@@ -767,6 +1183,9 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertEqual(outer, coordinator.pointer_intents[0].reacquisition_bounds)
         self.assertIsNone(row_intent.reacquisition_bounds)
         self.assertEqual(InputPurpose.CONTEXT_ROW, row_intent.purpose)
+        self.assertEqual(POINTER_SAFE, row_intent.movement_bounds)
+        self.assertEqual(CANVAS, row_intent.canvas_bounds)
+        self.assertEqual(VIEWPORT, row_intent.viewport_bounds)
         self.assertEqual(row_bounds.center, row_intent.target)
         self.assertEqual(
             ScreenBounds(
@@ -1461,7 +1880,7 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             camera_key="left",
         )
         action = Action(
-            ActionKind.PRESS_KEY,
+            ActionKind.CAMERA_HOLD,
             "Turn camera toward route",
             10,
             option="Turn camera left",
@@ -1507,10 +1926,130 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         result = self.interface(coordinator, fresh).execute(action, pre)
 
         self.assertEqual("SENT", result.status)
-        intent = coordinator.key_intents[0]
-        self.assertEqual("LEFT", intent.key)
+        intent = coordinator.camera_hold_intents[0]
+        self.assertEqual("left", intent.direction)
         self.assertEqual(250, intent.hold_millis)
         self.assertEqual(11, result.post_move_tick)
+
+        satisfied = input_receipt(
+            mode="key",
+            status="BLOCKED",
+            reason="camera_projection_already_actionable",
+            commands=(),
+        )
+        unsent = self.interface(
+            FakeCoordinator(forced_receipt=satisfied),
+            fresh,
+        ).execute(action, pre)
+        self.assertFalse(unsent.activation_attempted)
+        self.assertIs(
+            UnsentActionDisposition.CAMERA_FRAMING_SATISFIED,
+            unsent.unsent_disposition,
+        )
+
+    def test_camera_zoom_submits_semantic_stationary_wheel_intent(self) -> None:
+        source = WorldPoint(3195, 3248, 0)
+        target_location = WorldPoint(3200, 3238, 0)
+        target = NearbyObject(
+            key="route:west_approach_bridge",
+            object_id=0,
+            name="route:west_approach_bridge",
+            kind="NAVIGATION_TILE",
+            actions=("Walk here",),
+            location=target_location,
+            distance=10,
+            geometry=TargetGeometry(),
+            scene_x=56,
+            scene_y=38,
+        )
+        widgets = WidgetObservation(bank_known=True)
+        verification = VerificationSpec(
+            VerificationKind.CAMERA_ZOOM_CHANGED,
+            before_tick=10,
+            deadline_tick=20,
+            before_location=source,
+            source_session_id="session-1",
+            before_camera_yaw=0,
+            before_camera_pitch=900,
+            before_geometry_frame_id="camera-frame-0",
+            before_camera_zoom=200,
+            camera_zoom_amount=1,
+            before_process_id=1234,
+            before_bank_known=True,
+            before_bank_open=False,
+            before_bank_pin_open=False,
+            before_bank_readable=False,
+            before_dialogue_active=False,
+            before_dialogue_type="none",
+            before_text_input_active=False,
+        )
+        action = Action(
+            ActionKind.CAMERA_ZOOM,
+            "Zoom camera in for route",
+            10,
+            option="Zoom camera in",
+            target_key=target.key,
+            target_name=target.name,
+            target_id=0,
+            verification=verification,
+            target_param0=56,
+            target_param1=38,
+            source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                camera_zoom=CameraZoomConstraint(
+                    target_key=target.key,
+                    target_location=target_location,
+                    source_location=source,
+                    source_geometry_frame_id="camera-frame-0",
+                    before_yaw=0,
+                    before_pitch=900,
+                    before_zoom=200,
+                    amount=1,
+                    desired_zoom_min=320,
+                    desired_zoom_max=448,
+                    target_action="Walk here",
+                )
+            ),
+        )
+        pre = observation(
+            menus=(),
+            tick=10,
+            widgets=widgets,
+            location=source,
+            nearby_objects=(target,),
+            camera_yaw=0,
+            camera_pitch=900,
+            camera_zoom=200,
+            geometry_frame_id="camera-frame-0",
+            text_input_active=False,
+        )
+        fresh = observation(
+            menus=(),
+            tick=11,
+            widgets=widgets,
+            location=source,
+            nearby_objects=(target,),
+            camera_yaw=0,
+            camera_pitch=900,
+            camera_zoom=200,
+            geometry_frame_id="camera-frame-0",
+            text_input_active=False,
+        )
+        coordinator = FakeCoordinator()
+
+        result = self.interface(coordinator, fresh).execute(action, pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["camera_zoom"], coordinator.calls)
+        intent = coordinator.camera_zoom_intents[0]
+        self.assertEqual(1, intent.amount)
+        self.assertIsNone(intent.expected_hwnd)
+        self.assertIsNone(intent.expected_native_outer_bounds)
+        self.assertIsNone(intent.expected_native_client_bounds)
+        self.assertEqual(OUTER, intent.expected_outer_bounds)
+        self.assertEqual(POINTER_SAFE, intent.pointer_safe_bounds)
+        self.assertIsNone(action.screen_point)
+        self.assertIsNone(action.key)
 
     def test_dialogue_key_waits_boundedly_for_new_widget_evidence(self) -> None:
         widgets = WidgetObservation(

@@ -11,6 +11,7 @@ public class TickSnapshot
     public Integer cameraZ;
     public Integer cameraYaw;
     public Integer cameraPitch;
+    public Integer zoom3d;
     public Integer viewportWidth;
     public Integer viewportHeight;
     public Integer viewportXOffset;
@@ -19,6 +20,7 @@ public class TickSnapshot
     public Integer canvasHeight;
     public InputGeometrySnapshot inputGeometry;
     public Boolean welcomeScreenVisible;
+    public Boolean textInputActive;
 
     public LocalPlayer localPlayer;
     public InventorySlot[] inventory;
@@ -152,6 +154,8 @@ public class TickSnapshot
         public Integer localY;
         public Integer sceneX;
         public Integer sceneY;
+        public Integer canvasX;
+        public Integer canvasY;
         public int animation;
         public int poseAnimation;
         public int combatLevel;

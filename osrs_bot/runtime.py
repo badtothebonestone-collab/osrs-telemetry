@@ -18,10 +18,31 @@ from .engine_frame import (
     EngineStage,
     ObservationReference,
 )
-from .input_coordinator import InputCoordinator, InputFailureKind
-from .model import Action, ActionKind, Observation, ScreenBounds, VerificationSpec
+from .input_coordinator import (
+    CameraInputVerificationEvidence,
+    CursorInvalidationCause,
+    InputCoordinator,
+    InputFailureKind,
+    InputReceipt,
+)
+from .model import (
+    Action,
+    ActionKind,
+    Observation,
+    SceneCensusEvidence,
+    ScreenBounds,
+    VerificationKind,
+    VerificationSpec,
+)
 from .observation import ObservationClient
-from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
+from .observability import (
+    ObservabilityEvidence,
+    TimingEvidence,
+    TimingPhase,
+    WaitState,
+    safe_elapsed_millis,
+)
+from .task_contract import Decision, ObservationRequest, Task, TaskSnapshot, TaskStatus
 from .verification import (
     VerificationFailureKind,
     VerificationResult,
@@ -30,43 +51,153 @@ from .verification import (
 )
 
 
-LIVE_FOCUS_HANDOFF_SECONDS = 15.0
+LIVE_FOCUS_HANDOFF_SECONDS = 60.0
 MAX_CONSECUTIVE_UNSENT_REPLANS = 1
 _PREACTIVATION_COMMANDS = frozenset(
     {"STOP_ALL", "PING", "IDENTIFY", "CAPS", "STATUS", "ARM", "MOVE", "DISARM"}
 )
 
 
+def _fetch_observation_request(
+    client: ObservationClient,
+    request: ObservationRequest,
+) -> Observation:
+    """Use the typed query-plan API while preserving legacy test/client seams."""
+    planned_fetch = getattr(client, "fetch_planned", None)
+    if callable(planned_fetch):
+        return planned_fetch(request)
+    observation = client.fetch(
+        request.tile_projections,
+        request.priority_object_ids,
+    )
+    # A legacy client can honor only tile projections and priority IDs.  If the
+    # task requested any newer coverage or response-shaping field, the returned
+    # census is still readable but cannot truthfully prove coverage or absence
+    # for the dropped plan.
+    if (
+        request.priority_object_keys
+        or request.center_world_location is not None
+        or request.radius_tiles is not None
+        or request.max_objects is not None
+        or request.max_projection_objects is not None
+    ):
+        census = getattr(observation, "scene_census", SceneCensusEvidence())
+        observation = replace(
+            observation,
+            scene_census=replace(
+                census,
+                complete=None,
+                authoritative_absence_eligible=False,
+                priority_absence_eligible=False,
+                scene_coverage_complete=None,
+            ),
+        )
+    return observation
+
+
 def _may_replan_unsent_action(
     execution: ExecutionResult,
     consecutive_replans: int,
+    *,
+    cursor_recovery_used: bool = False,
+    cursor_retry_pending: bool = False,
 ) -> bool:
     """Accept only a fully cleaned, pre-activation target-lifecycle rejection."""
 
     receipt = execution.receipt
-    return bool(
-        consecutive_replans < MAX_CONSECUTIVE_UNSENT_REPLANS
-        and not execution.activation_attempted
+    common = bool(
+        not execution.activation_attempted
         and execution.status == "BLOCKED"
         and receipt is not None
-        and (
-            (
-                execution.unsent_disposition
-                is UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
-                and receipt.failure_kind is InputFailureKind.NONE
-            )
-            or (
-                execution.unsent_disposition
-                is UnsentActionDisposition.CURSOR_STATE_INVALIDATED
-                and receipt.failure_kind
-                is InputFailureKind.CURSOR_STATE_INVALIDATED
-            )
-        )
-        and (execution.cleanup_confirmed or receipt.safely_unsent)
         and all(
             command.command in _PREACTIVATION_COMMANDS
             for command in receipt.commands
         )
+    )
+    if not common or receipt is None:
+        return False
+    if cursor_retry_pending:
+        # Recovery authorizes exactly one fresh executable retry.  Any unsent
+        # result from that retry is the second failure and is terminal,
+        # regardless of whether its immediate cause is cursor or semantics.
+        return False
+    if (
+        execution.unsent_disposition
+        is UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+    ):
+        cause = receipt.cursor_invalidation_cause
+        return bool(
+            not cursor_recovery_used
+            and
+            receipt.failure_kind is InputFailureKind.CURSOR_STATE_INVALIDATED
+            and execution.cleanup_confirmed
+            and receipt.pointer_geometry is not None
+            and (
+                (cause is CursorInvalidationCause.CURSOR_REACQUIRED
+                 and _completed_cursor_reacquisition(receipt))
+                or (cause is not None and cause.recovery_eligible)
+            )
+        )
+    return bool(
+        consecutive_replans < MAX_CONSECUTIVE_UNSENT_REPLANS
+        and
+        execution.unsent_disposition
+        in {
+            UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED,
+            UnsentActionDisposition.CAMERA_FRAMING_SATISFIED,
+        }
+        and receipt.failure_kind is InputFailureKind.NONE
+        and (execution.cleanup_confirmed or receipt.safely_unsent)
+    )
+
+
+def _receipt_cleanup_confirmed(receipt: InputReceipt) -> bool:
+    return bool(
+        receipt.stop_all_acknowledged
+        and receipt.disarm_acknowledged
+        and receipt.firmware_status_acknowledged
+        and receipt.firmware_status is not None
+        and receipt.firmware_status.safe
+        and receipt.unresolved_command_count == 0
+        and receipt.failed_command_count == 0
+        and receipt.ack_missing_count == 0
+        and receipt.ledger_complete
+        and receipt.ledger_closed
+        and receipt.backend_closed
+        and all(command.successful for command in receipt.commands)
+    )
+
+
+def _completed_cursor_reacquisition(receipt: InputReceipt) -> bool:
+    evidence = receipt.cursor_reacquisition
+    return bool(
+        receipt.status == "BLOCKED"
+        and receipt.failure_kind is InputFailureKind.CURSOR_STATE_INVALIDATED
+        and receipt.cursor_invalidation_cause
+        is CursorInvalidationCause.CURSOR_REACQUIRED
+        and _receipt_cleanup_confirmed(receipt)
+        and evidence is not None
+        and evidence.completed
+        and evidence.geometry_unchanged
+        and evidence.no_activation_sent
+        and receipt.pointer_geometry is not None
+        and evidence.before_geometry == receipt.pointer_geometry
+        and evidence.after_geometry == receipt.pointer_geometry
+        and all(
+            command.command in _PREACTIVATION_COMMANDS
+            for command in receipt.commands
+        )
+    )
+
+
+def _recovery_matches_invalidation(
+    invalidation: InputReceipt,
+    recovery: InputReceipt,
+) -> bool:
+    return bool(
+        _completed_cursor_reacquisition(recovery)
+        and invalidation.pointer_geometry is not None
+        and recovery.pointer_geometry == invalidation.pointer_geometry
     )
 
 
@@ -88,6 +219,92 @@ def _verification_after_input(
         specification,
         before_tick=post_move_tick,
         deadline_tick=post_move_tick + tick_budget,
+    )
+
+
+def _attach_camera_verification(
+    execution: ExecutionResult,
+    specification: VerificationSpec,
+    result: VerificationResult,
+) -> ExecutionResult:
+    """Retain typed post-activation camera proof on the immutable receipt."""
+
+    if specification.kind not in {
+        VerificationKind.CAMERA_POSE_CHANGED,
+        VerificationKind.CAMERA_ZOOM_CHANGED,
+    } or execution.receipt is None:
+        return execution
+
+    outcome = result.outcome
+    pose = outcome.camera_pose_result if outcome is not None else None
+    zoom = outcome.camera_zoom_result if outcome is not None else None
+    evidence = CameraInputVerificationEvidence(
+        kind=specification.kind.value,
+        status=result.status.value,
+        reason=result.reason,
+        observed_tick=(outcome.observed_tick if outcome is not None else None),
+        before_yaw=(
+            pose.before_yaw
+            if pose is not None
+            else (
+                zoom.before_yaw
+                if zoom is not None
+                else specification.before_camera_yaw
+            )
+        ),
+        after_yaw=(
+            pose.after_yaw
+            if pose is not None
+            else (zoom.after_yaw if zoom is not None else None)
+        ),
+        before_pitch=(
+            pose.before_pitch
+            if pose is not None
+            else (
+                zoom.before_pitch
+                if zoom is not None
+                else specification.before_camera_pitch
+            )
+        ),
+        after_pitch=(
+            pose.after_pitch
+            if pose is not None
+            else (zoom.after_pitch if zoom is not None else None)
+        ),
+        before_zoom=(
+            zoom.before_zoom
+            if zoom is not None
+            else specification.before_camera_zoom
+        ),
+        after_zoom=(zoom.after_zoom if zoom is not None else None),
+        before_geometry_frame_id=(
+            pose.before_geometry_frame_id
+            if pose is not None
+            else (
+                zoom.before_geometry_frame_id
+                if zoom is not None
+                else specification.before_geometry_frame_id
+            )
+        ),
+        after_geometry_frame_id=(
+            pose.after_geometry_frame_id
+            if pose is not None
+            else (
+                zoom.after_geometry_frame_id if zoom is not None else None
+            )
+        ),
+        ui_state_unchanged=(
+            zoom.before_ui_state == zoom.after_ui_state
+            if zoom is not None
+            else None
+        ),
+    )
+    return replace(
+        execution,
+        receipt=replace(
+            execution.receipt,
+            camera_verification=evidence,
+        ),
     )
 
 
@@ -239,6 +456,12 @@ class RuntimeStatistics:
 class _ActionInterface(Protocol):
     def execute(self, action: Action, observation: Observation) -> ExecutionResult: ...
 
+    def recover_cursor(
+        self,
+        observation: Observation,
+        invalidated_receipt: InputReceipt,
+    ) -> InputReceipt: ...
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeResult:
@@ -308,6 +531,7 @@ class RuntimeResult:
                 "stopAllConfirmed": self.execution.stop_all_confirmed,
                 "disarmConfirmed": self.execution.disarm_confirmed,
                 "cleanupConfirmed": self.execution.cleanup_confirmed,
+                "observability": self.execution.observability.to_dict(),
                 "receipt": (
                     self.execution.receipt.to_dict()
                     if self.execution.receipt is not None
@@ -335,6 +559,7 @@ class TaskRuntime:
         control: RuntimeControl | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        evidence_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(configuration, RuntimeConfig):
             raise TypeError("configuration must be a validated RuntimeConfig")
@@ -352,6 +577,9 @@ class TaskRuntime:
         )
         self._sleep = sleep
         self._clock = clock
+        if not callable(evidence_clock):
+            raise TypeError("evidence_clock must be callable")
+        self._evidence_clock = evidence_clock
         if frame_publisher is not None and not isinstance(
             frame_publisher, EngineFramePublisher
         ):
@@ -366,6 +594,12 @@ class TaskRuntime:
         self._frame_verification: VerificationResult | None = None
         self._frame_pending: VerificationSpec | None = None
         self._frame_publish_error: str | None = None
+        self._frame_stage = EngineStage.STARTING
+        self._timing = TimingEvidence()
+        self._wait_state: WaitState | None = None
+        self._wait_timing_phase: TimingPhase | None = None
+        self._wait_started: object = None
+        self._observed_wait_states: tuple[WaitState, ...] = ()
         self._statistics_lock = threading.Lock()
         self._statistics = RuntimeStatistics(False, "IDLE", None, 0, 0, None)
 
@@ -428,6 +662,8 @@ class TaskRuntime:
         last_tick: int | None = None
         last_decision: Decision | None = None
         consecutive_unsent_replans = 0
+        cursor_recovery_used = False
+        cursor_retry_pending = False
         run_identity: tuple[int, str] | None = (
             (expected_process_id, expected_session_id)
             if expected_process_id is not None and expected_session_id is not None
@@ -439,9 +675,20 @@ class TaskRuntime:
             int,
             ScreenBounds | None,
             ScreenBounds | None,
+            ScreenBounds | None,
+        ] | None = None
+        cursor_recovery_binding: tuple[
+            int,
+            str | None,
+            ScreenBounds | None,
+            ScreenBounds | None,
+            ScreenBounds | None,
         ] | None = None
         runtime_deadline = self._clock() + self._max_runtime_seconds
-        focus_deadline = self._clock() + LIVE_FOCUS_HANDOFF_SECONDS
+        focus_deadline: float | None = (
+            self._clock() + LIVE_FOCUS_HANDOFF_SECONDS
+        )
+        focus_was_observed = False
 
         def control_boundary() -> RuntimeBoundary:
             if self._control is None:
@@ -527,6 +774,39 @@ class TaskRuntime:
                 and observation.source_coherent
             ):
                 run_identity = observed_identity
+            if cursor_recovery_binding is not None:
+                (
+                    recovery_pid,
+                    recovery_session,
+                    recovery_canvas,
+                    recovery_viewport,
+                    recovery_window,
+                ) = cursor_recovery_binding
+                if (
+                    observation.client_process_id != recovery_pid
+                    or observation.session_id != recovery_session
+                ):
+                    return self._result(
+                        "BLOCKED",
+                        "cursor recovery binding identity changed",
+                        observations,
+                        actions,
+                        last_tick,
+                        last_decision,
+                    )
+                if (
+                    observation.canvas_bounds != recovery_canvas
+                    or observation.viewport_bounds != recovery_viewport
+                    or observation.client_window_bounds != recovery_window
+                ):
+                    return self._result(
+                        "BLOCKED",
+                        "RuneLite geometry changed after cursor reacquisition",
+                        observations,
+                        actions,
+                        last_tick,
+                        last_decision,
+                    )
             self._update_statistics(
                 True, "RUNNING", None, observations, actions, last_tick
             )
@@ -561,6 +841,7 @@ class TaskRuntime:
                     expected_session,
                     minimum_tick,
                     expected_canvas,
+                    expected_viewport,
                     expected_window,
                 ) = cursor_replan_after
                 if (
@@ -576,10 +857,15 @@ class TaskRuntime:
                         last_decision,
                     )
                 if observation.tick <= minimum_tick:
+                    self._set_wait_state(
+                        WaitState.WAITING_FOR_NEXT_SCENE_UPDATE,
+                        timing_phase=TimingPhase.SOURCE_COHERENCE_FRESHNESS_WAIT,
+                    )
                     self._sleep(self._poll_seconds)
                     continue
                 if (
                     observation.canvas_bounds != expected_canvas
+                    or observation.viewport_bounds != expected_viewport
                     or observation.client_window_bounds != expected_window
                 ):
                     return self._result(
@@ -590,27 +876,38 @@ class TaskRuntime:
                         last_tick,
                         last_decision,
                     )
-                if not (
-                    observation.fresh
-                    and observation.cache_wall_clock_fresh
-                    and observation.source_coherent
-                ):
+                if not observation.loaded_scene:
                     # Cursor ingress invalidates the action that was recognized
                     # before movement. A newer tick is not sufficient evidence
                     # to rebuild it: recognition may resume only from the same
                     # freshness/coherence contract used by live safety.
+                    self._set_wait_state(
+                        self._source_wait_state(observation),
+                        timing_phase=TimingPhase.SOURCE_COHERENCE_FRESHNESS_WAIT,
+                    )
                     self._sleep(self._poll_seconds)
                     continue
                 cursor_replan_after = None
-            if execute and (
-                not observation.client_focused
-                or observation.client_process_id is None
-                or observation.client_process_id <= 0
-            ):
-                if self._clock() > focus_deadline:
+            focus_ready = bool(
+                observation.client_focused
+                and observation.client_process_id is not None
+                and observation.client_process_id > 0
+            )
+            if execute and not focus_ready:
+                self._set_wait_state(None)
+                now = self._clock()
+                if focus_deadline is None:
+                    focus_deadline = now + LIVE_FOCUS_HANDOFF_SECONDS
+                if now > focus_deadline:
                     return self._result(
                         "BLOCKED",
-                        "telemetry-owning RuneLite client was not focused during the live handoff",
+                        (
+                            "telemetry-owning RuneLite client did not regain focus "
+                            "within the bounded recovery window"
+                            if focus_was_observed
+                            else "telemetry-owning RuneLite client was not focused "
+                            "during the live handoff"
+                        ),
                         observations,
                         actions,
                         last_tick,
@@ -618,6 +915,11 @@ class TaskRuntime:
                     )
                 self._sleep(self._poll_seconds)
                 continue
+            if execute:
+                focus_was_observed = True
+                focus_deadline = None
+            self._set_wait_state(None)
+            decision_started = self._evidence_now()
             try:
                 decision = self._task.decide(observation)
             except Exception as error:
@@ -628,6 +930,12 @@ class TaskRuntime:
                     actions,
                     last_tick,
                     last_decision,
+                )
+            finally:
+                self._record_phase(
+                    TimingPhase.TASK_DECISION,
+                    decision_started,
+                    self._evidence_now(),
                 )
             last_decision = decision
             self._frame_decision = decision
@@ -667,6 +975,10 @@ class TaskRuntime:
                     task_snapshot=task_snapshot,
                 )
             if decision.action.kind is ActionKind.WAIT:
+                self._set_wait_state(
+                    self._source_wait_state(observation),
+                    timing_phase=TimingPhase.SOURCE_COHERENCE_FRESHNESS_WAIT,
+                )
                 self._sleep(self._poll_seconds)
                 continue
 
@@ -706,6 +1018,7 @@ class TaskRuntime:
                 )
 
             assert self._action_interface is not None
+            self._set_wait_state(WaitState.INPUT_TRANSACTION_BUSY)
             try:
                 execution = self._action_interface.execute(decision.action, observation)
             except Exception as error:
@@ -724,6 +1037,9 @@ class TaskRuntime:
                     last_tick,
                     decision,
                 )
+            finally:
+                self._set_wait_state(None, publish=False)
+            self._merge_timing(execution.observability.timing)
             actions += 1
             self._update_statistics(
                 True, "RUNNING", None, observations, actions, last_tick
@@ -732,6 +1048,8 @@ class TaskRuntime:
             verification = decision.action.verification
             if execution.sent:
                 consecutive_unsent_replans = 0
+                if cursor_retry_pending:
+                    cursor_retry_pending = False
                 verification = _verification_after_input(
                     verification,
                     execution.post_move_tick,
@@ -768,6 +1086,8 @@ class TaskRuntime:
             elif _may_replan_unsent_action(
                 execution,
                 consecutive_unsent_replans,
+                cursor_recovery_used=cursor_recovery_used,
+                cursor_retry_pending=cursor_retry_pending,
             ):
                 try:
                     self._task.discard_pending_action(
@@ -798,21 +1118,112 @@ class TaskRuntime:
                         decision,
                         execution,
                     )
-                consecutive_unsent_replans += 1
-                if (
+                cursor_invalidation = (
                     execution.unsent_disposition
                     is UnsentActionDisposition.CURSOR_STATE_INVALIDATED
-                ):
+                )
+                if cursor_invalidation:
+                    cursor_recovery_used = True
+                else:
+                    consecutive_unsent_replans += 1
+                self._frame_pending = None
+                # Preserve the invalidating transaction and its complete
+                # cleanup receipt before any separate recovery is attempted.
+                self._publish_frame(EngineStage.EXECUTED)
+                if cursor_invalidation:
+                    invalidation_receipt = execution.receipt
+                    assert invalidation_receipt is not None
+                    cause = invalidation_receipt.cursor_invalidation_cause
+                    if cause is CursorInvalidationCause.CURSOR_REACQUIRED:
+                        recovery_receipt = invalidation_receipt
+                    else:
+                        self._set_wait_state(WaitState.INPUT_TRANSACTION_BUSY)
+                        try:
+                            recovery_receipt = (
+                                self._action_interface.recover_cursor(
+                                    observation,
+                                    invalidation_receipt,
+                                )
+                            )
+                        except Exception as error:
+                            return self._result(
+                                "BLOCKED",
+                                (
+                                    "movement-only cursor recovery failed before "
+                                    "a safe receipt: "
+                                    f"{type(error).__name__}: {error}"
+                                ),
+                                observations,
+                                actions,
+                                last_tick,
+                                decision,
+                                execution,
+                            )
+                        finally:
+                            self._set_wait_state(None, publish=False)
+                        if not isinstance(recovery_receipt, InputReceipt):
+                            return self._result(
+                                "BLOCKED",
+                                "movement-only cursor recovery returned no receipt",
+                                observations,
+                                actions,
+                                last_tick,
+                                decision,
+                                execution,
+                            )
+                        recovery_execution = ExecutionResult(
+                            action=decision.action,
+                            pre_move_tick=observation.tick,
+                            local_status="ERROR",
+                            local_reason="cursor_recovery_receipt_unavailable",
+                            receipt=recovery_receipt,
+                            unsent_disposition=(
+                                UnsentActionDisposition.CURSOR_STATE_INVALIDATED
+                            ),
+                            activation_attempted=False,
+                            observability=recovery_receipt.observability,
+                        )
+                        self._merge_timing(
+                            recovery_receipt.observability.timing
+                        )
+                        self._frame_execution = recovery_execution
+                        self._publish_frame(EngineStage.EXECUTED)
+                        if not _recovery_matches_invalidation(
+                            invalidation_receipt,
+                            recovery_receipt,
+                        ):
+                            return self._result(
+                                "BLOCKED",
+                                (
+                                    "movement-only cursor recovery did not prove "
+                                    "unchanged geometry and complete cleanup"
+                                ),
+                                observations,
+                                actions,
+                                last_tick,
+                                decision,
+                                recovery_execution,
+                            )
                     assert observation.client_process_id is not None
                     cursor_replan_after = (
                         observation.client_process_id,
                         observation.session_id,
-                        observation.tick,
+                        max(
+                            observation.tick,
+                            execution.post_move_tick or observation.tick,
+                        ),
                         observation.canvas_bounds,
+                        observation.viewport_bounds,
                         observation.client_window_bounds,
                     )
-                self._frame_pending = None
-                self._publish_frame(EngineStage.EXECUTED)
+                    cursor_recovery_binding = (
+                        observation.client_process_id,
+                        observation.session_id,
+                        observation.canvas_bounds,
+                        observation.viewport_bounds,
+                        observation.client_window_bounds,
+                    )
+                    cursor_retry_pending = True
                 continue
             self._publish_frame(EngineStage.EXECUTED, task_snapshot=task_snapshot)
             if not execution.sent:
@@ -835,6 +1246,10 @@ class TaskRuntime:
 
             deadline = self._clock() + self._verification_timeout_seconds
             verification_done = False
+            self._set_wait_state(
+                WaitState.WAITING_FOR_NEXT_SCENE_UPDATE,
+                timing_phase=TimingPhase.POST_ACTION_FRESH_OBSERVATION_WAIT,
+            )
             while (
                 observations < self._max_observations
                 and self._clock() <= deadline
@@ -870,6 +1285,16 @@ class TaskRuntime:
                 )
                 self._frame_observation = candidate
                 self._publish_frame(EngineStage.OBSERVED)
+                if not (
+                    candidate.fresh
+                    and candidate.cache_wall_clock_fresh
+                    and candidate.source_coherent
+                ):
+                    self._set_wait_state(
+                        self._source_wait_state(candidate),
+                        timing_phase=TimingPhase.POST_ACTION_FRESH_OBSERVATION_WAIT,
+                    )
+                verification_started = self._evidence_now()
                 try:
                     result = self._verifier.evaluate(verification, candidate)
                 except Exception as error:
@@ -889,6 +1314,12 @@ class TaskRuntime:
                         decision,
                         execution,
                     )
+                finally:
+                    self._record_phase(
+                        TimingPhase.SEMANTIC_OR_CAMERA_VERIFICATION,
+                        verification_started,
+                        self._evidence_now(),
+                    )
                 if not isinstance(result, VerificationResult):
                     failure_reason = "verifier returned an invalid result"
                     transition_error = self._apply_failure(failure_reason)
@@ -906,10 +1337,21 @@ class TaskRuntime:
                         decision,
                         execution,
                     )
+                execution = _attach_camera_verification(
+                    execution,
+                    verification,
+                    result,
+                )
+                self._frame_execution = execution
                 self._frame_verification = result
                 self._publish_frame(EngineStage.VERIFYING)
                 if result.status is VerificationStatus.PENDING:
+                    self._set_wait_state(
+                        self._source_wait_state(candidate),
+                        timing_phase=TimingPhase.POST_ACTION_FRESH_OBSERVATION_WAIT,
+                    )
                     continue
+                self._set_wait_state(None)
                 if result.status is VerificationStatus.PASS and not result.passed:
                     failure_reason = "verifier pass omitted a typed outcome"
                     transition_error = self._apply_failure(failure_reason)
@@ -979,6 +1421,13 @@ class TaskRuntime:
                     recoverable_failure = (
                         result.failure_kind
                         is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
+                        or (
+                            result.failure_kind
+                            is VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE
+                            and verification.kind
+                            is VerificationKind.CAMERA_POSE_CHANGED
+                            and verification.camera_key in {"up", "down"}
+                        )
                     )
                     if (
                         recoverable_failure
@@ -1070,6 +1519,12 @@ class TaskRuntime:
         self._frame_verification = None
         self._frame_pending = None
         self._frame_publish_error = None
+        self._frame_stage = EngineStage.STARTING
+        self._timing = TimingEvidence()
+        self._wait_state = None
+        self._wait_timing_phase = None
+        self._wait_started = None
+        self._observed_wait_states = ()
 
     def _publish_frame(
         self,
@@ -1079,6 +1534,7 @@ class TaskRuntime:
         blocker: str | None = None,
     ) -> EngineFrame | None:
         try:
+            self._frame_stage = stage
             snapshot = task_snapshot
             if snapshot is None:
                 snapshot, snapshot_error = self._read_task_snapshot()
@@ -1093,7 +1549,10 @@ class TaskRuntime:
                 else ()
             )
             observation = (
-                ObservationReference.from_observation(self._frame_observation)
+                ObservationReference.from_observation(
+                    self._frame_observation,
+                    behavior_config=self._configuration.behavior,
+                )
                 if self._frame_observation is not None
                 else None
             )
@@ -1118,14 +1577,107 @@ class TaskRuntime:
                 ),
                 last_execution_receipt=receipt,
                 blocker=blocker if blocker is not None else snapshot.blocker,
+                observability=self._observability_evidence(),
             )
         except Exception as error:  # diagnostics never gain control authority
             self._frame_publish_error = f"{type(error).__name__}: {error}"
             return None
 
     def _fetch(self) -> Observation:
-        request = self._task.observation_request()
-        return self._client.fetch(request.tile_projections)
+        started = self._evidence_now()
+        try:
+            request = self._task.observation_request()
+            return _fetch_observation_request(self._client, request)
+        finally:
+            self._record_phase(
+                TimingPhase.OBSERVATION_REQUEST_FETCH,
+                started,
+                self._evidence_now(),
+            )
+
+    def record_wait_state(self, state: WaitState | None) -> None:
+        """Accept owner-produced passive progress without gaining authority."""
+
+        try:
+            if state is not None and not isinstance(state, WaitState):
+                raise TypeError("state must be WaitState or None")
+            self._set_wait_state(state)
+        except Exception:
+            # A diagnostic callback cannot affect task, safety, or input flow.
+            return
+
+    def _set_wait_state(
+        self,
+        state: WaitState | None,
+        *,
+        timing_phase: TimingPhase | None = None,
+        publish: bool = True,
+    ) -> None:
+        if state is not None and not isinstance(state, WaitState):
+            raise TypeError("state must be WaitState or None")
+        if timing_phase is not None and not isinstance(timing_phase, TimingPhase):
+            raise TypeError("timing_phase must be TimingPhase or None")
+        if state is self._wait_state and timing_phase is self._wait_timing_phase:
+            return
+        now = self._evidence_now()
+        if self._wait_state is not None and self._wait_timing_phase is not None:
+            self._record_phase(
+                self._wait_timing_phase,
+                self._wait_started,
+                now,
+            )
+        self._wait_state = state
+        self._wait_timing_phase = timing_phase if state is not None else None
+        self._wait_started = now if state is not None else None
+        if state is not None and state not in self._observed_wait_states:
+            self._observed_wait_states += (state,)
+        if publish:
+            self._publish_frame(self._frame_stage)
+
+    def _observability_evidence(self) -> ObservabilityEvidence:
+        elapsed = (
+            safe_elapsed_millis(self._wait_started, self._evidence_now())
+            if self._wait_state is not None
+            else 0
+        )
+        return ObservabilityEvidence(
+            timing=self._timing,
+            wait_state=self._wait_state,
+            wait_elapsed_millis=elapsed,
+            observed_wait_states=self._observed_wait_states,
+        )
+
+    def _evidence_now(self) -> object:
+        try:
+            return self._evidence_clock()
+        except Exception:
+            return float("nan")
+
+    def _record_phase(
+        self,
+        phase: TimingPhase,
+        started: object,
+        finished: object,
+    ) -> None:
+        try:
+            self._timing = self._timing.record(
+                phase,
+                safe_elapsed_millis(started, finished),
+            )
+        except Exception:
+            return
+
+    def _merge_timing(self, timing: TimingEvidence) -> None:
+        try:
+            self._timing = self._timing.merge(timing)
+        except Exception:
+            return
+
+    @staticmethod
+    def _source_wait_state(observation: Observation) -> WaitState:
+        if not observation.source_coherent:
+            return WaitState.WAITING_FOR_SOURCE_COHERENCE
+        return WaitState.WAITING_FOR_NEXT_SCENE_UPDATE
 
     def _apply_failure(self, reason: str) -> str | None:
         result = VerificationResult(
@@ -1171,6 +1723,7 @@ class TaskRuntime:
         *,
         task_snapshot: TaskSnapshot | None = None,
     ) -> RuntimeResult:
+        self._set_wait_state(None, publish=False)
         snapshot = task_snapshot
         if snapshot is None:
             snapshot, snapshot_error = self._read_task_snapshot()
@@ -1253,13 +1806,27 @@ def build_live_runtime(
     configuration.validated_for_mode(execute=True)
     assert configuration.arduino_port is not None
     safety = SafetyGate()
+    runtime_ref: list[TaskRuntime] = []
+
+    def record_wait_state(state: WaitState | None) -> None:
+        if runtime_ref:
+            runtime_ref[0].record_wait_state(state)
+
     coordinator = InputCoordinator.for_arduino_port(
         configuration.arduino_port,
         serial_owner="osrs-gameplay-runtime",
+        wait_state_observer=record_wait_state,
     )
-    observe = lambda: client.fetch(task.observation_request().tile_projections)
-    action_interface = CoordinatedActionInterface(coordinator, safety, observe)
-    return TaskRuntime(
+    def observe() -> Observation:
+        request = task.observation_request()
+        return _fetch_observation_request(client, request)
+    action_interface = CoordinatedActionInterface(
+        coordinator,
+        safety,
+        observe,
+        wait_state_observer=record_wait_state,
+    )
+    runtime = TaskRuntime(
         client,
         task,
         Verifier(),
@@ -1267,3 +1834,5 @@ def build_live_runtime(
         configuration=configuration,
         control=control,
     )
+    runtime_ref.append(runtime)
+    return runtime

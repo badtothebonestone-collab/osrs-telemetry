@@ -369,6 +369,7 @@ class OperatorServiceInputAndOverlayTests(unittest.TestCase):
             result.status = "FAIL"  # type: ignore[misc]
 
     def test_arduino_readiness_lists_ports_without_opening_them(self) -> None:
+        captured_at = datetime(2026, 7, 13, 18, 0, tzinfo=timezone.utc)
         services = OperatorServices(
             _SequenceClient(FIXTURE),
             serial_port_lister=lambda: ("COM7", "COM6", "COM6"),
@@ -379,6 +380,7 @@ class OperatorServiceInputAndOverlayTests(unittest.TestCase):
                 "ownerPid": None,
                 "reason": f"{port} is free",
             },
+            now=lambda: captured_at,
         )
 
         status = services.arduino_readiness("com6")
@@ -388,6 +390,34 @@ class OperatorServiceInputAndOverlayTests(unittest.TestCase):
         self.assertTrue(status.port_available)
         self.assertTrue(status.lease_available)
         self.assertTrue(status.ready)
+        self.assertEqual(captured_at, status.captured_at)
+        self.assertEqual(2_000, status.max_age_millis)
+        self.assertEqual(captured_at.isoformat(), status.to_dict()["capturedAtUtc"])
+
+        legacy = ArduinoReadiness(
+            "COM6",
+            ("COM6",),
+            True,
+            "AVAILABLE",
+            True,
+            None,
+            None,
+            "COM6 is free",
+        )
+        self.assertIsNone(legacy.captured_at)
+
+        clock_failure = OperatorServices(
+            _SequenceClient(FIXTURE),
+            serial_port_lister=lambda: ("COM6",),
+            lease_reader=lambda _port: {
+                "status": "AVAILABLE",
+                "available": True,
+                "reason": "free",
+            },
+            now=lambda: (_ for _ in ()).throw(RuntimeError("clock failed")),
+        ).arduino_readiness("COM6")
+        self.assertTrue(clock_failure.ready)
+        self.assertIsNone(clock_failure.captured_at)
 
     def test_read_only_lease_probe_never_acquires_or_removes_active_lock(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

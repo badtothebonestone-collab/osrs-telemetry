@@ -136,4 +136,48 @@ public class ClientTickHotStateTest
 		assertEquals("GameStateChanged", snapshot.get("sourceEvent"));
 		assertEquals("GameStateChanged", ((Map<?, ?>) clientTail.get(0)).get("sampleSource"));
 	}
+
+	@Test
+	public void cameraInputHasItsOwnBoundedSequencedLaneAndDropCounters()
+	{
+		ClientTickHotState state = new ClientTickHotState(2);
+		state.recordClientTick(Map.of("clientTick", 1L, "wallTimeMillis", 1000L));
+		state.recordCameraInput(Map.of("clientTick", 1L, "wallTimeMillis", 1010L, "control", "W"));
+		state.recordCameraInput(Map.of("clientTick", 1L, "wallTimeMillis", 1020L, "control", "A"));
+		state.recordCameraInput(Map.of("clientTick", 2L, "wallTimeMillis", 1030L, "control", "D"));
+
+		Map<String, Object> snapshot = state.snapshot(0, 0, 0, 8, true, 5);
+		List<?> cameraTail = (List<?>) snapshot.get("cameraInputTail");
+		Map<?, ?> latency = (Map<?, ?>) snapshot.get("latency");
+
+		assertEquals(2, cameraTail.size());
+		assertEquals("A", ((Map<?, ?>) cameraTail.get(0)).get("control"));
+		assertEquals("D", ((Map<?, ?>) cameraTail.get(1)).get("control"));
+		assertEquals(ClientTickHotState.LANE_CAMERA_INPUT,
+				((Map<?, ?>) cameraTail.get(0)).get("eventLane"));
+		assertEquals(3L, ((Map<?, ?>) cameraTail.get(0)).get("eventSequence"));
+		assertEquals(4L, ((Map<?, ?>) cameraTail.get(1)).get("eventSequence"));
+		assertEquals(1L, latency.get("droppedCameraInputSamples"));
+		assertEquals(2, latency.get("cameraInputSamplesBuffered"));
+	}
+
+	@Test
+	public void startingANewCameraLeaseCanClearOnlyThePriorCameraLane()
+	{
+		ClientTickHotState state = new ClientTickHotState(2);
+		state.recordClientTick(Map.of("clientTick", 1L, "wallTimeMillis", 1000L));
+		state.recordCameraInput(Map.of("clientTick", 1L, "wallTimeMillis", 1010L, "control", "W"));
+		state.recordCameraInput(Map.of("clientTick", 1L, "wallTimeMillis", 1020L, "control", "A"));
+		state.recordCameraInput(Map.of("clientTick", 2L, "wallTimeMillis", 1030L, "control", "D"));
+
+		state.clearCameraInput();
+		Map<String, Object> snapshot = state.snapshot(2, 0, 0, 8, true, 5);
+		Map<?, ?> latency = (Map<?, ?>) snapshot.get("latency");
+
+		assertEquals(1, ((List<?>) snapshot.get("clientTickTail")).size());
+		assertTrue(((List<?>) snapshot.get("cameraInputTail")).isEmpty());
+		assertEquals(null, snapshot.get("latestCameraInput"));
+		assertEquals(0L, latency.get("droppedCameraInputSamples"));
+		assertEquals(0, latency.get("cameraInputSamplesBuffered"));
+	}
 }

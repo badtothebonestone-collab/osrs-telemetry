@@ -4,6 +4,7 @@ import ast
 from dataclasses import FrozenInstanceError
 import inspect
 import math
+import random
 import unittest
 
 import osrs_bot.pointer as pointer_module
@@ -13,6 +14,7 @@ from osrs_bot.pointer import (
     PointerDelta,
     PointerMotionLimits,
     PointerMotionPlan,
+    PointerTrajectoryConfig,
     plan_pointer_motion,
 )
 
@@ -146,7 +148,7 @@ class PointerMotionPolicyTest(unittest.TestCase):
                     self.assertTrue(all(step.dx * dx >= 0 for step in plan.steps))
                     self.assertTrue(all(step.dy * dy >= 0 for step in plan.steps))
 
-    def test_motion_is_deterministic_and_contains_no_random_dependency(self) -> None:
+    def test_unseeded_motion_remains_compatible_and_transport_free(self) -> None:
         arguments = (
             ScreenPoint(-80, -70),
             ScreenPoint(275, 260),
@@ -162,10 +164,164 @@ class PointerMotionPolicyTest(unittest.TestCase):
         }
 
         self.assertEqual(first, second)
-        self.assertNotIn("random", imports)
         self.assertNotIn("serial", imports)
         self.assertNotIn("pyautogui", imports)
+        self.assertEqual("linear", first.path_style)
+        self.assertIsNone(first.trajectory_seed)
         self.assert_plan_invariants(first)
+
+    def test_seeded_curve_is_reproducible_and_does_not_touch_global_rng(self) -> None:
+        bounds = ScreenBounds(0, 0, 800, 600)
+        arguments = (
+            ScreenPoint(40, 300),
+            ScreenPoint(700, 200),
+            bounds,
+        )
+        options = {
+            "timestep_seconds": 0.02,
+            "seed": 1,
+            "decision_id": "tree-interaction-17",
+            "target_bounds": ScreenBounds(680, 180, 40, 40),
+            "context": "object",
+        }
+        random.seed(8_675_309)
+        state_before = random.getstate()
+        first = plan_pointer_motion(*arguments, **options)
+        state_after = random.getstate()
+        second = plan_pointer_motion(*arguments, **options)
+
+        self.assertEqual(state_before, state_after)
+        self.assertEqual(first, second)
+        self.assertEqual("cubic_bezier", first.path_style)
+        self.assertEqual("1", first.trajectory_seed)
+        self.assertEqual("tree-interaction-17", first.decision_id)
+        self.assertEqual("object", first.context)
+        self.assertEqual(2, len(first.control_points))
+        self.assertGreater(first.path_length_px, first.movement_distance_px)
+        self.assertTrue(all(bounds.contains(point) for point in first.positions))
+        self.assert_plan_invariants(first)
+
+    def test_seed_and_decision_id_vary_curve_duration_and_approach(self) -> None:
+        bounds = ScreenBounds(0, 0, 800, 600)
+        arguments = (
+            ScreenPoint(40, 300),
+            ScreenPoint(700, 200),
+            bounds,
+        )
+        common = {
+            "timestep_seconds": 0.02,
+            "decision_id": "tree-1",
+            "target_bounds": ScreenBounds(680, 180, 40, 40),
+            "context": "object",
+        }
+        first = plan_pointer_motion(*arguments, seed=1, **common)
+        other_seed = plan_pointer_motion(*arguments, seed=10, **common)
+        other_decision = plan_pointer_motion(
+            *arguments,
+            seed=1,
+            **{**common, "decision_id": "tree-2"},
+        )
+
+        self.assertNotEqual(first.steps, other_seed.steps)
+        self.assertNotEqual(first.control_points, other_seed.control_points)
+        self.assertNotEqual(first.duration_seconds, other_seed.duration_seconds)
+        self.assertNotEqual(
+            first.approach_angle_degrees,
+            other_seed.approach_angle_degrees,
+        )
+        self.assertNotEqual(first, other_decision)
+        for plan in (first, other_seed, other_decision):
+            self.assert_plan_invariants(plan)
+
+    def test_target_size_and_distance_change_motion_characteristics(self) -> None:
+        bounds = ScreenBounds(0, 0, 800, 600)
+        start = ScreenPoint(40, 300)
+        target = ScreenPoint(700, 200)
+        precise = plan_pointer_motion(
+            start,
+            target,
+            bounds,
+            timestep_seconds=0.02,
+            seed=10,
+            decision_id="same-distance",
+            target_bounds=ScreenBounds(698, 198, 5, 5),
+            context="precise_object",
+        )
+        broad = plan_pointer_motion(
+            start,
+            target,
+            bounds,
+            timestep_seconds=0.02,
+            seed=10,
+            decision_id="same-distance",
+            target_bounds=ScreenBounds(680, 180, 40, 40),
+            context="broad_walk",
+        )
+        short = plan_pointer_motion(
+            start,
+            ScreenPoint(90, 300),
+            bounds,
+            timestep_seconds=0.02,
+            seed=10,
+            decision_id="short-precise",
+            target_bounds=ScreenBounds(88, 298, 5, 5),
+            context="precise_object",
+        )
+
+        self.assertLess(broad.duration_seconds, precise.duration_seconds)
+        self.assertGreater(
+            broad.path_length_px / broad.duration_seconds,
+            precise.path_length_px / precise.duration_seconds,
+        )
+        self.assertGreater(broad.peak_velocity_px_per_second, short.peak_velocity_px_per_second)
+        self.assertGreater(broad.movement_distance_px, short.movement_distance_px)
+        for plan in (precise, broad, short):
+            self.assert_plan_invariants(plan)
+
+    def test_seeded_curve_falls_back_safely_when_tight_bounds_reject_curvature(self) -> None:
+        bounds = ScreenBounds(10, 20, 31, 31)
+        plan = plan_pointer_motion(
+            ScreenPoint(10, 20),
+            ScreenPoint(40, 50),
+            bounds,
+            timestep_seconds=TIMESTEP,
+            seed="tight-corner",
+            decision_id="bounded",
+            target_bounds=ScreenBounds(38, 48, 3, 3),
+            context="precise_object",
+        )
+
+        self.assertIn(plan.path_style, {"cubic_bezier", "seeded_linear"})
+        self.assertTrue(all(bounds.contains(point) for point in plan.positions))
+        self.assert_plan_invariants(plan)
+
+    def test_trajectory_configuration_and_target_region_fail_closed(self) -> None:
+        with self.assertRaises(FrozenInstanceError):
+            PointerTrajectoryConfig().maximum_curve_offset_px = 10.0  # type: ignore[misc]
+        with self.assertRaises(ValueError):
+            PointerTrajectoryConfig(minimum_speed_scale=0.95, maximum_speed_scale=0.9)
+        with self.assertRaises(ValueError):
+            PointerTrajectoryConfig(
+                precise_target_threshold_px=20,
+                broad_target_threshold_px=10,
+            )
+        with self.assertRaises(ValueError):
+            plan_pointer_motion(
+                START,
+                ScreenPoint(80, 65),
+                BOUNDS,
+                timestep_seconds=TIMESTEP,
+                seed=7,
+                target_bounds=ScreenBounds(0, 0, 10, 10),
+            )
+        with self.assertRaises(TypeError):
+            plan_pointer_motion(
+                START,
+                ScreenPoint(80, 65),
+                BOUNDS,
+                timestep_seconds=TIMESTEP,
+                seed=True,
+            )
 
     def test_tighter_explicit_caps_are_respected(self) -> None:
         limits = PointerMotionLimits(

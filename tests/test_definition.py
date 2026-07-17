@@ -10,6 +10,7 @@ import osrs_bot.definition as definition_module
 from osrs_bot.definition import (
     FixedRoute,
     LUMBRIDGE_WEST_TREES_V1,
+    RoutePointClassification,
     RouteStepKind,
     TaskSiteDefinition,
 )
@@ -126,8 +127,42 @@ class BuiltinDefinitionFactTests(unittest.TestCase):
         self.assertTrue(all(step.allowed_actions == (step.action, "Climb") for step in object_steps))
         first_walk = definition.route_to_bank.steps[0]
         self.assertTrue(first_walk.is_walk)
-        self.assertEqual("route:west_approach_bridge", first_walk.target_key)
+        self.assertEqual("route:tree_lane_exit", first_walk.target_key)
+        self.assertEqual(
+            "route:west_approach_bridge",
+            definition.route_to_bank.steps[1].target_key,
+        )
         self.assertTrue(all(not step.is_walk for step in object_steps))
+
+    def test_route_point_classifications_preserve_required_transitions_and_arrivals(self) -> None:
+        definition = LUMBRIDGE_WEST_TREES_V1
+        for route in (definition.route_to_bank, definition.route_to_resource):
+            self.assertIs(
+                RoutePointClassification.ARRIVAL_POINT,
+                route.steps[-1].classification,
+            )
+            self.assertTrue(
+                all(
+                    step.classification is RoutePointClassification.MANDATORY_TRANSITION
+                    for step in route.steps
+                    if step.kind is RouteStepKind.OBJECT
+                )
+            )
+            self.assertTrue(
+                any(
+                    step.classification is RoutePointClassification.NORMAL_GUIDANCE
+                    for step in route.steps
+                )
+            )
+        mandatory_turns = {
+            step.step_id
+            for route in (definition.route_to_bank, definition.route_to_resource)
+            for step in route.steps
+            if step.classification is RoutePointClassification.MANDATORY_TURN
+        }
+        self.assertIn("west_wall_corner", mandatory_turns)
+        self.assertIn("south_stairs_approach", mandatory_turns)
+        self.assertIn("ground_corridor_east_2", mandatory_turns)
 
     def test_definition_provenance_matches_the_corrected_golden_fixture(self) -> None:
         provenance = LUMBRIDGE_WEST_TREES_V1.provenance
@@ -193,7 +228,7 @@ class DefinitionValidationTests(unittest.TestCase):
 
     def test_mutable_collection_shapes_are_rejected(self) -> None:
         selector = self.definition.resource.selector
-        object_step = self.definition.route_to_bank.steps[13]
+        object_step = self.definition.route_to_bank.steps[14]
         invalid_builders = (
             lambda: replace(selector, object_ids={1276}),
             lambda: replace(
@@ -218,7 +253,7 @@ class DefinitionValidationTests(unittest.TestCase):
 
     def test_bool_and_nonpositive_ids_radii_versions_and_deadlines_are_rejected(self) -> None:
         resource_selector = self.definition.resource.selector
-        object_step = self.definition.route_to_bank.steps[13]
+        object_step = self.definition.route_to_bank.steps[14]
         invalid_builders = (
             lambda: replace(self.definition, version=True),
             lambda: replace(self.definition, version=0),
@@ -299,7 +334,7 @@ class DefinitionValidationTests(unittest.TestCase):
     def test_invalid_planes_and_incoherent_transitions_are_rejected(self) -> None:
         route = self.definition.route_to_bank
         walk_step = route.steps[0]
-        transition = route.steps[13]
+        transition = route.steps[14]
         wrong_transition = replace(transition, expected_plane=3)
         invalid_builders = (
             lambda: replace(
@@ -318,7 +353,7 @@ class DefinitionValidationTests(unittest.TestCase):
             lambda: replace(transition, expected_plane=False),
             lambda: replace(
                 route,
-                steps=(*route.steps[:13], wrong_transition, *route.steps[14:]),
+                steps=(*route.steps[:14], wrong_transition, *route.steps[15:]),
             ),
             lambda: replace(
                 route,
@@ -345,7 +380,7 @@ class DefinitionValidationTests(unittest.TestCase):
 
     def test_walk_and_object_transition_shapes_are_fail_closed(self) -> None:
         walk_step = self.definition.route_to_bank.steps[0]
-        object_step = self.definition.route_to_bank.steps[13]
+        object_step = self.definition.route_to_bank.steps[14]
         invalid_builders = (
             lambda: replace(walk_step, action="walk here"),
             lambda: replace(walk_step, object_id=123),
@@ -355,6 +390,15 @@ class DefinitionValidationTests(unittest.TestCase):
             lambda: replace(object_step, expected_plane=None),
             lambda: replace(object_step, alternate_actions=("Climb", "Climb")),
             lambda: replace(object_step, kind="object"),
+            lambda: replace(walk_step, classification="normal_guidance"),
+            lambda: replace(
+                walk_step,
+                classification=RoutePointClassification.MANDATORY_TRANSITION,
+            ),
+            lambda: replace(
+                object_step,
+                classification=RoutePointClassification.MANDATORY_TURN,
+            ),
         )
 
         for builder in invalid_builders:

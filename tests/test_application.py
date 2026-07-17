@@ -24,6 +24,7 @@ from osrs_bot.model import (
     ActionKind,
     InventoryObservation,
     NearbyObject,
+    SceneCensusEvidence,
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
@@ -56,6 +57,13 @@ def _observation(tick: int):
         geometry_frame_id=f"app-frame-{tick}",
         menu_source_tick=tick,
         menu_timestamp=now,
+        scene_census=SceneCensusEvidence(
+            metadata_present=True,
+            complete=True,
+            scene_coverage_complete=True,
+            authoritative_absence_eligible=True,
+            priority_absence_eligible=True,
+        ),
     )
 
 
@@ -63,7 +71,7 @@ class _LoopClient:
     def __init__(self) -> None:
         self.tick = 0
 
-    def fetch(self, _tiles):
+    def fetch(self, _tiles, _priority_object_ids=()):
         self.tick += 1
         return _observation(self.tick)
 
@@ -72,7 +80,7 @@ class _TreeReadyClient:
     def __init__(self) -> None:
         self.tick = 0
 
-    def fetch(self, _tiles):
+    def fetch(self, _tiles, _priority_object_ids=()):
         self.tick += 1
         observation = _observation(self.tick)
         anchor = LUMBRIDGE_WEST_TREES_V1.resource.work_area.anchor
@@ -105,6 +113,12 @@ class _TreeReadyClient:
             plane=anchor.plane,
             inventory=InventoryObservation((), 28, 0, 28, True),
             nearby_objects=(tree,),
+        )
+
+    def fetch_planned(self, request: ObservationRequest):
+        return self.fetch(
+            request.tile_projections,
+            request.priority_object_ids,
         )
 
 
@@ -149,6 +163,11 @@ class _UnusedVerifier:
         raise AssertionError("wait task must not invoke verifier")
 
 
+class _UnusedActionInterface:
+    def execute(self, *_args):
+        raise AssertionError("wait task must not invoke the action interface")
+
+
 class _Factory:
     def __init__(self) -> None:
         self.runtimes: list[TaskRuntime] = []
@@ -170,6 +189,23 @@ class _Factory:
         self.controls.append(control)
         self.bindings.append(binding)
         return runtime
+
+
+class _LiveWaitFactory:
+    def __init__(self) -> None:
+        self.configurations: list[RuntimeConfig] = []
+
+    def __call__(self, _client, _binding, configuration, _execute, control):
+        self.configurations.append(configuration)
+        return TaskRuntime(
+            _LoopClient(),
+            _WaitTask(),
+            _UnusedVerifier(),
+            _UnusedActionInterface(),
+            configuration=configuration,
+            control=control,
+            sleep=lambda _seconds: None,
+        )
 
 
 class _FakeOperatorServices:
@@ -271,6 +307,49 @@ def _wait_for_lifecycle(
 
 
 class EngineApplicationTests(unittest.TestCase):
+    def test_gui_live_evidence_path_records_frames_and_terminal_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = _LiveWaitFactory()
+            application = EngineApplication(
+                configuration=RuntimeConfig(
+                    arduino_port="COM7",
+                    max_observations=1,
+                ),
+                client=_LoopClient(),
+                runtime_factory=factory,
+            )
+
+            started = application.start(
+                profile_values=_profile_values(),
+                execute=True,
+                live_evidence_root=Path(directory),
+            )
+            finished = application.wait(started.run_id, 2.0)
+
+            self.assertIsNotNone(finished.live_evidence_path)
+            evidence = finished.live_evidence_path
+            assert evidence is not None
+            frames = (evidence / "engine_frames.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertGreaterEqual(len(frames), 2)
+            receipt = json.loads(
+                (evidence / "run_receipt.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (evidence / "run_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("LIMIT", receipt["result"]["status"])
+            self.assertIsNone(manifest["configuredBehaviorSeed"])
+            self.assertIsInstance(manifest["behaviorSeed"], int)
+            self.assertEqual(manifest["behaviorSeed"], receipt["behaviorSeed"])
+            self.assertEqual(
+                manifest["behaviorSeed"],
+                factory.configurations[0].behavior.seed,
+            )
+            self.assertIn("cleanup", receipt["finalEngineFrame"])
+            self.assertEqual(str(evidence), finished.to_dict()["liveEvidencePath"])
+
     def test_catalog_and_profile_contract_are_exact_and_fresh(self) -> None:
         tasks = EngineApplication.list_tasks()
         definitions = EngineApplication.list_definitions()
@@ -455,7 +534,10 @@ class EngineApplicationTests(unittest.TestCase):
                 runtime_factory=_Factory(),
                 demonstration_runner=runner,
                 demonstration_inspector=lambda _path: InspectionResult(
-                    True, "VERIFIED"
+                    True,
+                    "VERIFIED",
+                    stop_reason="facade_stop_requested",
+                    requested_duration_seconds=60.0,
                 ),
             )
             first = application.begin_demonstration("route")
@@ -467,6 +549,12 @@ class EngineApplicationTests(unittest.TestCase):
 
             self.assertFalse(ended.recent_demonstration is None)
             self.assertTrue(ended.recent_demonstration.valid)
+            self.assertEqual(
+                "facade_stop_requested", ended.recent_demonstration.stop_reason
+            )
+            self.assertEqual(
+                60.0, ended.recent_demonstration.requested_duration_seconds
+            )
             second_id = application.begin_demonstration("route-two").active_capture_id
             with self.assertRaises(ApplicationError):
                 application.end_demonstration(first_id)
@@ -674,10 +762,17 @@ class EngineApplicationTests(unittest.TestCase):
             inspection,
             application.inspect_demonstration(Path("demo_runs") / "artifact"),
         )
+        review = application.review_demonstration(Path("demo_runs") / "artifact")
+        self.assertTrue(review["valid"])
+        self.assertEqual("not_compared", review["routeComparison"]["status"])
+        self.assertTrue(review["routeComparison"]["reviewOnly"])
         self.assertEqual("diagnostics", application.diagnostics())
         self.assertEqual("quick", application.run_quick_self_test())
         self.assertEqual("replay", application.run_golden_replay())
-        self.assertEqual([Path("demo_runs") / "artifact"], inspected)
+        self.assertEqual(
+            [Path("demo_runs") / "artifact", Path("demo_runs") / "artifact"],
+            inspected,
+        )
         self.assertIn(("recover_session", "COM7"), services.calls)
         self.assertIn(("focus_runelite_for_live_handoff",), services.calls)
 

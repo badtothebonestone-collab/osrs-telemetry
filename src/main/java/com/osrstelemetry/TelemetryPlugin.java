@@ -17,6 +17,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -26,15 +27,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
+import net.runelite.api.CollisionData;
+import net.runelite.api.CollisionDataFlag;
 import net.runelite.api.GameState;
+import net.runelite.api.GameObject;
+import net.runelite.api.GroundObject;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
@@ -46,6 +48,14 @@ import net.runelite.api.Player;
 import net.runelite.api.Point;
 import net.runelite.api.Prayer;
 import net.runelite.api.Skill;
+import net.runelite.api.MenuAction;
+import net.runelite.api.Tile;
+import net.runelite.api.TileObject;
+import net.runelite.api.VarClientInt;
+import net.runelite.api.WallObject;
+import net.runelite.api.WorldView;
+import net.runelite.api.DecorativeObject;
+import net.runelite.api.Scene;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ClientTick;
@@ -71,6 +81,8 @@ import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.input.KeyManager;
+import net.runelite.client.input.MouseManager;
 
 @Slf4j
 @PluginDescriptor(
@@ -83,7 +95,15 @@ public class TelemetryPlugin extends Plugin
 	private static final int INVENTORY_SLOT_COUNT = 28;
 	private static final int EMPTY_INVENTORY_WIDGET_ITEM_ID = ItemID.BLANKOBJECT;
 	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
+	private static final int CLOSABLE_WIDGET_SCAN_LIMIT = 256;
 	static final int HOT_MENU_ENTRY_LIMIT = ClientTickHotState.MAX_MENU_ENTRY_LIMIT;
+	private static final long CONTEXT_MENU_SAMPLE_MAX_AGE_MILLIS = 500L;
+	private static final long CONTEXT_MENU_SAMPLE_MAX_CLIENT_TICK_DRIFT = 2L;
+	private static final int COLLISION_TILE_BLOCK_MASK =
+			CollisionDataFlag.BLOCK_MOVEMENT_OBJECT
+					| CollisionDataFlag.BLOCK_MOVEMENT_FLOOR_DECORATION
+					| CollisionDataFlag.BLOCK_MOVEMENT_FLOOR
+					| CollisionDataFlag.BLOCK_MOVEMENT_FULL;
 
 	@Inject
 	private Client client;
@@ -97,15 +117,24 @@ public class TelemetryPlugin extends Plugin
 	@Inject
 	private TelemetryConfig config;
 
+	@Inject
+	private KeyManager keyManager;
+
+	@Inject
+	private MouseManager mouseManager;
+
 	private PluginLiveCache liveCache;
 	private PluginSnapshotEndpoint pluginSnapshotEndpoint;
 	private String pluginInstanceId;
 	private final ClientTickHotState clientTickHotState = new ClientTickHotState();
 	private final WorldModelCache worldModelCache = new WorldModelCache();
+	private volatile ClientThreadQueryScheduler clientThreadQueryScheduler;
 	private volatile Map<String, Object> latestHoverMenu;
 	private volatile Map<String, Object> lastMenuOptionClicked;
-	private long tickId = 0;
-	private long clientTickId = 0;
+	private volatile Map<String, Object> latestCameraPose;
+	private CameraInputCapture cameraInputCapture;
+	private volatile long tickId = 0;
+	private volatile long clientTickId = 0;
 	private final Map<Integer, DefinitionName> itemNameCache = new LinkedHashMap<>();
 	private int lastActivityAnimation = Integer.MIN_VALUE;
 	private int lastActivityPoseAnimation = Integer.MIN_VALUE;
@@ -127,6 +156,16 @@ public class TelemetryPlugin extends Plugin
 		liveCache = new PluginLiveCache(gson);
 		pluginInstanceId = "plugin-" + ProcessHandle.current().pid() + "-" + Instant.now().toEpochMilli();
 		worldModelCache.clear("startup");
+		clientThreadQueryScheduler = clientThread == null
+				? null
+				: new ClientThreadQueryScheduler(runnable -> clientThread.invoke(runnable));
+		cameraInputCapture = new CameraInputCapture(
+				clientTickHotState::recordCameraInput,
+				clientTickHotState::clearCameraInput,
+				System::currentTimeMillis,
+				System::nanoTime);
+		keyManager.registerKeyListener(cameraInputCapture);
+		mouseManager.registerMouseListener(cameraInputCapture);
 		startPluginSnapshotEndpoint();
 		clientThread.invokeLater(() -> publishGameStateBaseline(client.getGameState()));
 
@@ -137,8 +176,21 @@ public class TelemetryPlugin extends Plugin
 	protected void shutDown() throws Exception
 	{
 		stopPluginSnapshotEndpoint();
+		if (clientThreadQueryScheduler != null)
+		{
+			clientThreadQueryScheduler.close();
+			clientThreadQueryScheduler = null;
+		}
+		if (cameraInputCapture != null)
+		{
+			keyManager.unregisterKeyListener(cameraInputCapture);
+			mouseManager.unregisterMouseListener(cameraInputCapture);
+			cameraInputCapture.close();
+			cameraInputCapture = null;
+		}
 		liveCache = null;
 		pluginInstanceId = null;
+		latestCameraPose = null;
 		worldModelCache.clear("shutdown");
 
 		log.info("Telemetry Collector stopped");
@@ -163,6 +215,12 @@ public class TelemetryPlugin extends Plugin
 				clientTickHotState,
 				this::pluginSnapshotTileProjections,
 				this::pluginSnapshotWorldModelQuery);
+		if (cameraInputCapture != null)
+		{
+			pluginSnapshotEndpoint.setCameraInputCaptureLeaseControls(
+					cameraInputCapture::renewLease,
+					cameraInputCapture::disableLease);
+		}
 		try
 		{
 			pluginSnapshotEndpoint.start();
@@ -251,6 +309,7 @@ public class TelemetryPlugin extends Plugin
 		{
 			safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
 			safeCapture(captureErrors, "welcomeScreen", () -> captureWelcomeScreen(snapshot));
+			safeCapture(captureErrors, "textInputState", () -> captureTextInputState(snapshot));
 			if (gameState == GameState.LOGGED_IN)
 			{
 				safeCapture(captureErrors, "localPlayer", () -> captureLocalPlayer(snapshot));
@@ -280,6 +339,10 @@ public class TelemetryPlugin extends Plugin
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("gameState", String.valueOf(event.getGameState()));
+		if (cameraInputCapture != null && event.getGameState() != GameState.LOGGED_IN)
+		{
+			cameraInputCapture.updateContext(CameraInputCapture.Context.blocked());
+		}
 
 		recordGameStateHotSample(event.getGameState());
 		publishGameStateBaseline(event.getGameState());
@@ -354,6 +417,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("sampleSource", "MenuOpened");
 		payload.put("sourceEvent", "MenuOpened");
 		payload.put("menuEntryCount", event.getMenuEntries() == null ? 0 : event.getMenuEntries().length);
+		latestHoverMenu = payload;
 		clientTickHotState.recordPostMenuSort(payload);
 	}
 
@@ -361,7 +425,10 @@ public class TelemetryPlugin extends Plugin
 	public void onClientTick(ClientTick event)
 	{
 		clientTickId++;
-		clientTickHotState.recordClientTick(clientTickPayload("ClientTick"));
+		Map<String, Object> cameraPose = currentCameraPosePayload();
+		latestCameraPose = cameraPose;
+		updateCameraInputContext(cameraPose);
+		clientTickHotState.recordClientTick(clientTickPayload("ClientTick", cameraPose));
 		if (shouldRefreshOpenMenu(currentMenuOpen()))
 		{
 			Map<String, Object> payload = hoverMenuPayload();
@@ -413,6 +480,7 @@ public class TelemetryPlugin extends Plugin
 		snapshot.gameState = String.valueOf(gameState);
 		safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
 		safeCapture(captureErrors, "welcomeScreen", () -> captureWelcomeScreen(snapshot));
+		safeCapture(captureErrors, "textInputState", () -> captureTextInputState(snapshot));
 		snapshot.captureErrors = captureErrors.toArray(new String[0]);
 		snapshot.snapshotBuildDurationMillis = elapsedMillis(captureStartedNanos);
 		publishSensorFrame(snapshot, captureStartedNanos, true);
@@ -586,6 +654,7 @@ public class TelemetryPlugin extends Plugin
 				String.valueOf(snapshot == null ? null : snapshot.cameraZ),
 				String.valueOf(snapshot == null ? null : snapshot.cameraYaw),
 				String.valueOf(snapshot == null ? null : snapshot.cameraPitch),
+				String.valueOf(snapshot == null ? null : snapshot.zoom3d),
 				String.valueOf(snapshot == null ? null : snapshot.viewportWidth),
 				String.valueOf(snapshot == null ? null : snapshot.viewportHeight),
 				String.valueOf(snapshot == null ? null : snapshot.viewportXOffset),
@@ -616,7 +685,7 @@ public class TelemetryPlugin extends Plugin
 		return geometryFrameId(current);
 	}
 
-	private Map<String, Object> baselinePayload(TickSnapshot snapshot)
+	static Map<String, Object> baselinePayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("tick", snapshot.tickId);
@@ -625,6 +694,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("cameraViewport", cameraViewportPayload(snapshot));
 		payload.put("inputGeometry", inputGeometryPayload(snapshot));
 		payload.put("welcomeScreenVisible", snapshot == null ? null : snapshot.welcomeScreenVisible);
+		payload.put("textInputActive", snapshot == null ? null : snapshot.textInputActive);
 		payload.put("scenePlayable", scenePlayable(snapshot));
 		return payload;
 	}
@@ -649,7 +719,7 @@ public class TelemetryPlugin extends Plugin
 				&& !errors.contains("welcomeScreen");
 	}
 
-	private Map<String, Object> playerPayload(TickSnapshot snapshot)
+	static Map<String, Object> playerPayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> player = new LinkedHashMap<>();
 
@@ -662,6 +732,11 @@ public class TelemetryPlugin extends Plugin
 			player.put("localY", snapshot.localPlayer.localY);
 			player.put("sceneX", snapshot.localPlayer.sceneX);
 			player.put("sceneY", snapshot.localPlayer.sceneY);
+			if (snapshot.localPlayer.canvasX != null && snapshot.localPlayer.canvasY != null)
+			{
+				player.put("canvasX", snapshot.localPlayer.canvasX);
+				player.put("canvasY", snapshot.localPlayer.canvasY);
+			}
 			player.put("animation", snapshot.localPlayer.animation);
 			player.put("poseAnimation", snapshot.localPlayer.poseAnimation);
 			player.put("combatLevel", snapshot.localPlayer.combatLevel);
@@ -682,7 +757,7 @@ public class TelemetryPlugin extends Plugin
 		return player;
 	}
 
-	private Map<String, Object> interactingPayload(TickSnapshot.StatusSnapshot status)
+	private static Map<String, Object> interactingPayload(TickSnapshot.StatusSnapshot status)
 	{
 		Map<String, Object> interacting = new LinkedHashMap<>();
 		interacting.put("type", status.interactingType);
@@ -695,7 +770,7 @@ public class TelemetryPlugin extends Plugin
 		return interacting;
 	}
 
-	private Map<String, Object> cameraViewportPayload(TickSnapshot snapshot)
+	static Map<String, Object> cameraViewportPayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> camera = new LinkedHashMap<>();
 		camera.put("cameraX", snapshot.cameraX);
@@ -703,6 +778,7 @@ public class TelemetryPlugin extends Plugin
 		camera.put("cameraZ", snapshot.cameraZ);
 		camera.put("cameraPitch", snapshot.cameraPitch);
 		camera.put("cameraYaw", snapshot.cameraYaw);
+		camera.put("zoom3d", snapshot.zoom3d);
 		camera.put("viewportWidth", snapshot.viewportWidth);
 		camera.put("viewportHeight", snapshot.viewportHeight);
 		camera.put("viewportXOffset", snapshot.viewportXOffset);
@@ -710,6 +786,690 @@ public class TelemetryPlugin extends Plugin
 		camera.put("canvasWidth", snapshot.canvasWidth);
 		camera.put("canvasHeight", snapshot.canvasHeight);
 		return camera;
+	}
+
+	private Map<String, Object> currentCameraPosePayload()
+	{
+		try
+		{
+			TickSnapshot snapshot = new TickSnapshot();
+			snapshot.tickId = tickId;
+			captureCameraViewport(snapshot);
+			Map<String, Object> pose = cameraViewportPayload(snapshot);
+			pose.put("schema", "camera_pose.v1");
+			pose.put("clientTick", clientTickId);
+			pose.put("gameTick", tickId);
+			pose.put("cameraYawTarget", client.getCameraYawTarget());
+			pose.put("cameraPitchTarget", client.getCameraPitchTarget());
+			pose.put("geometryFrameId", geometryFrameId(snapshot));
+			return pose;
+		}
+		catch (RuntimeException e)
+		{
+			return copyCameraPose(latestCameraPose);
+		}
+	}
+
+	private Map<String, Object> copyCameraPose(Map<String, Object> pose)
+	{
+		return pose == null ? null : new LinkedHashMap<>(pose);
+	}
+
+	private void updateCameraInputContext(Map<String, Object> cameraPose)
+	{
+		if (cameraInputCapture == null)
+		{
+			return;
+		}
+		Canvas canvas = client == null ? null : client.getCanvas();
+		cameraInputCapture.updateContext(new CameraInputCapture.Context(
+				cameraInputAllowed(canvas),
+				canvas,
+				clientTickId,
+				tickId,
+				currentGameStateText(),
+				pluginInstanceId,
+				ProcessHandle.current().pid(),
+				cameraPose));
+	}
+
+	private boolean cameraInputAllowed(Canvas canvas)
+	{
+		try
+		{
+			if (client == null
+					|| config == null
+					|| !config.enabled()
+					|| canvas == null
+					|| client.getGameState() != GameState.LOGGED_IN
+					|| client.getLocalPlayer() == null
+					|| !canvas.isFocusOwner()
+					|| textInputActive(
+							client.getFocusedInputFieldWidget() != null,
+							client.getVarcIntValue(VarClientInt.INPUT_TYPE)))
+			{
+				return false;
+			}
+			return !widgetVisible(client.getWidget(InterfaceID.BankpinKeypad.UNIVERSE));
+		}
+		catch (RuntimeException ignored)
+		{
+			return false;
+		}
+	}
+
+	private Map<String, Object> resolvedClickTarget(MenuOptionClicked event)
+	{
+		Map<String, Object> target = new LinkedHashMap<>();
+		target.put("schema", "plugin_click_target.v1");
+		if (event == null)
+		{
+			target.put("actionFamily", "other");
+			target.put("resolution", "unsupported");
+			target.put("confidence", "none");
+			return target;
+		}
+		if (event.getMenuAction() != MenuAction.WALK)
+		{
+			return isTileObjectMenuAction(event.getMenuAction())
+					? resolvedTileObjectTarget(event)
+					: unsupportedClickTarget();
+		}
+
+		MenuEntry entry = event.getMenuEntry();
+		int requestedWorldViewId = entry == null ? -1 : entry.getWorldViewId();
+		WorldView worldView = client.getWorldView(requestedWorldViewId);
+		if (worldView == null)
+		{
+			worldView = client.getTopLevelWorldView();
+		}
+		int sceneX = event.getParam0();
+		int sceneY = event.getParam1();
+		WorldPoint menuPoint = null;
+		WorldPoint selectedPoint = null;
+		Point selectedScene = null;
+		WorldPoint destinationPoint = null;
+		if (worldView != null)
+		{
+			try
+			{
+				menuPoint = WorldPoint.fromScene(worldView, sceneX, sceneY, worldView.getPlane());
+			}
+			catch (RuntimeException ignored)
+			{
+				// Invalid menu coordinates remain explicit unresolved evidence.
+			}
+			try
+			{
+				Tile selectedTile = worldView.getSelectedSceneTile();
+				if (selectedTile != null)
+				{
+					selectedPoint = selectedTile.getWorldLocation();
+					selectedScene = selectedTile.getSceneLocation();
+				}
+			}
+			catch (RuntimeException ignored)
+			{
+				// Selected-scene evidence is optional corroboration.
+			}
+		}
+		try
+		{
+			LocalPoint destination = client.getLocalDestinationLocation();
+			if (destination != null)
+			{
+				WorldView destinationView = client.getWorldView(destination.getWorldView());
+				if (destinationView == null)
+				{
+					destinationView = client.getTopLevelWorldView();
+				}
+				if (destinationView != null)
+				{
+					destinationPoint = WorldPoint.fromLocal(
+							destinationView,
+							destination.getX(),
+							destination.getY(),
+							destinationView.getPlane());
+				}
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			// The pre-click local destination can be absent or stale.
+		}
+		return walkTargetPayload(
+				worldView == null ? requestedWorldViewId : worldView.getId(),
+				sceneX,
+				sceneY,
+				menuPoint,
+				selectedPoint,
+				selectedScene,
+				destinationPoint);
+	}
+
+	private Map<String, Object> unsupportedClickTarget()
+	{
+		Map<String, Object> target = new LinkedHashMap<>();
+		target.put("schema", "plugin_click_target.v1");
+		target.put("actionFamily", "other");
+		target.put("resolution", "unsupported");
+		target.put("confidence", "none");
+		return target;
+	}
+
+	private boolean isTileObjectMenuAction(MenuAction action)
+	{
+		return action != null && String.valueOf(action).contains("GAME_OBJECT");
+	}
+
+	private Map<String, Object> resolvedTileObjectTarget(MenuOptionClicked event)
+	{
+		Map<String, Object> target = new LinkedHashMap<>();
+		target.put("schema", "plugin_click_target.v1");
+		target.put("actionFamily", "tile_object");
+		target.put("activationKind", "unverified");
+		target.put("menuSceneX", event.getParam0());
+		target.put("menuSceneY", event.getParam1());
+		target.put("menuIdentifier", event.getId());
+
+		MenuEntry entry = event.getMenuEntry();
+		int requestedWorldViewId = entry == null ? -1 : entry.getWorldViewId();
+		WorldView worldView = client.getWorldView(requestedWorldViewId);
+		if (worldView == null)
+		{
+			worldView = client.getTopLevelWorldView();
+		}
+		target.put("worldViewId", worldView == null ? requestedWorldViewId : worldView.getId());
+		List<TileObject> candidates = nearbyTileObjects(
+				worldView,
+				event.getParam0(),
+				event.getParam1(),
+				event.getId());
+		target.put("candidateCount", candidates.size());
+		List<TileObject> footprintCandidates = new ArrayList<>();
+		for (TileObject candidate : candidates)
+		{
+			if (tileObjectOccupiesMenuScene(candidate, event.getParam0(), event.getParam1()))
+			{
+				footprintCandidates.add(candidate);
+			}
+		}
+		target.put("footprintCandidateCount", footprintCandidates.size());
+
+		Point mouse = client.getMouseCanvasPosition();
+		List<TileObject> containing = new ArrayList<>();
+		for (TileObject candidate : footprintCandidates)
+		{
+			InteractionGeometry geometry = authoritativeInteractionGeometry(candidate);
+			if (geometry != null
+					&& mouse != null
+					&& geometry.shape.contains(mouse.getX(), mouse.getY()))
+			{
+				containing.add(candidate);
+			}
+		}
+		target.put("containingCandidateCount", containing.size());
+		if (footprintCandidates.size() != 1)
+		{
+			target.put("resolution", candidates.isEmpty() ? "unresolved" : "ambiguous");
+			target.put("confidence", "none");
+			target.put("ambiguityReasons", List.of(
+					footprintCandidates.isEmpty()
+							? "no same-id object occupied the exact menu scene footprint"
+							: "multiple same-id objects occupied the exact menu scene footprint"));
+			return target;
+		}
+
+		TileObject selected = footprintCandidates.get(0);
+		InteractionGeometry geometry = authoritativeInteractionGeometry(selected);
+		boolean objectGeometryContainsPoint = containing.size() == 1;
+		MenuEntry selectedEntry = event.getMenuEntry();
+		int selectedWorldViewId = selectedEntry == null ? -1 : selectedEntry.getWorldViewId();
+		boolean contextMenuRowActivation = freshOpenMenuTupleMatches(
+						latestHoverMenuPayload(),
+						clientTickId,
+						System.currentTimeMillis(),
+						pluginInstanceId,
+						ProcessHandle.current().pid(),
+						mouse,
+						safeString(event.getMenuOption()),
+						safeString(event.getMenuTarget()),
+						String.valueOf(event.getMenuAction()),
+						event.getId(),
+						event.getParam0(),
+						event.getParam1(),
+						selectedWorldViewId);
+		String activationKind = tileObjectActivationKind(
+				objectGeometryContainsPoint,
+				contextMenuRowActivation);
+		boolean objectGeometryActivation = "object_geometry".equals(activationKind);
+		target.put("resolution", "exact");
+		target.put("confidence", "exact");
+		target.put("identitySource", "same_id_menu_scene_footprint");
+		target.put("activationKind", activationKind);
+		target.put("source", objectGeometryActivation
+				? "same_id_clickbox_contains_activation"
+				: "menu_identifier_scene_coordinates");
+		target.put("object", tileObjectPayload(selected));
+		Map<String, Object> geometryPayload = new LinkedHashMap<>();
+		geometryPayload.put("geometryFrameId", currentGeometryFrameId());
+		geometryPayload.put("source", geometry == null ? null : geometry.source);
+		geometryPayload.put("bounds", geometry == null ? null : boundsPayload(boundsSnapshot(geometry.shape)));
+		geometryPayload.put("polygon", geometry == null ? null : polygonSnapshot(geometry.shape));
+		geometryPayload.put("clickInside", objectGeometryActivation ? Boolean.TRUE : null);
+		if (objectGeometryActivation && mouse != null)
+		{
+			geometryPayload.put("activationPoint", Map.of("x", mouse.getX(), "y", mouse.getY()));
+		}
+		target.put("geometry", geometryPayload);
+		if (contextMenuRowActivation && mouse != null)
+		{
+			target.put("contextMenuRowPoint", Map.of("x", mouse.getX(), "y", mouse.getY()));
+		}
+		return target;
+	}
+
+	static String tileObjectActivationKind(
+			boolean objectGeometryContainsPoint,
+			boolean freshContextMenuRow)
+	{
+		if (freshContextMenuRow)
+		{
+			return "context_menu_row";
+		}
+		return objectGeometryContainsPoint ? "object_geometry" : "unverified";
+	}
+
+	private List<TileObject> nearbyTileObjects(
+			WorldView worldView,
+			int sceneX,
+			int sceneY,
+			int identifier)
+	{
+		List<TileObject> matches = new ArrayList<>();
+		if (worldView == null)
+		{
+			return matches;
+		}
+		Scene scene = worldView.getScene();
+		Tile[][][] tiles = scene == null ? null : scene.getTiles();
+		int plane = worldView.getPlane();
+		if (tiles == null || plane < 0 || plane >= tiles.length || tiles[plane] == null)
+		{
+			return matches;
+		}
+		Set<TileObject> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+		for (int x = Math.max(0, sceneX - 2); x <= Math.min(tiles[plane].length - 1, sceneX + 2); x++)
+		{
+			if (tiles[plane][x] == null)
+			{
+				continue;
+			}
+			for (int y = Math.max(0, sceneY - 2); y <= Math.min(tiles[plane][x].length - 1, sceneY + 2); y++)
+			{
+				Tile tile = tiles[plane][x][y];
+				if (tile == null)
+				{
+					continue;
+				}
+				addMatchingTileObject(matches, seen, tile.getWallObject(), identifier);
+				addMatchingTileObject(matches, seen, tile.getDecorativeObject(), identifier);
+				addMatchingTileObject(matches, seen, tile.getGroundObject(), identifier);
+				GameObject[] gameObjects = tile.getGameObjects();
+				if (gameObjects != null)
+				{
+					for (GameObject gameObject : gameObjects)
+					{
+						addMatchingTileObject(matches, seen, gameObject, identifier);
+					}
+				}
+			}
+		}
+		return matches;
+	}
+
+	private void addMatchingTileObject(
+			List<TileObject> matches,
+			Set<TileObject> seen,
+			TileObject object,
+			int identifier)
+	{
+		if (object != null && object.getId() == identifier && seen.add(object))
+		{
+			matches.add(object);
+		}
+	}
+
+	private boolean tileObjectOccupiesMenuScene(TileObject object, int sceneX, int sceneY)
+	{
+		if (object == null)
+		{
+			return false;
+		}
+		try
+		{
+			if (object instanceof GameObject)
+			{
+				Point minimum = ((GameObject) object).getSceneMinLocation();
+				Point maximum = ((GameObject) object).getSceneMaxLocation();
+				if (minimum != null && maximum != null)
+				{
+					return sceneFootprintContains(
+							sceneX,
+							sceneY,
+							minimum.getX(),
+							minimum.getY(),
+							maximum.getX(),
+							maximum.getY());
+				}
+			}
+			LocalPoint local = object.getLocalLocation();
+			return local != null && sceneFootprintContains(
+					sceneX,
+					sceneY,
+					local.getSceneX(),
+					local.getSceneY(),
+					local.getSceneX(),
+					local.getSceneY());
+		}
+		catch (RuntimeException ignored)
+		{
+			return false;
+		}
+	}
+
+	static boolean sceneFootprintContains(
+			int sceneX,
+			int sceneY,
+			int firstX,
+			int firstY,
+			int secondX,
+			int secondY)
+	{
+		return sceneX >= Math.min(firstX, secondX)
+				&& sceneX <= Math.max(firstX, secondX)
+				&& sceneY >= Math.min(firstY, secondY)
+				&& sceneY <= Math.max(firstY, secondY);
+	}
+
+	static boolean freshOpenMenuTupleMatches(
+			Map<String, Object> openMenu,
+			long currentClientTick,
+			long currentWallTimeMillis,
+			String expectedSessionId,
+			long expectedProcessId,
+			Point rowPoint,
+			String option,
+			String target,
+			String type,
+			int identifier,
+			int param0,
+			int param1,
+			int worldViewId)
+	{
+		if (openMenu == null
+				|| !Boolean.TRUE.equals(openMenu.get("menuOpen"))
+				|| expectedSessionId == null
+				|| !expectedSessionId.equals(openMenu.get("sessionId"))
+				|| !"LOGGED_IN".equals(openMenu.get("gameState"))
+				|| !numericEquals(openMenu.get("clientProcessId"), expectedProcessId)
+				|| !freshMenuSample(openMenu, currentClientTick, currentWallTimeMillis)
+				|| !pointInsideMenuBounds(openMenu.get("menuBounds"), rowPoint))
+		{
+			return false;
+		}
+		Object entriesValue = openMenu.get("entries");
+		if (!(entriesValue instanceof Iterable<?>))
+		{
+			return false;
+		}
+		for (Object entryValue : (Iterable<?>) entriesValue)
+		{
+			if (!(entryValue instanceof Map<?, ?>))
+			{
+				continue;
+			}
+			Map<?, ?> entry = (Map<?, ?>) entryValue;
+			if (textEquals(entry.get("option"), option)
+					&& textEquals(entry.get("target"), target)
+					&& textEquals(entry.get("type"), type)
+					&& numericEquals(entry.get("identifier"), identifier)
+					&& numericEquals(entry.get("param0"), param0)
+					&& numericEquals(entry.get("param1"), param1)
+					&& numericEquals(entry.get("worldViewId"), worldViewId))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean freshMenuSample(
+			Map<String, Object> openMenu,
+			long currentClientTick,
+			long currentWallTimeMillis)
+	{
+		Object clientTickValue = openMenu.get("clientTick");
+		Object wallTimeValue = openMenu.get("wallTimeMillis");
+		if (!(clientTickValue instanceof Number) || !(wallTimeValue instanceof Number))
+		{
+			return false;
+		}
+		long sampleClientTick = ((Number) clientTickValue).longValue();
+		long sampleWallTimeMillis = ((Number) wallTimeValue).longValue();
+		long clientTickAge = currentClientTick - sampleClientTick;
+		long wallTimeAge = currentWallTimeMillis - sampleWallTimeMillis;
+		return clientTickAge >= 0L
+				&& clientTickAge <= CONTEXT_MENU_SAMPLE_MAX_CLIENT_TICK_DRIFT
+				&& wallTimeAge >= 0L
+				&& wallTimeAge <= CONTEXT_MENU_SAMPLE_MAX_AGE_MILLIS;
+	}
+
+	private static boolean pointInsideMenuBounds(Object boundsValue, Point point)
+	{
+		if (!(boundsValue instanceof Map<?, ?>) || point == null)
+		{
+			return false;
+		}
+		Map<?, ?> bounds = (Map<?, ?>) boundsValue;
+		Long x = numericLong(bounds.get("x"));
+		Long y = numericLong(bounds.get("y"));
+		Long width = numericLong(bounds.get("width"));
+		Long height = numericLong(bounds.get("height"));
+		if (x == null || y == null || width == null || height == null || width <= 0L || height <= 0L)
+		{
+			return false;
+		}
+		long pointX = point.getX();
+		long pointY = point.getY();
+		return pointX >= x && pointY >= y && pointX < x + width && pointY < y + height;
+	}
+
+	private static boolean numericEquals(Object value, long expected)
+	{
+		Long number = numericLong(value);
+		return number != null && number == expected;
+	}
+
+	private static Long numericLong(Object value)
+	{
+		return value instanceof Number ? ((Number) value).longValue() : null;
+	}
+
+	private static boolean textEquals(Object value, String expected)
+	{
+		return value instanceof String && value.equals(expected == null ? "" : expected);
+	}
+
+	private Map<String, Object> tileObjectPayload(TileObject object)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		WorldPoint world = object.getWorldLocation();
+		LocalPoint local = object.getLocalLocation();
+		String kind = tileObjectKind(object);
+		payload.put("objectKey", kind + ":" + object.getId() + ":" + object.getHash()
+				+ ":" + (world == null ? "unknown" : world.getX() + ":" + world.getY() + ":" + world.getPlane()));
+		payload.put("id", object.getId());
+		payload.put("hash", object.getHash());
+		payload.put("kind", kind);
+		payload.put("worldX", world == null ? null : world.getX());
+		payload.put("worldY", world == null ? null : world.getY());
+		payload.put("plane", world == null ? object.getPlane() : world.getPlane());
+		payload.put("localX", local == null ? null : local.getX());
+		payload.put("localY", local == null ? null : local.getY());
+		payload.put("sceneX", local == null ? null : local.getSceneX());
+		payload.put("sceneY", local == null ? null : local.getSceneY());
+		payload.put("orientation", tileObjectOrientation(object));
+		return payload;
+	}
+
+	private String tileObjectKind(TileObject object)
+	{
+		if (object instanceof GameObject)
+		{
+			return "GAME_OBJECT";
+		}
+		if (object instanceof WallObject)
+		{
+			return "WALL_OBJECT";
+		}
+		if (object instanceof DecorativeObject)
+		{
+			return "DECORATIVE_OBJECT";
+		}
+		return object instanceof GroundObject ? "GROUND_OBJECT" : "TILE_OBJECT";
+	}
+
+	private int tileObjectOrientation(TileObject object)
+	{
+		if (object instanceof GameObject)
+		{
+			return ((GameObject) object).getOrientation();
+		}
+		if (object instanceof WallObject)
+		{
+			return ((WallObject) object).getOrientationA();
+		}
+		return 0;
+	}
+
+	private InteractionGeometry authoritativeInteractionGeometry(TileObject object)
+	{
+		if (object == null)
+		{
+			return null;
+		}
+		Shape clickbox = object.getClickbox();
+		if (clickbox != null && !clickbox.getBounds().isEmpty())
+		{
+			return new InteractionGeometry("clickbox", clickbox);
+		}
+		Shape hull = null;
+		if (object instanceof GameObject)
+		{
+			hull = ((GameObject) object).getConvexHull();
+		}
+		else if (object instanceof WallObject)
+		{
+			hull = ((WallObject) object).getConvexHull();
+		}
+		else if (object instanceof DecorativeObject)
+		{
+			hull = ((DecorativeObject) object).getConvexHull();
+		}
+		else if (object instanceof GroundObject)
+		{
+			hull = ((GroundObject) object).getConvexHull();
+		}
+		if (hull != null && !hull.getBounds().isEmpty())
+		{
+			return new InteractionGeometry("convex_hull", hull);
+		}
+		Polygon tile = object.getCanvasTilePoly();
+		return tile == null || tile.getBounds().isEmpty()
+				? null
+				: new InteractionGeometry("canvas_tile_polygon", tile);
+	}
+
+	private static final class InteractionGeometry
+	{
+		private final String source;
+		private final Shape shape;
+
+		private InteractionGeometry(String source, Shape shape)
+		{
+			this.source = source;
+			this.shape = shape;
+		}
+	}
+
+	static Map<String, Object> walkTargetPayload(
+			int worldViewId,
+			int sceneX,
+			int sceneY,
+			WorldPoint menuPoint,
+			WorldPoint selectedPoint,
+			Point selectedScene,
+			WorldPoint destinationPoint)
+	{
+		Map<String, Object> target = new LinkedHashMap<>();
+		target.put("schema", "plugin_click_target.v1");
+		target.put("actionFamily", "walk_tile");
+		target.put("worldViewId", worldViewId);
+		target.put("menuSceneX", sceneX);
+		target.put("menuSceneY", sceneY);
+		target.put("menuParamTile", worldTilePayload(menuPoint));
+		target.put("selectedSceneTile", worldTilePayload(selectedPoint));
+		target.put("localDestinationTile", worldTilePayload(destinationPoint));
+		boolean selectedMatches = selectedScene != null
+				&& selectedScene.getX() == sceneX
+				&& selectedScene.getY() == sceneY;
+		target.put("selectedSceneTileMatchesMenuParams", selectedMatches);
+
+		WorldPoint resolved;
+		String source;
+		String confidence;
+		if (selectedMatches && selectedPoint != null)
+		{
+			resolved = selectedPoint;
+			source = "selected_scene_tile_correlated_with_menu_params";
+			confidence = "exact";
+		}
+		else if (menuPoint != null)
+		{
+			resolved = menuPoint;
+			source = "menu_params";
+			confidence = "high";
+		}
+		else if (destinationPoint != null)
+		{
+			resolved = destinationPoint;
+			source = "local_destination_fallback";
+			confidence = "low";
+		}
+		else
+		{
+			resolved = null;
+			source = "unresolved";
+			confidence = "none";
+		}
+		target.put("resolution", resolved == null ? "unresolved" : "resolved");
+		target.put("source", source);
+		target.put("confidence", confidence);
+		target.put("worldTile", worldTilePayload(resolved));
+		return target;
+	}
+
+	private static Map<String, Object> worldTilePayload(WorldPoint point)
+	{
+		if (point == null)
+		{
+			return null;
+		}
+		return Map.of(
+				"worldX", point.getX(),
+				"worldY", point.getY(),
+				"plane", point.getPlane());
 	}
 
 	static Map<String, Object> inputGeometryPayload(TickSnapshot snapshot)
@@ -1002,6 +1762,7 @@ public class TelemetryPlugin extends Plugin
 		snapshot.cameraZ = client.getCameraZ();
 		snapshot.cameraYaw = client.getCameraYaw();
 		snapshot.cameraPitch = client.getCameraPitch();
+		snapshot.zoom3d = client.get3dZoom();
 		snapshot.viewportWidth = client.getViewportWidth();
 		snapshot.viewportHeight = client.getViewportHeight();
 		snapshot.viewportXOffset = client.getViewportXOffset();
@@ -1031,6 +1792,18 @@ public class TelemetryPlugin extends Plugin
 		Widget play = client.getWidget(InterfaceID.WelcomeScreen.PLAY);
 		Widget clickHere = client.getWidget(InterfaceID.WelcomeScreen.CLICKHERE_TEXT);
 		snapshot.welcomeScreenVisible = widgetVisible(play) || widgetVisible(clickHere);
+	}
+
+	private void captureTextInputState(TickSnapshot snapshot)
+	{
+		snapshot.textInputActive = textInputActive(
+				client.getFocusedInputFieldWidget() != null,
+				client.getVarcIntValue(VarClientInt.INPUT_TYPE));
+	}
+
+	static boolean textInputActive(boolean focusedInputField, int inputType)
+	{
+		return focusedInputField || inputType != 0;
 	}
 
 	private TickSnapshot.InputGeometrySnapshot captureInputGeometry(TickSnapshot snapshot, Canvas canvas)
@@ -1599,11 +2372,37 @@ public class TelemetryPlugin extends Plugin
 		{
 			return null;
 		}
+		ArrayDeque<Widget> pending = new ArrayDeque<>();
+		Set<Widget> visited = Collections.newSetFromMap(new IdentityHashMap<>());
 		for (Widget widget : widgets)
 		{
-			if (widgetVisible(widget) && widgetHasCloseAction(widget))
+			if (widgetVisible(widget))
+			{
+				pending.addLast(widget);
+			}
+		}
+		while (!pending.isEmpty() && visited.size() < CLOSABLE_WIDGET_SCAN_LIMIT)
+		{
+			Widget widget = pending.removeFirst();
+			if (!visited.add(widget) || !widgetVisible(widget))
+			{
+				continue;
+			}
+			if (widgetHasCloseAction(widget))
 			{
 				return widget;
+			}
+			Widget[] children = widget.getChildren();
+			if (children == null)
+			{
+				continue;
+			}
+			for (Widget child : children)
+			{
+				if (widgetVisible(child) && !visited.contains(child))
+				{
+					pending.addLast(child);
+				}
 			}
 		}
 		return null;
@@ -1693,11 +2492,38 @@ public class TelemetryPlugin extends Plugin
 			localPlayer.sceneX = localLocation.getSceneX();
 			localPlayer.sceneY = localLocation.getSceneY();
 		}
+		try
+		{
+			Point canvasPoint = playerCanvasCenter(player.getCanvasTilePoly());
+			if (canvasPoint != null)
+			{
+				localPlayer.canvasX = canvasPoint.getX();
+				localPlayer.canvasY = canvasPoint.getY();
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			// This optional projection must not invalidate otherwise-current player facts.
+		}
 		localPlayer.animation = player.getAnimation();
 		localPlayer.poseAnimation = player.getPoseAnimation();
 		localPlayer.combatLevel = player.getCombatLevel();
 
 		snapshot.localPlayer = localPlayer;
+	}
+
+	static Point playerCanvasCenter(Polygon polygon)
+	{
+		if (polygon == null || polygon.npoints < 3)
+		{
+			return null;
+		}
+		Rectangle bounds = polygon.getBounds();
+		if (bounds.width <= 0 || bounds.height <= 0)
+		{
+			return null;
+		}
+		return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
 	}
 
 	private void captureInventory(TickSnapshot snapshot)
@@ -1955,69 +2781,113 @@ public class TelemetryPlugin extends Plugin
 
 	private Map<String, Object> pluginSnapshotTileProjections(List<Map<String, Object>> requests)
 	{
-		if (clientThread == null)
+		ClientThreadQueryScheduler scheduler = clientThreadQueryScheduler;
+		if (clientThread == null || scheduler == null)
 		{
-			return tileProjectionFailurePayload("client thread unavailable");
+			return withClientThreadQueryDiagnostics(
+					tileProjectionFailurePayload("client thread unavailable"),
+					ClientThreadQueryScheduler.unavailableDiagnostics("tile_projection", "UNAVAILABLE"));
 		}
-		CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
-		clientThread.invoke(() ->
-		{
-			try
-			{
-				future.complete(buildTileProjectionPayload(requests));
-			}
-			catch (RuntimeException e)
-			{
-				future.complete(tileProjectionFailurePayload("tile projection failed: " + exceptionSummary(e)));
-			}
-		});
-		try
-		{
-			return future.get(200, TimeUnit.MILLISECONDS);
-		}
-		catch (TimeoutException e)
-		{
-			return tileProjectionFailurePayload("tile projection timed out");
-		}
-		catch (Exception e)
-		{
-			return tileProjectionFailurePayload("tile projection interrupted: " + exceptionSummary(e));
-		}
+		List<Map<String, Object>> safeRequests = requests == null ? List.of() : requests;
+		ClientThreadQueryScheduler.Submission<Map<String, Object>> submission = scheduler.submit(
+				"tile_projection",
+				clientThreadQueryKey("tile_projection", safeRequests),
+				200L,
+				() -> buildTileProjectionPayload(safeRequests));
+		ClientThreadQueryScheduler.Result<Map<String, Object>> result = submission.await();
+		Map<String, Object> payload = result.succeeded()
+				? result.value()
+				: tileProjectionFailurePayload(clientThreadQueryFailureReason("tile projection", result));
+		return withClientThreadQueryDiagnostics(payload, scheduler.diagnostics(submission, result));
 	}
 
 	private Map<String, Object> pluginSnapshotWorldModelQuery(List<String> needs, Map<String, Object> request)
 	{
-		if (clientThread == null)
+		ClientThreadQueryScheduler scheduler = clientThreadQueryScheduler;
+		List<String> safeNeeds = needs == null ? List.of() : List.copyOf(needs);
+		Map<String, Object> safeRequest = request == null ? Map.of() : request;
+		if (clientThread == null || scheduler == null)
 		{
-			return worldModelFailurePayload(needs, "client thread unavailable");
+			return withClientThreadQueryDiagnostics(
+					worldModelFailurePayload(safeNeeds, "client thread unavailable"),
+					ClientThreadQueryScheduler.unavailableDiagnostics("world_model", "UNAVAILABLE"));
 		}
-		CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
-		clientThread.invoke(() ->
-		{
-			try
-			{
-				Map<String, Object> identity = new LinkedHashMap<>();
-				addSessionIdentity(identity);
-				identity.put("geometryFrameId", currentGeometryFrameId());
-				future.complete(worldModelCache.query(client, needs == null ? List.of() : needs, request == null ? Map.of() : request, tickId, clientTickId, identity));
-			}
-			catch (RuntimeException e)
-			{
-				future.complete(worldModelFailurePayload(needs, "world model query failed: " + exceptionSummary(e)));
-			}
-		});
+		Map<String, Object> queryShape = new LinkedHashMap<>();
+		queryShape.put("needs", safeNeeds);
+		queryShape.put("request", safeRequest);
+		ClientThreadQueryScheduler.Submission<Map<String, Object>> submission = scheduler.submit(
+				"world_model",
+				clientThreadQueryKey("world_model", queryShape),
+				250L,
+				() -> {
+					Map<String, Object> identity = new LinkedHashMap<>();
+					addSessionIdentity(identity);
+					identity.put("geometryFrameId", currentGeometryFrameId());
+					return worldModelCache.query(
+							client,
+							safeNeeds,
+							safeRequest,
+							tickId,
+							clientTickId,
+							identity);
+				});
+		ClientThreadQueryScheduler.Result<Map<String, Object>> result = submission.await();
+		Map<String, Object> payload = result.succeeded()
+				? result.value()
+				: worldModelFailurePayload(safeNeeds, clientThreadQueryFailureReason("world model query", result));
+		return withClientThreadQueryDiagnostics(payload, scheduler.diagnostics(submission, result));
+	}
+
+	private String clientThreadQueryKey(String lane, Object requestShape)
+	{
+		String serializedShape;
 		try
 		{
-			return future.get(250, TimeUnit.MILLISECONDS);
+			serializedShape = gson == null ? String.valueOf(requestShape) : gson.toJson(requestShape);
 		}
-		catch (TimeoutException e)
+		catch (RuntimeException e)
 		{
-			return worldModelFailurePayload(needs, "world model query timed out");
+			serializedShape = String.valueOf(requestShape);
 		}
-		catch (Exception e)
+		return lane
+				+ "|" + String.valueOf(pluginInstanceId)
+				+ "|" + tickId
+				+ "|" + clientTickId
+				+ "|" + serializedShape;
+	}
+
+	private String clientThreadQueryFailureReason(
+			String label,
+			ClientThreadQueryScheduler.Result<?> result)
+	{
+		switch (result.status())
 		{
-			return worldModelFailurePayload(needs, "world model query interrupted: " + exceptionSummary(e));
+			case TIMED_OUT:
+			case EXPIRED:
+			case LATE:
+				return label + " timed out";
+			case SUPERSEDED:
+				return label + " superseded by a newer request";
+			case INTERRUPTED:
+				return label + " interrupted";
+			case CLOSED:
+				return label + " scheduler unavailable";
+			case FAILED:
+				return label + " failed: " + result.failureSummary();
+			default:
+				return label + " unavailable: " + result.status().name().toLowerCase(Locale.ROOT);
 		}
+	}
+
+	private Map<String, Object> withClientThreadQueryDiagnostics(
+			Map<String, Object> payload,
+			Map<String, Object> diagnostics)
+	{
+		Map<String, Object> enriched = payload == null
+				? new LinkedHashMap<>()
+				: new LinkedHashMap<>(payload);
+		enriched.put("queryDiagnostics", diagnostics);
+		return enriched;
 	}
 
 	private Map<String, Object> worldModelFailurePayload(List<String> needs, String reason)
@@ -2145,6 +3015,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("localY", localPoint.getY());
 		payload.put("sceneX", localPoint.getSceneX());
 		payload.put("sceneY", localPoint.getSceneY());
+		payload.putAll(requestedTileCollisionSupport(localPoint, plane));
 
 		int[][] polygon = null;
 		TickSnapshot.CanvasPoint center = null;
@@ -2194,6 +3065,234 @@ public class TelemetryPlugin extends Plugin
 			payload.put("reason", warnings.get(0));
 		}
 		return payload;
+	}
+
+	private Map<String, Object> requestedTileCollisionSupport(LocalPoint target, int plane)
+	{
+		Map<String, Object> support = new LinkedHashMap<>();
+		support.put("sceneSupported", true);
+		Player player = client.getLocalPlayer();
+		LocalPoint source = player == null ? null : player.getLocalLocation();
+		CollisionData[] maps = client.getCollisionMaps();
+		if (plane != client.getPlane() || source == null || maps == null
+				|| plane < 0 || plane >= maps.length || maps[plane] == null
+				|| maps[plane].getFlags() == null)
+		{
+			support.put("collisionSupported", false);
+			support.put("shortcutClear", false);
+			support.put("collisionReason", "collision_evidence_unavailable");
+			return support;
+		}
+		int[][] flags = maps[plane].getFlags();
+		boolean reachable = collisionPathReachable(
+				flags,
+				source.getSceneX(),
+				source.getSceneY(),
+				target.getSceneX(),
+				target.getSceneY());
+		boolean clear = collisionLineClear(
+				flags,
+				source.getSceneX(),
+				source.getSceneY(),
+				target.getSceneX(),
+				target.getSceneY());
+		support.put("collisionSupported", reachable);
+		support.put("shortcutClear", clear);
+		support.put("collisionReason", clear
+				? "direct_path_clear"
+				: (reachable ? "route_reachable_direct_path_blocked" : "route_blocked"));
+		return support;
+	}
+
+	static boolean collisionPathReachable(
+			int[][] flags,
+			int startX,
+			int startY,
+			int targetX,
+			int targetY)
+	{
+		if (!collisionCellAvailable(flags, startX, startY)
+				|| !collisionCellAvailable(flags, targetX, targetY)
+				|| collisionTileBlocked(flags[startX][startY])
+				|| collisionTileBlocked(flags[targetX][targetY]))
+		{
+			return false;
+		}
+		if (startX == targetX && startY == targetY)
+		{
+			return true;
+		}
+
+		int margin = 16;
+		int minX = Math.max(0, Math.min(startX, targetX) - margin);
+		int maxX = Math.min(flags.length - 1, Math.max(startX, targetX) + margin);
+		int minY = Math.max(0, Math.min(startY, targetY) - margin);
+		int maxY = Math.max(startY, targetY) + margin;
+		boolean[][] visited = new boolean[flags.length][];
+		for (int x = 0; x < flags.length; x++)
+		{
+			visited[x] = new boolean[flags[x] == null ? 0 : flags[x].length];
+		}
+		ArrayDeque<int[]> pending = new ArrayDeque<>();
+		pending.add(new int[]{startX, startY});
+		visited[startX][startY] = true;
+		while (!pending.isEmpty())
+		{
+			int[] current = pending.removeFirst();
+			for (int dx = -1; dx <= 1; dx++)
+			{
+				for (int dy = -1; dy <= 1; dy++)
+				{
+					if (dx == 0 && dy == 0)
+					{
+						continue;
+					}
+					int nextX = current[0] + dx;
+					int nextY = current[1] + dy;
+					if (nextX < minX || nextX > maxX || nextY < minY || nextY > maxY
+							|| !collisionCellAvailable(flags, nextX, nextY)
+							|| visited[nextX][nextY]
+							|| !collisionStepClear(flags, current[0], current[1], nextX, nextY))
+					{
+						continue;
+					}
+					if (nextX == targetX && nextY == targetY)
+					{
+						return true;
+					}
+					visited[nextX][nextY] = true;
+					pending.addLast(new int[]{nextX, nextY});
+				}
+			}
+		}
+		return false;
+	}
+
+	static boolean collisionLineClear(
+			int[][] flags,
+			int startX,
+			int startY,
+			int targetX,
+			int targetY)
+	{
+		if (!collisionCellAvailable(flags, startX, startY)
+				|| !collisionCellAvailable(flags, targetX, targetY)
+				|| collisionTileBlocked(flags[startX][startY]))
+		{
+			return false;
+		}
+		int x = startX;
+		int y = startY;
+		int distanceX = Math.abs(targetX - startX);
+		int distanceY = Math.abs(targetY - startY);
+		int stepX = Integer.compare(targetX, startX);
+		int stepY = Integer.compare(targetY, startY);
+		int error = distanceX - distanceY;
+		while (x != targetX || y != targetY)
+		{
+			int twiceError = error * 2;
+			int nextX = x;
+			int nextY = y;
+			if (twiceError > -distanceY)
+			{
+				error -= distanceY;
+				nextX += stepX;
+			}
+			if (twiceError < distanceX)
+			{
+				error += distanceX;
+				nextY += stepY;
+			}
+			if (!collisionStepClear(flags, x, y, nextX, nextY))
+			{
+				return false;
+			}
+			x = nextX;
+			y = nextY;
+		}
+		return true;
+	}
+
+	private static boolean collisionStepClear(
+			int[][] flags,
+			int sourceX,
+			int sourceY,
+			int targetX,
+			int targetY)
+	{
+		if (!collisionCellAvailable(flags, sourceX, sourceY)
+				|| !collisionCellAvailable(flags, targetX, targetY))
+		{
+			return false;
+		}
+		int dx = targetX - sourceX;
+		int dy = targetY - sourceY;
+		if (Math.abs(dx) > 1 || Math.abs(dy) > 1 || (dx == 0 && dy == 0))
+		{
+			return false;
+		}
+		int source = flags[sourceX][sourceY];
+		int target = flags[targetX][targetY];
+		if (collisionTileBlocked(target))
+		{
+			return false;
+		}
+		if (dx > 0 && ((source & CollisionDataFlag.BLOCK_MOVEMENT_EAST) != 0
+				|| (target & CollisionDataFlag.BLOCK_MOVEMENT_WEST) != 0))
+		{
+			return false;
+		}
+		if (dx < 0 && ((source & CollisionDataFlag.BLOCK_MOVEMENT_WEST) != 0
+				|| (target & CollisionDataFlag.BLOCK_MOVEMENT_EAST) != 0))
+		{
+			return false;
+		}
+		if (dy > 0 && ((source & CollisionDataFlag.BLOCK_MOVEMENT_NORTH) != 0
+				|| (target & CollisionDataFlag.BLOCK_MOVEMENT_SOUTH) != 0))
+		{
+			return false;
+		}
+		if (dy < 0 && ((source & CollisionDataFlag.BLOCK_MOVEMENT_SOUTH) != 0
+				|| (target & CollisionDataFlag.BLOCK_MOVEMENT_NORTH) != 0))
+		{
+			return false;
+		}
+		if (dx != 0 && dy != 0)
+		{
+			int sourceDiagonal = dx > 0
+					? (dy > 0 ? CollisionDataFlag.BLOCK_MOVEMENT_NORTH_EAST
+							: CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_EAST)
+					: (dy > 0 ? CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
+							: CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_WEST);
+			int targetDiagonal = dx > 0
+					? (dy > 0 ? CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_WEST
+							: CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST)
+					: (dy > 0 ? CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_EAST
+							: CollisionDataFlag.BLOCK_MOVEMENT_NORTH_EAST);
+			if ((source & sourceDiagonal) != 0 || (target & targetDiagonal) != 0)
+			{
+				return false;
+			}
+			if (!collisionCellAvailable(flags, sourceX + dx, sourceY)
+					|| !collisionCellAvailable(flags, sourceX, sourceY + dy)
+					|| collisionTileBlocked(flags[sourceX + dx][sourceY])
+					|| collisionTileBlocked(flags[sourceX][sourceY + dy]))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean collisionTileBlocked(int flags)
+	{
+		return (flags & COLLISION_TILE_BLOCK_MASK) != 0;
+	}
+
+	private static boolean collisionCellAvailable(int[][] flags, int x, int y)
+	{
+		return flags != null && x >= 0 && x < flags.length
+				&& flags[x] != null && y >= 0 && y < flags[x].length;
 	}
 
 
@@ -2572,6 +3671,13 @@ public class TelemetryPlugin extends Plugin
 
 	private Map<String, Object> clientTickPayload(String sourceEvent)
 	{
+		return clientTickPayload(sourceEvent, currentCameraPosePayload());
+	}
+
+	private Map<String, Object> clientTickPayload(
+			String sourceEvent,
+			Map<String, Object> cameraPose)
+	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", "plugin_client_tick_sample.v1");
 		payload.put("sampleSource", sourceEvent);
@@ -2584,6 +3690,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("gameState", currentGameStateText());
 		addSessionIdentity(payload);
 		addMouseCanvasPosition(payload);
+		payload.put("cameraPose", copyCameraPose(cameraPose));
 		return payload;
 	}
 
@@ -2621,6 +3728,7 @@ public class TelemetryPlugin extends Plugin
 		addMenuBounds(payload);
 		addSessionIdentity(payload);
 		addMouseCanvasPosition(payload);
+		payload.put("cameraPose", copyCameraPose(currentCameraPosePayload()));
 		payload.put("entryCount", entries == null ? 0 : entries.length);
 		payload.put("entries", topEntries);
 		addTopMenuEntry(payload, topEntry);
@@ -2670,6 +3778,8 @@ public class TelemetryPlugin extends Plugin
 	private Map<String, Object> menuOptionClickedPayload(MenuOptionClicked event)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
+		long monotonicTimeNanos = System.nanoTime();
+		Map<String, Object> cameraPose = currentCameraPosePayload();
 		payload.put("schema", "plugin_menu_option_clicked.v1");
 		payload.put("sampleSource", "MenuOptionClicked");
 		payload.put("sourceEvent", "MenuOptionClicked");
@@ -2677,10 +3787,14 @@ public class TelemetryPlugin extends Plugin
 		payload.put("gameTickAtSample", tickId);
 		payload.put("timestampUtc", Instant.now().toString());
 		payload.put("wallTimeMillis", System.currentTimeMillis());
-		payload.put("monotonicTimeNanos", System.nanoTime());
+		payload.put("monotonicTimeNanos", monotonicTimeNanos);
 		payload.put("gameState", currentGameStateText());
 		addSessionIdentity(payload);
 		addMouseCanvasPosition(payload);
+		payload.put("cameraPose", copyCameraPose(cameraPose));
+		payload.put("geometryFrameId", cameraPose == null ? null : cameraPose.get("geometryFrameId"));
+		payload.put("clickEvidenceId", (pluginInstanceId == null ? "plugin-unidentified" : pluginInstanceId)
+				+ ":" + clientTickId + ":" + monotonicTimeNanos);
 		payload.put("option", event == null ? "" : safeString(event.getMenuOption()));
 		payload.put("target", event == null ? "" : safeString(event.getMenuTarget()));
 		payload.put("type", event == null ? "" : String.valueOf(event.getMenuAction()));
@@ -2691,6 +3805,7 @@ public class TelemetryPlugin extends Plugin
 		{
 			payload.put("itemId", event.getItemId());
 			payload.put("consumed", event.isConsumed());
+			payload.put("resolvedTarget", resolvedClickTarget(event));
 		}
 		return payload;
 	}

@@ -17,6 +17,14 @@ from .task_contract import TargetEvidence
 SELECTED_COLOR = "#38d267"
 ELIGIBLE_COLOR = "#e8ad32"
 REJECTED_COLOR = "#e44848"
+ROUTE_COLOR = "#4da3ff"
+MANDATORY_ROUTE_COLOR = "#ff7a45"
+SKIPPED_ROUTE_COLOR = "#8b96a8"
+TARGET_SHAPE_COLOR = "#38bdf8"
+TARGET_INSET_COLOR = "#22d3ee"
+CANDIDATE_COLOR = "#fde047"
+CAMERA_REGION_COLOR = "#d946ef"
+POINTER_PATH_COLOR = "#c084fc"
 TEXT_COLOR = "#f1f4f8"
 BACKGROUND_COLOR = "#010203"
 TERMINAL_BANNER_SECONDS = 8.0
@@ -46,11 +54,30 @@ class OverlayRectangle:
 
 
 @dataclass(frozen=True, slots=True)
+class OverlayPoint:
+    point: ScreenPoint
+    color: str
+    label: str = ""
+    radius: int = 3
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayPolyline:
+    points: tuple[ScreenPoint, ...]
+    color: str
+    label: str = ""
+    width: int = 2
+    smooth: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class OverlayScene:
     source_sequence: int
     canvas_bounds: ScreenBounds | None
     rectangles: tuple[OverlayRectangle, ...]
     text_lines: tuple[str, ...]
+    points: tuple[OverlayPoint, ...] = ()
+    polylines: tuple[OverlayPolyline, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,10 +124,15 @@ def build_overlay_scene(
             geometry_allowed = False
 
     rectangles: list[OverlayRectangle] = []
+    points: list[OverlayPoint] = []
+    polylines: list[OverlayPolyline] = []
     selected = frame.selected_target
     selected_key = selected.key if selected is not None else None
     selected_bounds = (
         _current_target_bounds(frame, selected) if geometry_allowed else None
+    )
+    diagnostic_geometry_allowed = bool(
+        geometry_allowed and selected is not None and selected_bounds is not None
     )
     if selected is not None and selected_bounds is not None:
         rectangles.append(
@@ -129,6 +161,21 @@ def build_overlay_scene(
                 rectangles.append(
                     OverlayRectangle(bounds, REJECTED_COLOR, label)
                 )
+
+    if geometry_allowed and frame.decision is not None:
+        evidence = frame.decision.evidence
+        if diagnostic_geometry_allowed:
+            _append_route_geometry(evidence.route, points, polylines)
+            _append_targeting_geometry(
+                evidence.targeting, rectangles, points, polylines
+            )
+            _append_pointer_geometry(frame, points, polylines)
+        if _camera_geometry_is_current(
+            frame,
+            evidence.camera,
+            legacy_geometry_allowed=diagnostic_geometry_allowed,
+        ):
+            _append_camera_geometry(evidence.camera, rectangles, points)
 
     task = frame.task
     presentation_state = _presentation_state_text(presentation)
@@ -194,6 +241,22 @@ def build_overlay_scene(
     ]
     if frame.blocker:
         text.append(f"blocker: {frame.blocker}")
+    if frame.decision is not None:
+        evidence = frame.decision.evidence
+        text.extend(
+            line
+            for line in (
+                _route_line(evidence.route),
+                _camera_line(evidence.camera),
+                _targeting_line(
+                    evidence.targeting,
+                    geometry_allowed=diagnostic_geometry_allowed,
+                ),
+                _pointer_line(frame),
+                _timing_line(evidence.timing),
+            )
+            if line is not None
+        )
     return OverlayScene(
         source_sequence=frame.sequence,
         canvas_bounds=(
@@ -203,6 +266,265 @@ def build_overlay_scene(
         ),
         rectangles=tuple(rectangles),
         text_lines=tuple(text),
+        points=tuple(points),
+        polylines=tuple(polylines),
+    )
+
+
+def _append_route_geometry(
+    route: object | None,
+    points: list[OverlayPoint],
+    polylines: list[OverlayPolyline],
+) -> None:
+    if route is None:
+        return
+    projected = _first_screen_points(
+        route, "projected_route_points", "projected_points"
+    )
+    if len(projected) >= 2:
+        polylines.append(
+            OverlayPolyline(projected, ROUTE_COLOR, "route corridor", width=4)
+        )
+    mandatory = _first_screen_points(
+        route, "mandatory_route_points", "mandatory_points"
+    )
+    skipped = _first_screen_points(route, "skipped_route_points", "skipped_points")
+    points.extend(
+        OverlayPoint(point, MANDATORY_ROUTE_COLOR, "mandatory", radius=4)
+        for point in mandatory
+    )
+    points.extend(
+        OverlayPoint(point, SKIPPED_ROUTE_COLOR, "", radius=2)
+        for point in skipped
+    )
+    selected = getattr(route, "selected_screen_point", None)
+    if isinstance(selected, ScreenPoint):
+        points.append(OverlayPoint(selected, SELECTED_COLOR, "route target", radius=5))
+
+
+def _append_camera_geometry(
+    camera: object | None,
+    rectangles: list[OverlayRectangle],
+    points: list[OverlayPoint],
+) -> None:
+    if camera is None:
+        return
+    desired = getattr(camera, "desired_region", None)
+    if isinstance(desired, ScreenBounds):
+        rectangles.append(
+            OverlayRectangle(desired, CAMERA_REGION_COLOR, "desired camera framing")
+        )
+    target_bounds = getattr(camera, "target_bounds", None)
+    if isinstance(target_bounds, ScreenBounds):
+        rectangles.append(
+            OverlayRectangle(
+                target_bounds, CAMERA_REGION_COLOR, "camera target shape"
+            )
+        )
+    lookahead_bounds = getattr(camera, "lookahead_bounds", None)
+    if isinstance(lookahead_bounds, ScreenBounds):
+        rectangles.append(
+            OverlayRectangle(
+                lookahead_bounds, ROUTE_COLOR, "camera lookahead bounds"
+            )
+        )
+    target = getattr(camera, "target_point", None)
+    if isinstance(target, ScreenPoint):
+        points.append(
+            OverlayPoint(target, CAMERA_REGION_COLOR, "camera target", radius=5)
+        )
+    lookahead = _first_screen_points(camera, "lookahead_points")
+    points.extend(
+        OverlayPoint(point, ROUTE_COLOR, "camera lookahead", radius=3)
+        for point in lookahead
+    )
+
+
+def _append_targeting_geometry(
+    targeting: object | None,
+    rectangles: list[OverlayRectangle],
+    points: list[OverlayPoint],
+    polylines: list[OverlayPolyline],
+) -> None:
+    if targeting is None:
+        return
+    polygon = _first_screen_points(
+        targeting, "shape_polygon", "authoritative_polygon", "target_polygon"
+    )
+    if len(polygon) >= 3:
+        polylines.append(
+            OverlayPolyline(
+                (*polygon, polygon[0]),
+                TARGET_SHAPE_COLOR,
+                f"target {getattr(targeting, 'geometry_source', 'shape')}",
+            )
+        )
+    else:
+        shape = getattr(targeting, "shape_bounds", None)
+        if isinstance(shape, ScreenBounds):
+            rectangles.append(
+                OverlayRectangle(
+                    shape,
+                    TARGET_SHAPE_COLOR,
+                    f"target {getattr(targeting, 'geometry_source', 'shape')}",
+                )
+            )
+    inset = getattr(targeting, "inset_region", None)
+    if isinstance(inset, ScreenBounds):
+        rectangles.append(OverlayRectangle(inset, TARGET_INSET_COLOR, "usable aim"))
+    candidates = _first_screen_points(targeting, "candidate_points")
+    points.extend(
+        OverlayPoint(point, CANDIDATE_COLOR, "", radius=2) for point in candidates
+    )
+    selected = getattr(targeting, "selected_point", None)
+    if isinstance(selected, ScreenPoint):
+        points.append(OverlayPoint(selected, SELECTED_COLOR, "selected aim", radius=5))
+
+
+def _append_pointer_geometry(
+    frame: EngineFrame,
+    points: list[OverlayPoint],
+    polylines: list[OverlayPolyline],
+) -> None:
+    receipt = frame.last_execution_receipt
+    motion = receipt.pointer_motion if receipt is not None else None
+    if motion is None or getattr(motion, "plan_count", 0) <= 0:
+        return
+    start = getattr(motion, "requested_start", None)
+    target = getattr(motion, "requested_target", None)
+    controls = _first_screen_points(motion, "control_points")
+    if isinstance(start, ScreenPoint) and isinstance(target, ScreenPoint):
+        polylines.append(
+            OverlayPolyline(
+                (start, *controls, target),
+                POINTER_PATH_COLOR,
+                "recent pointer path",
+                width=2,
+                smooth=True,
+            )
+        )
+    settled = getattr(motion, "settled_target", None)
+    if isinstance(settled, ScreenPoint):
+        points.append(OverlayPoint(settled, POINTER_PATH_COLOR, "settled", radius=3))
+
+
+def _first_screen_points(value: object, *field_names: str) -> tuple[ScreenPoint, ...]:
+    for field_name in field_names:
+        raw = getattr(value, field_name, None)
+        if isinstance(raw, tuple) and all(isinstance(point, ScreenPoint) for point in raw):
+            return raw
+    return ()
+
+
+def _route_line(route: object | None) -> str | None:
+    if route is None:
+        return None
+    actual = getattr(route, "actual_progress_tiles", None)
+    actual_text = "-" if actual is None else f"{actual:+.1f}"
+    rejections = getattr(route, "candidate_rejections", ())
+    rejection_text = "-"
+    if isinstance(rejections, tuple) and rejections:
+        first = rejections[0]
+        step_id = str(getattr(first, "step_id", "-"))[:40]
+        codes = getattr(first, "rejection_codes", ())
+        first_code = (
+            str(codes[0])[:40]
+            if isinstance(codes, tuple) and codes
+            else "unknown"
+        )
+        rejection_text = f"{len(rejections)} ({step_id}:{first_code})"
+    return (
+        f"route: progress {getattr(route, 'progress_tiles', 0.0):.1f} | "
+        f"target {getattr(route, 'selected_step_id', None) or '-'} | "
+        f"request {getattr(route, 'requested_distance_tiles', 0.0):.1f} tiles | "
+        f"actual {actual_text} | skipped "
+        f"{len(getattr(route, 'skipped_guidance_points', ()))} | "
+        f"deviation {getattr(route, 'lateral_deviation_tiles', 0.0):.1f} | "
+        f"rejected {rejection_text}"
+    )
+
+
+def _camera_line(camera: object | None) -> str | None:
+    if camera is None:
+        return None
+    context = str(getattr(camera, "framing_context", "interaction"))[:32]
+    classification = str(getattr(camera, "classification", "-"))[:32]
+    action = str(getattr(camera, "action", "-"))[:32]
+    bias = str(getattr(camera, "route_direction_bias", "-"))[:32]
+    correction = float(getattr(camera, "correction_distance_px", 0.0))
+    clearance = getattr(camera, "edge_clearance_px", None)
+    clearance_text = "-"
+    if isinstance(clearance, (int, float)) and not isinstance(clearance, bool):
+        clearance_text = f"{float(clearance):.1f}"
+    required_margin = getattr(camera, "required_edge_margin_px", 0)
+    attempt = getattr(camera, "correction_attempt", 0)
+    limit = getattr(camera, "correction_limit", 0)
+    cumulative = getattr(camera, "cumulative_hold_millis", 0)
+    state = getattr(camera, "acquisition_state", "idle")
+    state_text = str(getattr(state, "value", state))[:32]
+    locked_target = str(getattr(camera, "locked_target_key", None) or "-")[:40]
+    capability_max = getattr(camera, "capability_max_hold_millis", 250)
+    response_samples = getattr(camera, "response_sample_count", 0)
+    return (
+        f"camera: {context} {classification} -> {action} "
+        f"{getattr(camera, 'hold_millis', 0)} ms | "
+        f"correction {correction:.1f} px | "
+        f"clearance {clearance_text}/{required_margin} px | "
+        f"attempt {attempt}/{limit} | cumulative {cumulative} ms | "
+        f"episode {state_text} target {locked_target} | "
+        f"cap {capability_max} ms model {response_samples} | "
+        f"bias {bias}"
+    )
+
+
+def _targeting_line(
+    targeting: object | None, *, geometry_allowed: bool
+) -> str | None:
+    if targeting is None:
+        return None
+    if not geometry_allowed:
+        return "aim: geometry suppressed"
+    selected = getattr(targeting, "selected_point", None)
+    selected_text = (
+        f"{selected.x},{selected.y}" if isinstance(selected, ScreenPoint) else "-"
+    )
+    return (
+        f"aim: {getattr(targeting, 'geometry_source', '-')} | candidates "
+        f"{len(getattr(targeting, 'candidate_points', ()))} | selected {selected_text} | "
+        f"score {getattr(targeting, 'selected_score', 0.0):.3f} | "
+        f"seed {getattr(targeting, 'seed', '-')}"
+    )
+
+
+def _pointer_line(frame: EngineFrame) -> str | None:
+    receipt = frame.last_execution_receipt
+    motion = receipt.pointer_motion if receipt is not None else None
+    if motion is None or motion.plan_count <= 0:
+        return None
+    correction = "-"
+    if motion.requested_target is not None and motion.settled_target is not None:
+        correction = (
+            f"{motion.settled_target.x - motion.requested_target.x:+d},"
+            f"{motion.settled_target.y - motion.requested_target.y:+d}"
+        )
+    return (
+        f"pointer: {motion.context or '-'} {motion.style or '-'} | "
+        f"{motion.direct_distance_px:.1f} px / "
+        f"{motion.planned_duration_seconds:.3f} s | "
+        f"steps {motion.executed_step_count}/{motion.planned_step_count} | "
+        f"correction {correction}"
+    )
+
+
+def _timing_line(timing: object | None) -> str | None:
+    if timing is None:
+        return None
+    return (
+        f"timing: pre {getattr(timing, 'pre_move_delay_seconds', 0.0):.3f} | "
+        f"settle {getattr(timing, 'settle_delay_seconds', 0.0):.3f} | "
+        f"click {getattr(timing, 'pre_click_delay_seconds', 0.0):.3f} | "
+        f"post {getattr(timing, 'post_action_delay_seconds', 0.0):.3f} | "
+        f"route {getattr(timing, 'route_pause_seconds', 0.0):.3f} s"
     )
 
 
@@ -467,6 +789,34 @@ class DebugOverlay:
     @staticmethod
     def _render(canvas: Any, scene: OverlayScene, canvas_bounds: ScreenBounds) -> None:
         canvas.delete("all")
+        for polyline in scene.polylines:
+            if len(polyline.points) < 2:
+                continue
+            coordinates = tuple(
+                coordinate
+                for point in polyline.points
+                for coordinate in (
+                    point.x - canvas_bounds.x,
+                    point.y - canvas_bounds.y,
+                )
+            )
+            canvas.create_line(
+                *coordinates,
+                fill=polyline.color,
+                width=polyline.width,
+                smooth=polyline.smooth,
+                splinesteps=24 if polyline.smooth else 12,
+            )
+            if polyline.label:
+                first = polyline.points[0]
+                canvas.create_text(
+                    first.x - canvas_bounds.x + 2,
+                    first.y - canvas_bounds.y - 2,
+                    anchor="sw",
+                    fill=polyline.color,
+                    text=polyline.label,
+                    font=("Segoe UI", 8, "bold"),
+                )
         for rectangle in scene.rectangles:
             bounds = rectangle.bounds
             left = bounds.x - canvas_bounds.x
@@ -489,6 +839,27 @@ class DebugOverlay:
                 text=rectangle.label,
                 font=("Segoe UI", 8, "bold"),
             )
+        for point in scene.points:
+            x = point.point.x - canvas_bounds.x
+            y = point.point.y - canvas_bounds.y
+            canvas.create_oval(
+                x - point.radius,
+                y - point.radius,
+                x + point.radius,
+                y + point.radius,
+                outline=point.color,
+                fill=point.color,
+                width=1,
+            )
+            if point.label:
+                canvas.create_text(
+                    x + point.radius + 2,
+                    y,
+                    anchor="w",
+                    fill=point.color,
+                    text=point.label,
+                    font=("Segoe UI", 8, "bold"),
+                )
         canvas.create_text(
             8,
             8,
@@ -573,6 +944,28 @@ def _frame_geometry_is_live(frame: EngineFrame, now: datetime) -> bool:
         and observation.source_coherent
         and _frame_age_seconds(frame, now)
         <= observation.max_source_age_millis / 1_000.0
+    )
+
+
+def _camera_geometry_is_current(
+    frame: EngineFrame,
+    camera: object | None,
+    *,
+    legacy_geometry_allowed: bool,
+) -> bool:
+    if camera is None:
+        return False
+    source_tick = getattr(camera, "source_tick", None)
+    geometry_frame_id = getattr(camera, "geometry_frame_id", None)
+    if source_tick is None and geometry_frame_id is None:
+        return legacy_geometry_allowed
+    observation = frame.observation
+    return bool(
+        observation is not None
+        and source_tick == observation.source_tick
+        and isinstance(geometry_frame_id, str)
+        and bool(geometry_frame_id)
+        and geometry_frame_id == observation.geometry_frame_id
     )
 
 
