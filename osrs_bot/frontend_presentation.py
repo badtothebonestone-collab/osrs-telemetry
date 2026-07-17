@@ -28,6 +28,7 @@ class PresentationState(str, Enum):
     DISCONNECTED = "DISCONNECTED"
     WAITING_FOR_NEXT_SCENE_UPDATE = WaitState.WAITING_FOR_NEXT_SCENE_UPDATE.value
     WAITING_FOR_SOURCE_COHERENCE = WaitState.WAITING_FOR_SOURCE_COHERENCE.value
+    ENDPOINT_BACKPRESSURE = WaitState.ENDPOINT_BACKPRESSURE.value
     INPUT_TRANSACTION_BUSY = WaitState.INPUT_TRANSACTION_BUSY.value
     CURSOR_FEEDBACK_SETTLING = WaitState.CURSOR_FEEDBACK_SETTLING.value
     ARDUINO_HEALTH_STALE = WaitState.ARDUINO_HEALTH_STALE.value
@@ -114,6 +115,7 @@ _TERMINAL_STATES = {
     PresentationState.SAFE_STOPPED,
 }
 _CURRENT_SOURCE_WAIT_STATES = {
+    PresentationState.ENDPOINT_BACKPRESSURE,
     PresentationState.INPUT_TRANSACTION_BUSY,
     PresentationState.CURSOR_FEEDBACK_SETTLING,
     PresentationState.ARDUINO_HEALTH_STALE,
@@ -549,6 +551,7 @@ def classify_frontend_presentation(
             PresentationState.ERROR,
             PresentationState.WAITING_FOR_NEXT_SCENE_UPDATE,
             PresentationState.WAITING_FOR_SOURCE_COHERENCE,
+            PresentationState.ENDPOINT_BACKPRESSURE,
             PresentationState.INPUT_TRANSACTION_BUSY,
             PresentationState.CURSOR_FEEDBACK_SETTLING,
             PresentationState.ARDUINO_HEALTH_STALE,
@@ -715,6 +718,8 @@ def _reconnect_guidance(state: PresentationState) -> str | None:
         return "Wait for the next fresh loaded-scene update from the bound source."
     if state is PresentationState.WAITING_FOR_SOURCE_COHERENCE:
         return "Wait for the bound telemetry sources to become coherent."
+    if state is PresentationState.ENDPOINT_BACKPRESSURE:
+        return "Wait for the bounded telemetry endpoint retry to complete."
     if state is PresentationState.INPUT_TRANSACTION_BUSY:
         return "The existing input transaction is still in progress."
     if state is PresentationState.CURSOR_FEEDBACK_SETTLING:

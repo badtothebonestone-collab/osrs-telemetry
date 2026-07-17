@@ -14,8 +14,9 @@ the FSM advances.
 
 `engine_frame.v1` includes:
 
-- task ID, state, status, definition/profile IDs, and bounded route/cycle
-  progress from the task's normal snapshot operation;
+- task ID, state, status, definition/profile IDs, bounded route/cycle progress,
+  and optional task-owned target-continuity evidence from the task's normal
+  snapshot operation;
 - source tick, capture time, frame/geometry identity, session, process, canvas/
   viewport bounds, and camera yaw/pitch/zoom from the immutable Observation,
   plus the configured desired zoom range and its typed classification;
@@ -150,6 +151,26 @@ diagnostic only. They may explain latency or a failed-closed wait, but raw timin
 never authorizes activation. `SafetyGate` continues to evaluate authoritative
 coverage/identity facts before `InputCoordinator`; no EngineFrame reader can
 turn either evidence object into a retry or input decision.
+
+## Target-continuity evidence
+
+`TaskSnapshot.target_continuity` is an optional frozen
+`TargetContinuityEvidence`. It serializes as
+`EngineFrame.task.targetContinuity` with exactly these additive fields:
+
+- `lockedTargetKey`;
+- `lockedTick`;
+- `lastSeenTick`;
+- `incompleteOmissionFrames`;
+- `retentionReason`; and
+- `lastUnlockReason`.
+
+A locked record requires a nonempty key, both nonnegative ticks with last-seen
+not before lock, and a nonempty retention reason. An unlocked record cannot
+retain lock ticks, omission frames, or retention reason, but may preserve the
+last unlock reason. This is diagnostic task-owned history: readers cannot
+retain, replace, unlock, or authorize the target. Generic tasks without target
+continuity serialize `null`.
 
 ## Candidate and safety evidence
 
@@ -293,24 +314,26 @@ from 0 through 1,000,000 and its total is bounded by 86,400,000,000,000 ms.
 frozen, nonnegative, ordered by the fixed phase vocabulary, and updated by
 returning a new value rather than mutating prior evidence.
 
-The exact eleven timing phases, in serialization order, are:
+The exact twelve timing phases, in serialization order, are:
 
 1. `observation_request_fetch`
-2. `source_coherence_freshness_wait`
-3. `task_decision`
-4. `safety_gate_evaluation`
-5. `input_lease_acquisition`
-6. `arduino_connect_negotiate_arm`
-7. `pointer_planning_feedback_settlement`
-8. `serial_write_acknowledgement`
-9. `post_action_fresh_observation_wait`
-10. `semantic_or_camera_verification`
-11. `final_cleanup`
+2. `endpoint_backpressure_wait`
+3. `source_coherence_freshness_wait`
+4. `task_decision`
+5. `safety_gate_evaluation`
+6. `input_lease_acquisition`
+7. `arduino_connect_negotiate_arm`
+8. `pointer_planning_feedback_settlement`
+9. `serial_write_acknowledgement`
+10. `post_action_fresh_observation_wait`
+11. `semantic_or_camera_verification`
+12. `final_cleanup`
 
-The exact eight wait states are:
+The exact nine wait states are:
 
 - `WAITING_FOR_NEXT_SCENE_UPDATE`;
 - `WAITING_FOR_SOURCE_COHERENCE`;
+- `ENDPOINT_BACKPRESSURE`;
 - `INPUT_TRANSACTION_BUSY`;
 - `CURSOR_FEEDBACK_SETTLING`;
 - `ARDUINO_HEALTH_STALE`;
@@ -320,8 +343,11 @@ The exact eight wait states are:
 
 Engine owners publish these states; the GUI does not infer execution waits from
 frame age. `WAITING_FOR_NEXT_SCENE_UPDATE`,
-`WAITING_FOR_SOURCE_COHERENCE`, `INPUT_TRANSACTION_BUSY`, and
-`CURSOR_FEEDBACK_SETTLING` are neutral expected/busy states, not fault aliases.
+`WAITING_FOR_SOURCE_COHERENCE`, `ENDPOINT_BACKPRESSURE`,
+`INPUT_TRANSACTION_BUSY`, and `CURSOR_FEEDBACK_SETTLING` are neutral
+expected/busy states, not fault aliases. `ENDPOINT_BACKPRESSURE` is emitted only
+for the typed retryable endpoint-busy response and is bounded to eight
+consecutive retries before runtime terminates the affected path.
 `SENSOR_STALE` is exact sensor safety truth. `PRESENTATION_FRAME_STALE` and
 `ARDUINO_HEALTH_STALE` are distinct passive-age facts.
 `ARDUINO_COMMAND_FAILED` is a real command-path failure and is presented
@@ -333,6 +359,13 @@ schema for their owner-produced portions. Command records may add bounded
 optional additions to existing wire formats; older EngineFrame and
 `input_transaction_receipt.v1` fixtures may omit them. Readers must use safe
 defaults rather than fabricating historical measurements.
+
+Live evidence subscribes to EngineFrame without performing JSON or filesystem
+work in the publisher callback. Its bounded 256-frame queue is drained by one
+daemon writer. `movement_targeting_live_receipt.v1.recorderQueue` records exact `capacity`,
+`highWater`, `droppedFrames`, and `writerThreadStopped` fields; writer errors are
+bounded separately. These receipt fields make recorder pressure and shutdown
+visible without turning recorder latency into EngineFrame publication latency.
 
 The compact execution contract remains structurally important:
 

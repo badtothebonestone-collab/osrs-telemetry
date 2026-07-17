@@ -71,6 +71,7 @@ from .task_contract import (
     TargetEvidence,
     TargetingDecisionEvidence,
     TimingDecisionEvidence,
+    TargetContinuityEvidence,
     TaskProgressSnapshot,
     TaskSnapshot,
     TaskStatus,
@@ -439,6 +440,7 @@ class WoodcutBankTask:
             route_step=route_step,
             route_progress=route_progress,
             cycle_progress=cycle_progress,
+            target_continuity=self._target_continuity_snapshot(),
         )
 
     def decide(self, observation: Observation) -> Decision:
@@ -1105,6 +1107,33 @@ class WoodcutBankTask:
                     observation,
                     action=self.definition.resource.selector.action,
                     rejected=((target, ("contradictory_target_identity",)),),
+                ),
+            )
+        if (
+            target is not None
+            and target_rejections == ("action_unavailable",)
+            and self._census_is_explicitly_incomplete(
+                self._scene_census(observation)
+            )
+        ):
+            if self._target_lock is not None:
+                self._target_lock.retained_reason = (
+                    "same immutable target retained while an incomplete row "
+                    "omits transient action readiness"
+                )
+            return self._wait(
+                observation,
+                "waiting for complete action readiness on the locked resource",
+                evidence=self._object_decision_evidence(
+                    observation,
+                    action=self.definition.resource.selector.action,
+                    rejected=(
+                        (
+                            target,
+                            target_rejections
+                            + ("incomplete_census_for_activation",),
+                        ),
+                    ),
                 ),
             )
         if target is None or target_rejections:
@@ -4417,6 +4446,21 @@ class WoodcutBankTask:
             self.binding.profile.cycle_goal,
         )
 
+    def _target_continuity_snapshot(self) -> TargetContinuityEvidence:
+        lock = self._target_lock
+        if lock is None:
+            return TargetContinuityEvidence(
+                last_unlock_reason=self._last_target_unlock_reason
+            )
+        return TargetContinuityEvidence(
+            locked_target_key=lock.key,
+            locked_tick=lock.locked_tick,
+            last_seen_tick=lock.last_seen_tick,
+            incomplete_omission_frames=lock.incomplete_omission_frames,
+            retention_reason=lock.retained_reason,
+            last_unlock_reason=self._last_target_unlock_reason,
+        )
+
     @staticmethod
     def _target_lock_matches(
         lock: TargetContinuityLock,
@@ -4428,7 +4472,6 @@ class WoodcutBankTask:
             and target.name == lock.name
             and target.kind == lock.kind
             and target.location == lock.location
-            and target.supports(lock.action)
         )
 
     def _lock_target(
@@ -4520,9 +4563,7 @@ class WoodcutBankTask:
             return "contradictory", reason, "contradictory_duplicate_identity"
 
         requested_priority_keys = tuple(
-            getattr(census, "requested_priority_object_keys", ())
-            or getattr(census, "reported_priority_object_keys", ())
-            or ()
+            getattr(census, "requested_priority_object_keys", ()) or ()
         )
         returned_priority_keys = tuple(
             getattr(census, "returned_priority_object_keys", ()) or ()

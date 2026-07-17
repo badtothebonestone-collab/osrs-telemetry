@@ -58,6 +58,7 @@ from osrs_bot.task_contract import (
     RejectedCandidateEvidence,
     RouteCandidateRejectionEvidence,
     RouteDecisionEvidence,
+    TargetContinuityEvidence,
     TargetEvidence,
     TargetingDecisionEvidence,
     TaskProgressSnapshot,
@@ -478,6 +479,14 @@ class EngineFrameTests(unittest.TestCase):
             route_step="castle_path_3",
             route_progress=route_progress,
             cycle_progress=cycle_progress,
+            target_continuity=TargetContinuityEvidence(
+                locked_target_key="tree:selected",
+                locked_tick=96,
+                last_seen_tick=100,
+                incomplete_omission_frames=1,
+                retention_reason="incomplete census retained exact identity",
+                last_unlock_reason="previous target authoritatively absent",
+            ),
         )
         observation = ObservationReference(
             100,
@@ -521,6 +530,17 @@ class EngineFrameTests(unittest.TestCase):
         self.assertEqual("castle_path_3", payload["task"]["routeStep"])
         self.assertEqual(3, payload["task"]["routeProgress"]["current"])
         self.assertEqual(0, payload["task"]["cycleProgress"]["current"])
+        self.assertEqual(
+            {
+                "lockedTargetKey": "tree:selected",
+                "lockedTick": 96,
+                "lastSeenTick": 100,
+                "incompleteOmissionFrames": 1,
+                "retentionReason": "incomplete census retained exact identity",
+                "lastUnlockReason": "previous target authoritatively absent",
+            },
+            payload["task"]["targetContinuity"],
+        )
         self.assertEqual("tree:selected", payload["selectedTarget"]["key"])
         self.assertEqual(16.0, payload["route"]["requestedTileDistance"])
         self.assertEqual(

@@ -30,6 +30,7 @@ from .safety import SafetyCheck
 from .task_contract import (
     Decision,
     RejectedCandidateEvidence,
+    TargetContinuityEvidence,
     TargetEvidence,
     TaskProgressSnapshot,
     TaskSnapshot,
@@ -842,7 +843,23 @@ def _task_dict(task: TaskSnapshot) -> dict[str, Any]:
         "routeStep": task.route_step,
         "routeProgress": _progress_dict(task.route_progress),
         "cycleProgress": _progress_dict(task.cycle_progress),
+        "targetContinuity": _target_continuity_dict(task.target_continuity),
         "blocker": task.blocker,
+    }
+
+
+def _target_continuity_dict(
+    evidence: TargetContinuityEvidence | None,
+) -> dict[str, Any] | None:
+    if evidence is None:
+        return None
+    return {
+        "lockedTargetKey": evidence.locked_target_key,
+        "lockedTick": evidence.locked_tick,
+        "lastSeenTick": evidence.last_seen_tick,
+        "incompleteOmissionFrames": evidence.incomplete_omission_frames,
+        "retentionReason": evidence.retention_reason,
+        "lastUnlockReason": evidence.last_unlock_reason,
     }
 
 

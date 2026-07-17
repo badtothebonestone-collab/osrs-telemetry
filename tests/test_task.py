@@ -4061,6 +4061,14 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(locked.key, task._target_lock.key)
         self.assertIn("retained", first.reason)
         self.assertIn("2/2", second.reason)
+        continuity = task.snapshot().target_continuity
+        self.assertIsNotNone(continuity)
+        self.assertEqual(locked.key, continuity.locked_target_key)
+        self.assertEqual(10, continuity.locked_tick)
+        self.assertEqual(10, continuity.last_seen_tick)
+        self.assertEqual(2, continuity.incomplete_omission_frames)
+        self.assertIn("frame 2/2", continuity.retention_reason)
+        self.assertIsNone(continuity.last_unlock_reason)
         self.assertEqual((locked.key,), task.observation_request().priority_object_keys)
 
         reappeared = task.decide(
@@ -4068,6 +4076,10 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.INTERACT_OBJECT, reappeared.action.kind)
         self.assertEqual(locked.key, reappeared.action.target_key)
+        continuity = task.snapshot().target_continuity
+        self.assertEqual(13, continuity.last_seen_tick)
+        self.assertEqual(0, continuity.incomplete_omission_frames)
+        self.assertEqual("fresh exact identity retained", continuity.retention_reason)
 
         exhausted_task = WoodcutBankTask()
         exhausted_task.decide(observation(objects=(locked,), tick=20))
@@ -4113,12 +4125,23 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.CHOP, task.progress.phase)
         self.assertIn("retained", retained.reason)
 
-        exact_absence = replace(
+        unsolicited_absence = replace(
             complete_but_not_authoritative,
             priority_absence_eligible=True,
         )
+        still_retained = task.decide(
+            observation(objects=(), tick=12, scene_census=unsolicited_absence)
+        )
+        self.assertEqual(TaskPhase.CHOP, task.progress.phase)
+        self.assertIsNotNone(task._target_lock)
+        self.assertIn("retained", still_retained.reason)
+
+        exact_absence = replace(
+            unsolicited_absence,
+            requested_priority_object_keys=(locked.key,),
+        )
         unlocked = task.decide(
-            observation(objects=(), tick=12, scene_census=exact_absence)
+            observation(objects=(), tick=13, scene_census=exact_absence)
         )
         self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
         self.assertIsNone(task.progress.target_key)
@@ -4128,6 +4151,14 @@ class WoodcutBankTaskTests(unittest.TestCase):
             ("authoritative_target_absence",),
             unlocked.evidence.rejected[0].rejection_codes,
         )
+        continuity = task.snapshot().target_continuity
+        self.assertIsNotNone(continuity)
+        self.assertIsNone(continuity.locked_target_key)
+        self.assertIsNone(continuity.locked_tick)
+        self.assertIsNone(continuity.last_seen_tick)
+        self.assertEqual(0, continuity.incomplete_omission_frames)
+        self.assertIsNone(continuity.retention_reason)
+        self.assertIn("authoritative exact-priority", continuity.last_unlock_reason)
 
     def test_explicit_raw_incompleteness_denies_object_activation_but_keeps_lock(self) -> None:
         locked = tree(key="tree:incomplete-activation")
@@ -4147,8 +4178,9 @@ class WoodcutBankTaskTests(unittest.TestCase):
             returned_priority_object_keys=(locked.key,),
         )
 
+        incomplete_row = replace(locked, actions=())
         denied = task.decide(
-            observation(objects=(locked,), tick=11, scene_census=incomplete)
+            observation(objects=(incomplete_row,), tick=11, scene_census=incomplete)
         )
 
         self.assertEqual(ActionKind.WAIT, denied.action.kind)
@@ -4156,7 +4188,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.CHOP, task.progress.phase)
         self.assertEqual(locked.key, task._target_lock.key)
         self.assertEqual(
-            ("incomplete_census_for_activation",),
+            ("action_unavailable", "incomplete_census_for_activation"),
             denied.evidence.rejected[0].rejection_codes,
         )
 

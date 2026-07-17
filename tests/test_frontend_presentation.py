@@ -281,6 +281,7 @@ class FrontendPresentationTests(unittest.TestCase):
                 "DISCONNECTED",
                 "WAITING_FOR_NEXT_SCENE_UPDATE",
                 "WAITING_FOR_SOURCE_COHERENCE",
+                "ENDPOINT_BACKPRESSURE",
                 "INPUT_TRANSACTION_BUSY",
                 "CURSOR_FEEDBACK_SETTLING",
                 "ARDUINO_HEALTH_STALE",

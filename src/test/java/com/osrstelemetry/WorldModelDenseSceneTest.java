@@ -89,6 +89,84 @@ public class WorldModelDenseSceneTest
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
+	public void mixedWarmProjectionBudgetsRemainRequestBounded()
+	{
+		Client client = denseClient(new AtomicInteger());
+		WorldModelCache cache = new WorldModelCache();
+		Map<String, Object> identity = Map.of(
+				"sessionId", "projection-budget-session",
+				"clientProcessId", 9876L,
+				"geometryFrameId", "projection-budget-geometry");
+
+		Map<String, Object> cold = cache.query(
+				client, List.of("scene_object_census"),
+				projectionRequest(8), 100L, 200L, identity);
+		Map<String, Object> coldPipeline = map(cold.get("pipeline"));
+		assertEquals(8, coldPipeline.get("projectedObjectCount"));
+		assertEquals(0, coldPipeline.get("projectionCacheHits"));
+		assertEquals(56L, projectionCapRows(census(cold)));
+
+		Map<String, Object> warmExpansion = cache.query(
+				client, List.of("scene_object_census"),
+				projectionRequest(16), 100L, 201L, identity);
+		Map<String, Object> expansionPipeline = map(warmExpansion.get("pipeline"));
+		assertEquals(8, expansionPipeline.get("projectedObjectCount"));
+		assertEquals(8, expansionPipeline.get("projectionCacheHits"));
+		assertEquals(48L, projectionCapRows(census(warmExpansion)));
+
+		Map<String, Object> warmContraction = cache.query(
+				client, List.of("scene_object_census"),
+				projectionRequest(4), 100L, 202L, identity);
+		Map<String, Object> contractionPipeline = map(warmContraction.get("pipeline"));
+		assertEquals(0, contractionPipeline.get("projectedObjectCount"));
+		assertEquals(4, contractionPipeline.get("projectionCacheHits"));
+		assertEquals(60L, projectionCapRows(census(warmContraction)));
+	}
+
+	@Test
+	public void returnedRowsAndPriorityAbsenceRemainFailClosedAtSmallBudgets()
+	{
+		AtomicInteger definitionLookups = new AtomicInteger();
+		Client client = denseClient(definitionLookups);
+		WorldModelCache cache = new WorldModelCache();
+		Map<String, Object> identity = Map.of(
+				"sessionId", "returned-budget-session",
+				"clientProcessId", 9876L,
+				"geometryFrameId", "returned-budget-geometry");
+
+		Map<String, Object> oversized = cache.query(
+				client, List.of("scene_object_census"),
+				Map.of("worldModel", Map.of(
+						"radiusTiles", 32,
+						"maxObjects", 10_000)),
+				100L, 200L, identity);
+		assertEquals(64, census(oversized).get("returned"));
+		assertEquals(64, map(oversized.get("pipeline")).get("enrichedObjectCount"));
+		assertEquals(64, definitionLookups.get());
+
+		Map<String, Object> one = cache.query(
+				client, List.of("scene_object_census"),
+				Map.of("worldModel", Map.of("radiusTiles", 4, "maxObjects", 1)),
+				101L, 201L, identity);
+		String knownKey = String.valueOf(
+				((List<?>) census(one).get("objects")).stream()
+						.map(value -> map(value).get("objectKey"))
+						.findFirst()
+						.orElseThrow());
+		Map<String, Object> omittedByResponseBudget = cache.query(
+				client, List.of("scene_object_census"),
+				Map.of("worldModel", Map.of(
+						"radiusTiles", 4,
+						"maxObjects", 0,
+						"priorityObjectKeys", List.of(knownKey))),
+				101L, 202L, identity);
+		Map<String, Object> omittedCensus = census(omittedByResponseBudget);
+		assertEquals(0, omittedCensus.get("returned"));
+		assertFalse((Boolean) omittedCensus.get("priorityAbsenceEligible"));
+	}
+
+	@Test
 	public void missingCenterUsesPlayerAndIncoherentExplicitCentersFailClosed()
 	{
 		Client client = denseClient(new AtomicInteger());
@@ -205,17 +283,40 @@ public class WorldModelDenseSceneTest
 		}
 
 		System.out.printf(
-				"DENSE_PIPELINE_BENCHMARK samples=30 refresh_ms_p50=%.3f refresh_ms_p95=%.3f refresh_ms_max=%.3f "
-						+ "hit_ms_p50=%.3f hit_ms_p95=%.3f hit_ms_max=%.3f payload_bytes_p50=%d payload_bytes_p95=%d payload_bytes_max=%d "
+				"DENSE_PIPELINE_BENCHMARK samples=30 refresh_ms_p50=%.3f refresh_ms_p95=%.3f refresh_ms_p99=%.3f refresh_ms_max=%.3f "
+						+ "hit_ms_p50=%.3f hit_ms_p95=%.3f hit_ms_p99=%.3f hit_ms_max=%.3f payload_bytes_p50=%d payload_bytes_p95=%d payload_bytes_p99=%d payload_bytes_max=%d "
 						+ "scanned=%s discovered=%s enriched=%s projected=%s returned=%s%n",
-				percentile(refreshMillis, 0.50), percentile(refreshMillis, 0.95), Collections.max(refreshMillis),
-				percentile(hitMillis, 0.50), percentile(hitMillis, 0.95), Collections.max(hitMillis),
-				percentileInt(payloadBytes, 0.50), percentileInt(payloadBytes, 0.95), Collections.max(payloadBytes),
+				percentile(refreshMillis, 0.50), percentile(refreshMillis, 0.95),
+				percentile(refreshMillis, 0.99), Collections.max(refreshMillis),
+				percentile(hitMillis, 0.50), percentile(hitMillis, 0.95),
+				percentile(hitMillis, 0.99), Collections.max(hitMillis),
+				percentileInt(payloadBytes, 0.50), percentileInt(payloadBytes, 0.95),
+				percentileInt(payloadBytes, 0.99), Collections.max(payloadBytes),
 				map(last.get("pipeline")).get("scannedTiles"),
 				map(last.get("pipeline")).get("discoveredObjectCount"),
 				map(last.get("pipeline")).get("enrichedObjectCount"),
 				map(last.get("pipeline")).get("projectedObjectCount"),
 				map(last.get("pipeline")).get("returnedObjectCount"));
+	}
+
+	private static Map<String, Object> projectionRequest(int maxProjectionObjects)
+	{
+		return Map.of(
+				"worldModel", Map.of(
+						"radiusTiles", 32,
+						"maxObjects", 64,
+						"maxProjectionObjects", maxProjectionObjects,
+						"includeProjection", true,
+						"includeCollision", false));
+	}
+
+	private static long projectionCapRows(Map<String, Object> census)
+	{
+		return ((List<?>) census.get("objects")).stream()
+				.map(WorldModelDenseSceneTest::map)
+				.map(row -> map(row.get("projection")))
+				.filter(projection -> "projection_cap_hit".equals(projection.get("reason")))
+				.count();
 	}
 
 	private static Client denseClient(AtomicInteger definitionLookups)

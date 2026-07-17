@@ -17,6 +17,7 @@ from osrs_bot.task_contract import (
     ObservationRequest,
     RejectedCandidateEvidence,
     Task,
+    TargetContinuityEvidence,
     TargetEvidence,
     TaskProgressSnapshot,
     TaskSnapshot,
@@ -76,6 +77,13 @@ class TaskContractTests(unittest.TestCase):
         rejected = RejectedCandidateEvidence(target, ("aim_point_occluded",))
         evidence = DecisionEvidence(selected=target, eligible=(target,))
         progress = TaskProgressSnapshot("cycles", 0, 1)
+        continuity = TargetContinuityEvidence(
+            locked_target_key="target",
+            locked_tick=5,
+            last_seen_tick=7,
+            incomplete_omission_frames=1,
+            retention_reason="explicitly incomplete census retained target",
+        )
         decision = Decision("waiting", "no_action_needed", _wait_action(), evidence)
         snapshot = TaskSnapshot(
             "task-1",
@@ -87,6 +95,7 @@ class TaskContractTests(unittest.TestCase):
             route_step="west_path_1",
             route_progress=TaskProgressSnapshot("route", 1, 3),
             cycle_progress=progress,
+            target_continuity=continuity,
         )
 
         with self.assertRaises(FrozenInstanceError):
@@ -103,6 +112,8 @@ class TaskContractTests(unittest.TestCase):
             rejected.rejection_codes = ()  # type: ignore[misc]
         with self.assertRaises(FrozenInstanceError):
             progress.current = 1  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            continuity.last_seen_tick = 8  # type: ignore[misc]
         self.assertFalse(hasattr(request, "__dict__"))
         self.assertFalse(hasattr(decision, "__dict__"))
         self.assertFalse(hasattr(snapshot, "__dict__"))
@@ -110,6 +121,7 @@ class TaskContractTests(unittest.TestCase):
         self.assertFalse(hasattr(target, "__dict__"))
         self.assertFalse(hasattr(rejected, "__dict__"))
         self.assertFalse(hasattr(progress, "__dict__"))
+        self.assertFalse(hasattr(continuity, "__dict__"))
         self.assertFalse(hasattr(decision.action, "__dict__"))
         self.assertEqual(WorldPoint(3195, 3248, 0), target.world_location)
         self.assertEqual(2, target.distance)
@@ -183,6 +195,17 @@ class TaskContractTests(unittest.TestCase):
             ),
             lambda: TaskSnapshot(
                 "task", TaskStatus.RUNNING, "state", route_progress="route"
+            ),
+            lambda: TargetContinuityEvidence(locked_target_key="target"),
+            lambda: TargetContinuityEvidence(incomplete_omission_frames=1),
+            lambda: TargetContinuityEvidence(
+                locked_target_key="target",
+                locked_tick=7,
+                last_seen_tick=6,
+                retention_reason="retained",
+            ),
+            lambda: TaskSnapshot(
+                "task", TaskStatus.RUNNING, "state", target_continuity="target"
             ),
         )
         for factory in invalid_factories:

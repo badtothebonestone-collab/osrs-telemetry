@@ -179,35 +179,50 @@ phase-specific ObservationRequest
   -> task decision -> SafetyGate -> InputCoordinator
 ```
 
-`WorldModelCache` retains at most four exact-source raw snapshots, 256 enriched
-rows and 128 projections per snapshot. Raw identity includes source tick,
-session, process, geometry frame, plane, scene base, dirty sequence, anchor,
-radius, and requested raw capabilities. Same-source requests with different
-priority ordering or smaller enrichment/projection budgets can reuse the raw
-census; any identity or raw-shape change refreshes it. No wall-clock TTL can
-force a redundant scan within the same source identity.
+`WorldModelCache` retains at most four exact-source raw snapshots, 256 cached
+enriched rows and 128 cached projections per snapshot. The raw identity census
+has a 10,000-row hard cap; each response may return and definition-enrich at
+most 64 rows. Raw identity includes source tick, session, process, geometry
+frame, plane, scene base, dirty sequence, anchor, radius, and requested raw
+capabilities. Same-source requests with different priority ordering or smaller
+enrichment/projection budgets can reuse the raw census; any identity or raw-
+shape change refreshes it. Per-request projection budget is consumed before a
+cached or newly calculated projection can enter the response, so warm reuse
+cannot bypass a smaller request. No wall-clock TTL can force a redundant scan
+within the same source identity.
 
 RuneLite client-thread admission is globally bounded to one active and one
 newest pending query. Identical keys coalesce, newer distinct pending work
 supersedes the older request, expired work is discarded before execution, and a
 result arriving after its deadline is not accepted. The HTTP executor has four
 workers and eight pending slots, while only one expensive snapshot may be
-active; overlap returns retryable `503 endpoint_busy`. JSON encoding is exactly
-two passes and the final byte array is reused for the response write.
+active; overlap returns retryable `503 endpoint_busy`. Python recognizes only
+the typed retryable busy response, publishes neutral `ENDPOINT_BACKPRESSURE`
+wait/timing evidence, and does not spend the ordinary observation-error budget.
+At most eight consecutive busy responses are retried; the next one terminates
+the affected runtime path. Malformed request JSON
+returns `400`, and endpoint admission is released for the next request. JSON
+encoding is exactly two passes and the final byte array is reused for the
+response write.
 
 Scene discovery captures immutable identity and location before it consults
 definitions, actions, or projection. Exact duplicate keys resolve
 deterministically. Contradictory identity signatures are quarantined whole, so
 no row can borrow geometry, actions, or projection from another object. Python
 performs a bounded read/parse and constructs one immutable `SceneIndex` for
-constant-time stable-key and preindexed object-ID lookup.
+constant-time stable-key and preindexed object-ID lookup. A planned fetch also
+requires its returned center, anchor source, radius, purpose, and exact priority
+sets to match the request before the response can grant completeness or absence
+authority; this prevents cross-request contamination under concurrent polling.
 
 Raw coverage completeness is distinct from response-row capping. Ordinary
 absence requires a complete raw census, no response omission, and no relevant
 contradiction. An exact requested priority key may prove its own absence from a
-complete raw census even when unrelated rows were capped. Incomplete, malformed,
-or contradictory evidence remains fail-closed; performance counters and timing
-are diagnostic only and never authorize activation.
+complete raw census even when unrelated rows were capped, but not when that
+present matching raw row was itself omitted by the response-row cap. Incomplete,
+malformed, mismatched, or contradictory evidence remains fail-closed;
+performance counters and timing are diagnostic only and never authorize
+activation.
 
 ### Task
 
@@ -566,9 +581,13 @@ handlers, target selection, SafetyGate calls, or Arduino imports, and an overlay
 failure cannot alter runtime control.
 
 The recorder, diagnostic CLI, and implemented GUI consume immutable read
-contracts. Readers may
-format or filter it but may not reselect a target, recalculate safety, mutate
-the FSM, import Arduino control, or authorize input.
+contracts. Readers may format or filter them but may not reselect a target,
+recalculate safety, mutate the FSM, import Arduino control, or authorize input.
+The live recorder's EngineFrame listener performs only a nonblocking enqueue to
+a 256-frame queue. One daemon writer owns JSON encoding, the open file, and
+flushes off the publication path. Queue high-water, dropped frames, bounded
+writer errors, and bounded-finish writer shutdown are explicit receipt evidence;
+slow storage cannot turn a subscriber callback into runtime latency.
 
 ## Demonstration evidence
 

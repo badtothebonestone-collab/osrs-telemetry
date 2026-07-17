@@ -22,6 +22,7 @@ MAX_TILE_PROJECTIONS = 16
 MAX_PRIORITY_OBJECT_IDS = 32
 MAX_PRIORITY_OBJECT_KEY_LENGTH = 256
 MAX_SNAPSHOT_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_SNAPSHOT_ERROR_RESPONSE_BYTES = 64 * 1024
 MAX_SCENE_OBJECT_ROWS = 64
 MAX_MENU_ENTRY_ROWS = 16
 MAX_INVENTORY_ITEM_ROWS = 28
@@ -40,6 +41,20 @@ class ObservationError(RuntimeError):
     pass
 class ObservationRequestError(ObservationError): pass
 class ObservationTransportError(ObservationError): pass
+
+
+class ObservationBackpressureError(ObservationTransportError):
+    """A bounded, retryable endpoint-admission rejection."""
+
+    def __init__(self, status_code: int, error_code: str) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.retryable = True
+        super().__init__(
+            f"snapshot endpoint returned HTTP {status_code} ({error_code})"
+        )
+
+
 class ObservationDecodeError(ObservationError): pass
 class ObservationSchemaError(ObservationError): pass
 
@@ -49,6 +64,15 @@ class _TransportEvidence:
     response_bytes: int
     http_millis: float
     decode_millis: float
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedResponseContract:
+    center_world_location: WorldPoint | None
+    radius_tiles: int
+    purpose: str
+    priority_object_ids: tuple[int, ...]
+    priority_object_keys: tuple[str, ...]
 
 
 class _SnapshotPayload(dict[str, Any]):
@@ -1269,6 +1293,8 @@ def _scene_census_evidence(
     object_evidence: _ObjectParseEvidence,
     requested_priority_object_ids: tuple[int, ...],
     requested_priority_object_keys: tuple[str, ...],
+    *,
+    strict_priority_request_match: bool = False,
 ) -> SceneCensusEvidence:
     census = _payload(payloads, "scene_object_census")
     if not census:
@@ -1413,14 +1439,22 @@ def _scene_census_evidence(
         if priority_key_metadata_present
         else ()
     )
-    if requested_priority_object_keys and priority_key_metadata_present and (
-        reported_priority_keys != requested_priority_object_keys
+    priority_key_request_mismatch = (
+        priority_key_metadata_present
+        and reported_priority_keys != requested_priority_object_keys
+    )
+    priority_id_request_mismatch = (
+        priority_id_metadata_present
+        and reported_priority_ids != requested_priority_object_ids
+    )
+    if priority_key_request_mismatch and (
+        strict_priority_request_match or requested_priority_object_keys
     ):
         raise ObservationSchemaError(
             "scene_object_census priorityObjectKeys disagree with the request"
         )
-    if requested_priority_object_ids and priority_id_metadata_present and (
-        reported_priority_ids != requested_priority_object_ids
+    if priority_id_request_mismatch and (
+        strict_priority_request_match or requested_priority_object_ids
     ):
         raise ObservationSchemaError(
             "scene_object_census priorityObjectIds disagree with the request"
@@ -1539,6 +1573,11 @@ def _scene_census_evidence(
         requested_priority_object_keys and not priority_key_metadata_present
     ):
         priority_absence_eligible = False
+    if priority_id_request_mismatch or priority_key_request_mismatch:
+        # Legacy readers may inspect a stale or foreign response, but its
+        # unsolicited priority tuple can never authorize negative proof.
+        priority_absence_eligible = False
+
     source_contradictory_duplicate_count = _nonnegative_integer(
         census.get("contradictoryDuplicateCount"),
         "scene_object_census.contradictoryDuplicateCount",
@@ -1928,11 +1967,50 @@ def _observation_pipeline_evidence(
     )
 
 
+def _validate_planned_response_contract(
+    contract: _PlannedResponseContract,
+    location: WorldPoint | None,
+    scene_census: SceneCensusEvidence,
+    pipeline: ObservationPipelineEvidence,
+) -> None:
+    if not scene_census.metadata_present:
+        raise ObservationSchemaError(
+            "planned response is missing scene census contract metadata"
+        )
+
+    expected_center = contract.center_world_location or location
+    if expected_center is None:
+        raise ObservationSchemaError(
+            "planned player-anchored response has no player location"
+        )
+    expected_anchor_source = (
+        "explicit" if contract.center_world_location is not None else "player"
+    )
+    if scene_census.center_world_location != expected_center:
+        raise ObservationSchemaError(
+            "scene_object_census.centerWorldLocation disagrees with the planned request"
+        )
+    if scene_census.anchor_source != expected_anchor_source:
+        raise ObservationSchemaError(
+            "scene_object_census.anchorSource disagrees with the planned request"
+        )
+    if scene_census.radius_tiles != contract.radius_tiles:
+        raise ObservationSchemaError(
+            "scene_object_census.radiusTiles disagrees with the planned request"
+        )
+    if pipeline.query_purpose != contract.purpose:
+        raise ObservationSchemaError(
+            "pipeline.queryPurpose disagrees with the planned request"
+        )
+
+
 def parse_observation(
     value: Mapping[str, Any],
     tile_projections: Iterable[tuple[str, WorldPoint]] | None = None,
     priority_object_ids: Iterable[int] | None = None,
     priority_object_keys: Iterable[str] | None = None,
+    *,
+    _planned_response_contract: _PlannedResponseContract | None = None,
 ) -> Observation:
     parse_started = perf_counter()
     root = _mapping(value, "snapshot response")
@@ -2074,12 +2152,20 @@ def parse_observation(
         object_evidence,
         requested_priority_ids,
         requested_priority_keys,
+        strict_priority_request_match=_planned_response_contract is not None,
     )
     pipeline = replace(
         _observation_pipeline_evidence(root, frame),
         parse_millis=(perf_counter() - parse_started) * 1000.0,
         index_millis=index_millis,
     )
+    if _planned_response_contract is not None:
+        _validate_planned_response_contract(
+            _planned_response_contract,
+            location,
+            scene_census,
+            pipeline,
+        )
     return Observation(player=player, location=location, plane=location.plane if location else None,
                        inventory=inventory, nearby_objects=nearby_objects,
                        menus=menus, widgets=widgets,
@@ -2145,6 +2231,13 @@ class ObservationClient:
         tiles = _normalize_tiles(request.tile_projections)
         object_ids = _normalize_priority_object_ids(request.priority_object_ids)
         object_keys = _normalize_priority_object_keys(request.priority_object_keys)
+        response_contract = _PlannedResponseContract(
+            center_world_location=request.center_world_location,
+            radius_tiles=32 if request.radius_tiles is None else request.radius_tiles,
+            purpose=request.purpose,
+            priority_object_ids=object_ids,
+            priority_object_keys=object_keys,
+        )
         payload = self._post_snapshot(
             build_snapshot_request(
                 tiles,
@@ -2157,7 +2250,13 @@ class ObservationClient:
                 purpose=request.purpose,
             )
         )
-        return parse_observation(payload, tiles, object_ids, object_keys)
+        return parse_observation(
+            payload,
+            tiles,
+            object_ids,
+            object_keys,
+            _planned_response_contract=response_contract,
+        )
 
     def fetch_demonstration_evidence(
         self,
@@ -2216,7 +2315,40 @@ class ObservationClient:
                         )
                 raw = response.read(MAX_SNAPSHOT_RESPONSE_BYTES + 1)
         except HTTPError as exc:
-            raise ObservationTransportError(f"snapshot endpoint returned HTTP {exc.code}") from exc
+            error_payload: Any = None
+            if exc.code == 503:
+                try:
+                    error_raw = exc.read(MAX_SNAPSHOT_ERROR_RESPONSE_BYTES + 1)
+                    if (
+                        isinstance(error_raw, bytes)
+                        and len(error_raw) <= MAX_SNAPSHOT_ERROR_RESPONSE_BYTES
+                    ):
+                        error_payload = json.loads(
+                            error_raw.decode("utf-8"),
+                            parse_constant=lambda constant: (
+                                _ for _ in ()
+                            ).throw(ValueError(constant)),
+                        )
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    ValueError,
+                    RecursionError,
+                ):
+                    error_payload = None
+            if (
+                isinstance(error_payload, Mapping)
+                and error_payload.get("errorCode") == "endpoint_busy"
+                and error_payload.get("retryable") is True
+            ):
+                raise ObservationBackpressureError(
+                    status_code=exc.code,
+                    error_code="endpoint_busy",
+                ) from None
+            raise ObservationTransportError(
+                f"snapshot endpoint returned HTTP {exc.code}"
+            ) from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise ObservationTransportError(f"snapshot endpoint unavailable: {exc}") from exc
         http_millis = (perf_counter() - http_started) * 1000.0

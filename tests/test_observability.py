@@ -21,6 +21,7 @@ class ObservabilityEvidenceTests(unittest.TestCase):
         expected = (
             "WAITING_FOR_NEXT_SCENE_UPDATE",
             "WAITING_FOR_SOURCE_COHERENCE",
+            "ENDPOINT_BACKPRESSURE",
             "INPUT_TRANSACTION_BUSY",
             "CURSOR_FEEDBACK_SETTLING",
             "ARDUINO_HEALTH_STALE",
@@ -36,6 +37,7 @@ class ObservabilityEvidenceTests(unittest.TestCase):
         self.assertEqual(
             (
                 "observation_request_fetch",
+                "endpoint_backpressure_wait",
                 "source_coherence_freshness_wait",
                 "task_decision",
                 "safety_gate_evaluation",

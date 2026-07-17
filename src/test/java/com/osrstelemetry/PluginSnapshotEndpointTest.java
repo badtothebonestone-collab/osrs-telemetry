@@ -635,6 +635,26 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
+	public void malformedJsonReturnsBadRequestAndReleasesAdmissionGate() throws Exception
+	{
+		PluginSnapshotEndpoint endpoint = endpoint(canonicalCache());
+		endpoint.start();
+		try
+		{
+			assertEquals(400, httpStatus(endpoint, "POST", "/snapshot", "{"));
+			assertEquals(200, httpStatus(
+					endpoint,
+					"POST",
+					"/snapshot",
+					gson.toJson(Map.of("needs", List.of("baseline")))));
+		}
+		finally
+		{
+			endpoint.close();
+		}
+	}
+
+	@Test
 	public void concurrentSnapshotOverloadFailsFastWithBoundedQueueDiagnostics() throws Exception
 	{
 		CountDownLatch providerEntered = new CountDownLatch(1);

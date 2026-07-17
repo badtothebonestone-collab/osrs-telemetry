@@ -38,6 +38,7 @@ from osrs_bot.model import (
     WidgetObservation,
     WorldPoint,
 )
+from osrs_bot.observation import ObservationBackpressureError
 from osrs_bot.observability import TimingPhase, WaitState
 from osrs_bot.runtime import (
     RuntimeControl,
@@ -971,6 +972,108 @@ class TaskRuntimeTests(unittest.TestCase):
                 )
                 self.assertIn(expected, observed)
                 self.assertNotIn(WaitState.ARDUINO_COMMAND_FAILED, observed)
+
+    def test_retryable_endpoint_backpressure_waits_without_spending_observation_budget(self) -> None:
+        publisher = _RecordingPublisher()
+        sleeps: list[float] = []
+        client = _Client(
+            ObservationBackpressureError(503, "endpoint_busy"),
+            _observation(10),
+        )
+        runtime = TaskRuntime(
+            client,
+            _Task([_wait(10)]),
+            _Verifier(None),
+            configuration=replace(DEFAULT_RUNTIME_CONFIG, max_observations=1),
+            frame_publisher=publisher,
+            sleep=sleeps.append,
+        )
+
+        result = runtime.run()
+
+        self.assertEqual("LIMIT", result.status)
+        self.assertEqual(1, result.observations)
+        self.assertEqual([], client.results)
+        self.assertGreaterEqual(len(sleeps), 1)
+        states = tuple(
+            frame.observability.wait_state for frame in publisher.frames
+        )
+        self.assertIn(WaitState.ENDPOINT_BACKPRESSURE, states)
+        backpressure_timing = result.engine_frame.observability.timing.for_phase(
+            TimingPhase.ENDPOINT_BACKPRESSURE_WAIT
+        )
+        self.assertIsNotNone(backpressure_timing)
+        self.assertEqual(1, backpressure_timing.count)
+
+    def test_verification_backpressure_waits_for_a_fresh_candidate(self) -> None:
+        decision, _verification = _executable(10)
+        passed = VerificationResult(
+            VerificationStatus.PASS,
+            "verified",
+            Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 11),
+        )
+        publisher = _RecordingPublisher()
+        task = _Task([decision])
+        runtime = TaskRuntime(
+            _Client(
+                _observation(10),
+                ObservationBackpressureError(503, "endpoint_busy"),
+                _observation(11),
+            ),
+            task,
+            _Verifier(passed),
+            _ActionInterface(_sent_execution(decision.action, 10, 11)),
+            configuration=replace(DEFAULT_RUNTIME_CONFIG, max_observations=2),
+            frame_publisher=publisher,
+            sleep=lambda _seconds: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual(2, result.observations)
+        self.assertEqual([passed], task.applied)
+        self.assertIn(
+            WaitState.ENDPOINT_BACKPRESSURE,
+            tuple(
+                frame.observability.wait_state
+                for frame in publisher.frames
+            ),
+        )
+        self.assertIsNotNone(
+            result.engine_frame.observability.timing.for_phase(
+                TimingPhase.ENDPOINT_BACKPRESSURE_WAIT
+            )
+        )
+
+    def test_endpoint_backpressure_storm_is_bounded_and_terminal(self) -> None:
+        client = _Client(
+            *[
+                ObservationBackpressureError(503, "endpoint_busy")
+                for _ in range(9)
+            ]
+        )
+        publisher = _RecordingPublisher()
+        runtime = TaskRuntime(
+            client,
+            _Task([_wait(10)]),
+            _Verifier(None),
+            frame_publisher=publisher,
+            sleep=lambda _seconds: None,
+        )
+
+        result = runtime.run()
+
+        self.assertEqual("ERROR", result.status)
+        self.assertEqual(0, result.observations)
+        self.assertIn("8-retry budget", result.reason)
+        self.assertEqual([], client.results)
+        self.assertIn(
+            WaitState.ENDPOINT_BACKPRESSURE,
+            tuple(
+                frame.observability.wait_state
+                for frame in publisher.frames
+            ),
+        )
 
     def test_runtime_records_additive_phase_timing_without_control_clock_reads(self) -> None:
         evidence_value = 0.0

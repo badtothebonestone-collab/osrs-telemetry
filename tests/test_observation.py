@@ -9,14 +9,17 @@ from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from osrs_bot.model import ScreenBounds, ScreenPoint, WorldPoint
 from osrs_bot.observation import (
     CANONICAL_NEEDS,
     DEMONSTRATION_NEEDS,
     MAX_SCENE_OBJECT_ROWS,
+    MAX_SNAPSHOT_ERROR_RESPONSE_BYTES,
     MAX_SNAPSHOT_RESPONSE_BYTES,
     DemonstrationEvidenceSnapshot,
+    ObservationBackpressureError,
     ObservationClient,
     ObservationDecodeError,
     ObservationRequestError,
@@ -100,6 +103,39 @@ def add_scene_census_v2(
     return payload
 
 
+def add_planned_response_contract(
+    payload: dict,
+    request: ObservationRequest,
+) -> dict:
+    payload = add_scene_census_v2(
+        payload,
+        priority_object_ids=request.priority_object_ids,
+        priority_object_keys=request.priority_object_keys,
+    )
+    player = payload["payloads"]["baseline"]["player"]
+    center = request.center_world_location or WorldPoint(
+        player["worldX"],
+        player["worldY"],
+        player["plane"],
+    )
+    payload["payloads"]["scene_object_census"].update(
+        centerWorldLocation={
+            "x": center.x,
+            "y": center.y,
+            "plane": center.plane,
+        },
+        anchorSource=(
+            "explicit" if request.center_world_location is not None else "player"
+        ),
+        radiusTiles=32 if request.radius_tiles is None else request.radius_tiles,
+    )
+    payload["pipeline"] = {
+        "schema": "world_model_pipeline.v1",
+        "queryPurpose": request.purpose,
+    }
+    return payload
+
+
 class FakeResponse:
     def __init__(self, body: bytes) -> None:
         self.body = body
@@ -109,6 +145,9 @@ class FakeResponse:
         return self
 
     def __exit__(self, *_args: object) -> None:
+        return None
+
+    def close(self) -> None:
         return None
 
     def read(self, size: int = -1) -> bytes:
@@ -1124,9 +1163,6 @@ class ObservationClientTests(unittest.TestCase):
 
     @patch("osrs_bot.observation.urlopen")
     def test_fetch_planned_transmits_exact_lock_and_budget(self, mocked_open) -> None:
-        mocked_open.return_value = FakeResponse(
-            json.dumps(load_fixture()).encode("utf-8")
-        )
         plan = ObservationRequest(
             priority_object_ids=(1276,),
             priority_object_keys=("exact:tree",),
@@ -1136,6 +1172,8 @@ class ObservationClientTests(unittest.TestCase):
             max_projection_objects=8,
             purpose="resource_target_verification",
         )
+        payload = add_planned_response_contract(load_fixture(), plan)
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
 
         observation = ObservationClient(auth_token="secret").fetch_planned(plan)
 
@@ -1149,6 +1187,121 @@ class ObservationClientTests(unittest.TestCase):
             ("exact:tree",),
             observation.scene_census.requested_priority_object_keys,
         )
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_accepts_player_anchor_and_default_radius(
+        self,
+        mocked_open,
+    ) -> None:
+        plan = ObservationRequest()
+        payload = add_planned_response_contract(load_fixture(), plan)
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+
+        observation = ObservationClient().fetch_planned(plan)
+
+        self.assertEqual(
+            observation.location,
+            observation.scene_census.center_world_location,
+        )
+        self.assertEqual("player", observation.scene_census.anchor_source)
+        self.assertEqual(32, observation.scene_census.radius_tiles)
+        self.assertEqual("unspecified", observation.pipeline.query_purpose)
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_rejects_census_and_pipeline_shape_mismatch(
+        self,
+        mocked_open,
+    ) -> None:
+        plan = ObservationRequest(
+            center_world_location=WorldPoint(3200, 3200, 0),
+            radius_tiles=4,
+            purpose="resource_target_verification",
+        )
+        valid_payload = add_planned_response_contract(load_fixture(), plan)
+        cases = (
+            (
+                "census",
+                "centerWorldLocation",
+                {"x": 3201, "y": 3200, "plane": 0},
+                "centerWorldLocation",
+            ),
+            ("census", "anchorSource", "player", "anchorSource"),
+            ("census", "radiusTiles", 5, "radiusTiles"),
+            (
+                "pipeline",
+                "queryPurpose",
+                "different_purpose",
+                "queryPurpose",
+            ),
+        )
+
+        for section, field, value, error_path in cases:
+            with self.subTest(field=field):
+                payload = copy.deepcopy(valid_payload)
+                target = (
+                    payload["payloads"]["scene_object_census"]
+                    if section == "census"
+                    else payload["pipeline"]
+                )
+                target[field] = value
+                mocked_open.return_value = FakeResponse(
+                    json.dumps(payload).encode("utf-8")
+                )
+
+                with self.assertRaisesRegex(
+                    ObservationSchemaError, error_path
+                ):
+                    ObservationClient().fetch_planned(plan)
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_unsolicited_priorities_never_grant_negative_proof(
+        self,
+        mocked_open,
+    ) -> None:
+        plan = ObservationRequest(
+            center_world_location=WorldPoint(3200, 3200, 0),
+            radius_tiles=4,
+            purpose="resource_target_verification",
+        )
+        valid_payload = add_planned_response_contract(load_fixture(), plan)
+        tree_key = "tree:3193:3244:1276"
+        cases = (
+            (
+                "ids",
+                "priorityObjectIds",
+                {
+                    "priorityObjectIds": [1276],
+                    "returnedPriorityObjectIds": [1276],
+                    "priorityObjectsComplete": True,
+                },
+            ),
+            (
+                "keys",
+                "priorityObjectKeys",
+                {
+                    "priorityObjectKeys": [tree_key],
+                    "returnedPriorityObjectKeys": [tree_key],
+                    "priorityObjectsComplete": True,
+                },
+            ),
+        )
+
+        for label, error_path, unsolicited in cases:
+            with self.subTest(label=label):
+                payload = copy.deepcopy(valid_payload)
+                payload["payloads"]["scene_object_census"].update(unsolicited)
+                encoded = json.dumps(payload).encode("utf-8")
+                mocked_open.return_value = FakeResponse(encoded)
+                with self.assertRaisesRegex(
+                    ObservationSchemaError, error_path
+                ):
+                    ObservationClient().fetch_planned(plan)
+
+                mocked_open.return_value = FakeResponse(encoded)
+                legacy = ObservationClient().fetch()
+                self.assertFalse(
+                    legacy.scene_census.priority_absence_eligible
+                )
 
     @patch("osrs_bot.observation.urlopen")
     def test_explicitly_disables_demonstration_camera_capture(self, mocked_open) -> None:
@@ -1263,6 +1416,41 @@ class ObservationClientTests(unittest.TestCase):
         mocked_open.return_value = FakeResponse(b"{not valid json")
         with self.assertRaisesRegex(ObservationDecodeError, "invalid JSON"):
             ObservationClient().fetch()
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_endpoint_busy_503_raises_typed_bounded_error(
+        self,
+        mocked_open,
+    ) -> None:
+        error_body = FakeResponse(
+            json.dumps(
+                {
+                    "errorCode": "endpoint_busy",
+                    "retryable": True,
+                    "message": "retry with backoff",
+                    "token": "must-not-leak",
+                }
+            ).encode("utf-8")
+        )
+        mocked_open.side_effect = HTTPError(
+            "http://127.0.0.1:8893/snapshot",
+            503,
+            "Service Unavailable",
+            {},
+            error_body,
+        )
+
+        with self.assertRaises(ObservationBackpressureError) as caught:
+            ObservationClient(auth_token="also-must-not-leak")._post_snapshot({})
+
+        self.assertEqual(503, caught.exception.status_code)
+        self.assertEqual("endpoint_busy", caught.exception.error_code)
+        self.assertTrue(caught.exception.retryable)
+        self.assertNotIn("must-not-leak", str(caught.exception))
+        self.assertEqual(
+            MAX_SNAPSHOT_ERROR_RESPONSE_BYTES + 1,
+            error_body.read_size,
+        )
 
     @patch("osrs_bot.observation.urlopen")
     def test_snapshot_transport_reads_at_most_limit_plus_one(self, mocked_open) -> None:

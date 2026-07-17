@@ -44,8 +44,9 @@ class WorldModelCache
 {
 	static final String SCHEMA = "world_model_snapshot.v1";
 	private static final String QUERY_SCHEMA = "world_model_query_response.v1";
-	private static final int DEFAULT_MAX_OBJECTS = 160;
-	private static final int HARD_MAX_OBJECTS = 10000;
+	private static final int DEFAULT_MAX_OBJECTS = 64;
+	private static final int HARD_MAX_RETURNED_OBJECTS = 64;
+	private static final int HARD_MAX_CENSUS_OBJECTS = 10000;
 	private static final int DEFAULT_RADIUS_TILES = 48;
 	private static final int HARD_RADIUS_TILES = 96;
 	private static final int DEFAULT_MAX_COLLISION_TILES = 4096;
@@ -607,7 +608,7 @@ class WorldModelCache
 			int orientation)
 	{
 		snapshot.discoveredObjectCount++;
-		if (snapshot.objects.size() >= HARD_MAX_OBJECTS)
+		if (snapshot.objects.size() >= HARD_MAX_CENSUS_OBJECTS)
 		{
 			snapshot.objectCensusCapHit = true;
 			return;
@@ -678,17 +679,17 @@ class WorldModelCache
 	{
 		Map<String, Object> record = new LinkedHashMap<>(enriched);
 		String key = String.valueOf(record.get("objectKey"));
+		if (!queryWork.projectionBudget.tryConsume())
+		{
+			snapshot.projectionCapHit = true;
+			record.put("projection", projectionUnavailable("projection_cap_hit"));
+			return record;
+		}
 		Map<String, Object> projection = snapshot.projectionCache.get(key);
 		if (projection != null)
 		{
 			queryWork.projectionCacheHits++;
 			record.put("projection", projection);
-			return record;
-		}
-		if (!queryWork.projectionBudget.tryConsume())
-		{
-			snapshot.projectionCapHit = true;
-			record.put("projection", projectionUnavailable("projection_cap_hit"));
 			return record;
 		}
 		TileObject object = snapshot.objectRefs.get(key);
@@ -1325,7 +1326,6 @@ class WorldModelCache
 		payload.put("censusComplete", censusComplete);
 		payload.put("authoritativeAbsenceEligible",
 				censusComplete && !responseCapHit && contradictoryObjectKeys.isEmpty());
-		payload.put("priorityAbsenceEligible", censusComplete && !priorityIdentityConflict);
 		payload.put("priorityObjectIds", options.priorityObjectIds);
 		payload.put("priorityObjectKeys", options.priorityObjectKeys);
 		List<Integer> returnedPriorityIds = new ArrayList<>();
@@ -1346,6 +1346,16 @@ class WorldModelCache
 			}
 		}
 		payload.put("returnedPriorityObjectKeys", List.copyOf(returnedPriorityKeys));
+		boolean priorityCoverageComplete = options.priorityObjectIds.stream()
+				.filter(priorityId -> filtered.stream().anyMatch(
+						item -> intValue(item.get("id"), -1) == priorityId))
+				.allMatch(returnedPriorityIds::contains)
+				&& options.priorityObjectKeys.stream()
+				.filter(priorityKey -> filtered.stream().anyMatch(
+						item -> priorityKey.equals(String.valueOf(item.get("objectKey")))))
+				.allMatch(returnedPriorityKeys::contains);
+		payload.put("priorityAbsenceEligible",
+				censusComplete && !priorityIdentityConflict && priorityCoverageComplete);
 		payload.put("priorityObjectsComplete",
 				returnedPriorityIds.size() == options.priorityObjectIds.size()
 						&& returnedPriorityKeys.size() == options.priorityObjectKeys.size());
@@ -2725,7 +2735,9 @@ class WorldModelCache
 		{
 			QueryOptions options = new QueryOptions();
 			Map<String, Object> worldModel = mapFrom(request == null ? null : request.get("worldModel"));
-			options.maxObjects = boundedInt(first(worldModel.get("maxObjects"), requestValue(request, "maxObjects")), DEFAULT_MAX_OBJECTS, 0, HARD_MAX_OBJECTS);
+			options.maxObjects = boundedInt(
+					first(worldModel.get("maxObjects"), requestValue(request, "maxObjects")),
+					DEFAULT_MAX_OBJECTS, 0, HARD_MAX_RETURNED_OBJECTS);
 			options.radiusTiles = boundedInt(first(worldModel.get("radiusTiles"), requestValue(request, "radiusTiles")), DEFAULT_RADIUS_TILES, 1, HARD_RADIUS_TILES);
 			options.maxCollisionTiles = boundedInt(worldModel.get("maxCollisionTiles"), DEFAULT_MAX_COLLISION_TILES, 0, HARD_MAX_COLLISION_TILES);
 			options.maxGroundItems = boundedInt(worldModel.get("maxGroundItems"), DEFAULT_MAX_GROUND_ITEMS, 0, DEFAULT_MAX_GROUND_ITEMS);

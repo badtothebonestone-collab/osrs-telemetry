@@ -14,6 +14,7 @@ if /I "%MODE%"=="record-demo" goto record_demo
 if /I "%MODE%"=="inspect-demo" goto inspect_demo
 if /I "%MODE%"=="app" goto app
 if /I "%MODE%"=="gui" goto gui
+if /I "%MODE%"=="telemetry-soak" goto telemetry_soak
 if /I "%MODE%"=="replay" goto replay
 if /I "%MODE%"=="test" goto test
 if /I "%MODE%"=="help" goto help
@@ -35,6 +36,8 @@ echo   run.cmd login COMx             Recover a saved authenticated session
 echo   run.cmd record-demo NAME [options]
 echo   run.cmd inspect-demo PATH
 echo   run.cmd app COMMAND [options]  Use the diagnostic application CLI
+echo   run.cmd telemetry-soak [options]
+echo                                  Run bounded synthetic pipeline pressure proof
 echo   run.cmd replay                 Run golden cycle and retained camera replays
 echo   run.cmd test                   Run the Python and Java suites
 exit /b 0
@@ -97,6 +100,10 @@ exit /b %ERRORLEVEL%
 
 :gui
 python -m osrs_bot.gui
+exit /b %ERRORLEVEL%
+
+:telemetry_soak
+python -m osrs_bot.telemetry_soak %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %ERRORLEVEL%
 
 :replay

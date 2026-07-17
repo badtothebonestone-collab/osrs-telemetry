@@ -703,6 +703,51 @@ class Decision:
 
 
 @dataclass(frozen=True, slots=True)
+class TargetContinuityEvidence:
+    """Typed snapshot of the task-owned stable-target continuity lock."""
+
+    locked_target_key: str | None = None
+    locked_tick: int | None = None
+    last_seen_tick: int | None = None
+    incomplete_omission_frames: int = 0
+    retention_reason: str | None = None
+    last_unlock_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_nonnegative_int(
+            self.incomplete_omission_frames,
+            "incomplete_omission_frames",
+        )
+        for field_name in ("retention_reason", "last_unlock_reason"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _validate_nonempty_text(value, field_name)
+
+        if self.locked_target_key is None:
+            if self.locked_tick is not None or self.last_seen_tick is not None:
+                raise ValueError("unlocked continuity evidence cannot contain lock ticks")
+            if self.incomplete_omission_frames != 0:
+                raise ValueError(
+                    "unlocked continuity evidence cannot contain omission frames"
+                )
+            if self.retention_reason is not None:
+                raise ValueError(
+                    "unlocked continuity evidence cannot contain a retention reason"
+                )
+            return
+
+        _validate_nonempty_text(self.locked_target_key, "locked_target_key")
+        if self.locked_tick is None or self.last_seen_tick is None:
+            raise ValueError("locked continuity evidence requires both lock ticks")
+        _validate_nonnegative_int(self.locked_tick, "locked_tick")
+        _validate_nonnegative_int(self.last_seen_tick, "last_seen_tick")
+        if self.last_seen_tick < self.locked_tick:
+            raise ValueError("last_seen_tick cannot precede locked_tick")
+        if self.retention_reason is None:
+            raise ValueError("locked continuity evidence requires a retention reason")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskSnapshot:
     task_id: str
     status: TaskStatus
@@ -714,6 +759,7 @@ class TaskSnapshot:
     route_step: str | None = None
     route_progress: TaskProgressSnapshot | None = None
     cycle_progress: TaskProgressSnapshot | None = None
+    target_continuity: TargetContinuityEvidence | None = None
 
     def __post_init__(self) -> None:
         _validate_nonempty_text(self.task_id, "task_id")
@@ -740,6 +786,12 @@ class TaskSnapshot:
                 )
         if self.route_step is not None and self.route_progress is None:
             raise ValueError("route_step requires route_progress")
+        if self.target_continuity is not None and not isinstance(
+            self.target_continuity, TargetContinuityEvidence
+        ):
+            raise ValueError(
+                "target_continuity must be TargetContinuityEvidence or None"
+            )
 
 
 @runtime_checkable

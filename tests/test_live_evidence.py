@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,10 +61,54 @@ class LiveRunEvidenceRecorderTests(unittest.TestCase):
             self.assertIn("cleanup", receipt["finalEngineFrame"])
             self.assertEqual([], receipt["recorderErrors"])
             self.assertEqual(123, receipt["behaviorSeed"])
+            self.assertEqual(256, receipt["recorderQueue"]["capacity"])
+            self.assertGreaterEqual(receipt["recorderQueue"]["highWater"], 1)
+            self.assertEqual(0, receipt["recorderQueue"]["droppedFrames"])
+            self.assertTrue(receipt["recorderQueue"]["writerThreadStopped"])
             manifest = json.loads(recorder.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(123, manifest["configuredBehaviorSeed"])
             self.assertEqual(123, manifest["behaviorSeed"])
             self.assertEqual("production", manifest["mode"])
+
+    def test_slow_evidence_encoding_does_not_stall_publication(self) -> None:
+        publisher = EngineFramePublisher()
+        started = datetime(2026, 7, 12, 23, 1, 2, 345678, tzinfo=timezone.utc)
+        task = TaskSnapshot("woodcut_bank", TaskStatus.RUNNING, "find_tree")
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = LiveRunEvidenceRecorder(
+                output_root=Path(directory),
+                run_id="run-slow-writer",
+                started_at=started,
+                profile_id="profile",
+                definition_id="definition",
+                configured_behavior_seed=None,
+                behavior_seed=123,
+                publisher=publisher,
+            )
+            original_encode = recorder._encode_frame
+
+            def slow_encode(frame):
+                time.sleep(0.05)
+                return original_encode(frame)
+
+            recorder._encode_frame = slow_encode  # type: ignore[method-assign]
+            publish_started = time.perf_counter()
+            frame = publisher.publish(stage=EngineStage.OBSERVED, task=task)
+            publish_elapsed = time.perf_counter() - publish_started
+
+            recorder.finish(
+                result=None,
+                statistics=RuntimeStatistics(False, "COMPLETE", None, 1, 0, 1),
+                worker_error=None,
+                finished_at=started + timedelta(seconds=1),
+                final_frame=frame,
+            )
+
+            self.assertLess(publish_elapsed, 0.025)
+            receipt = json.loads(recorder.receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(1, receipt["frames"]["count"])
+            self.assertTrue(receipt["recorderQueue"]["writerThreadStopped"])
 
     def test_listener_failure_cannot_interrupt_frame_publication(self) -> None:
         publisher = EngineFramePublisher()

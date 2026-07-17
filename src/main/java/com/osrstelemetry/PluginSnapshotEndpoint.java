@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
@@ -1298,7 +1299,7 @@ public class PluginSnapshotEndpoint implements Closeable
 					request = new JsonObject();
 				}
 			}
-			catch (IllegalArgumentException e)
+			catch (IllegalArgumentException | JsonParseException e)
 			{
 				writeJson(exchange, 400, errorPayload("bad_request", e.getMessage()));
 				return;

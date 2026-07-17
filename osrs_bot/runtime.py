@@ -34,7 +34,7 @@ from .model import (
     VerificationKind,
     VerificationSpec,
 )
-from .observation import ObservationClient
+from .observation import ObservationBackpressureError, ObservationClient
 from .observability import (
     ObservabilityEvidence,
     TimingEvidence,
@@ -53,6 +53,7 @@ from .verification import (
 
 LIVE_FOCUS_HANDOFF_SECONDS = 60.0
 MAX_CONSECUTIVE_UNSENT_REPLANS = 1
+MAX_CONSECUTIVE_ENDPOINT_BACKPRESSURE = 8
 _PREACTIVATION_COMMANDS = frozenset(
     {"STOP_ALL", "PING", "IDENTIFY", "CAPS", "STATUS", "ARM", "MOVE", "DISARM"}
 )
@@ -662,6 +663,7 @@ class TaskRuntime:
         last_tick: int | None = None
         last_decision: Decision | None = None
         consecutive_unsent_replans = 0
+        consecutive_endpoint_backpressure = 0
         cursor_recovery_used = False
         cursor_retry_pending = False
         run_identity: tuple[int, str] | None = (
@@ -740,7 +742,28 @@ class TaskRuntime:
                 )
             try:
                 observation = self._fetch()
-            except Exception as error:  # endpoint and schema failures are terminal
+            except ObservationBackpressureError:
+                consecutive_endpoint_backpressure += 1
+                if (
+                    consecutive_endpoint_backpressure
+                    > MAX_CONSECUTIVE_ENDPOINT_BACKPRESSURE
+                ):
+                    return self._result(
+                        "ERROR",
+                        "observation endpoint remained busy beyond the bounded "
+                        f"{MAX_CONSECUTIVE_ENDPOINT_BACKPRESSURE}-retry budget",
+                        observations,
+                        actions,
+                        last_tick,
+                        last_decision,
+                    )
+                self._set_wait_state(
+                    WaitState.ENDPOINT_BACKPRESSURE,
+                    timing_phase=TimingPhase.ENDPOINT_BACKPRESSURE_WAIT,
+                )
+                self._sleep(self._poll_seconds)
+                continue
+            except Exception as error:  # non-retryable endpoint/schema failures are terminal
                 return self._result(
                     "ERROR",
                     f"observation failed: {type(error).__name__}: {error}",
@@ -749,6 +772,8 @@ class TaskRuntime:
                     last_tick,
                     last_decision,
                 )
+            consecutive_endpoint_backpressure = 0
+            self._set_wait_state(None, publish=False)
             observations += 1
             last_tick = observation.tick
             observed_identity = (
@@ -1258,6 +1283,37 @@ class TaskRuntime:
                 self._sleep(self._poll_seconds)
                 try:
                     candidate = self._fetch()
+                except ObservationBackpressureError:
+                    consecutive_endpoint_backpressure += 1
+                    if (
+                        consecutive_endpoint_backpressure
+                        <= MAX_CONSECUTIVE_ENDPOINT_BACKPRESSURE
+                    ):
+                        self._set_wait_state(
+                            WaitState.ENDPOINT_BACKPRESSURE,
+                            timing_phase=TimingPhase.ENDPOINT_BACKPRESSURE_WAIT,
+                        )
+                        continue
+                    failure_reason = (
+                        "verification observation endpoint remained busy beyond "
+                        "the bounded "
+                        f"{MAX_CONSECUTIVE_ENDPOINT_BACKPRESSURE}-retry budget"
+                    )
+                    transition_error = self._apply_failure(failure_reason)
+                    reason = failure_reason
+                    if transition_error is not None:
+                        reason += (
+                            f"; task failure transition failed: {transition_error}"
+                        )
+                    return self._result(
+                        "BLOCKED",
+                        reason,
+                        observations,
+                        actions,
+                        last_tick,
+                        decision,
+                        execution,
+                    )
                 except Exception as error:
                     failure_reason = (
                         "verification observation failed: "
@@ -1278,6 +1334,7 @@ class TaskRuntime:
                         decision,
                         execution,
                     )
+                consecutive_endpoint_backpressure = 0
                 observations += 1
                 last_tick = candidate.tick
                 self._update_statistics(
