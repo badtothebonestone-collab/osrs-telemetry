@@ -347,7 +347,7 @@ runtime logic.
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
 | 9. Operator GUI | Base GUI complete; lifecycle truth implemented, production recheck blocked (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; current/historical/terminal EngineFrame presentation; stale/disconnected Start Live gate; identity-bound reconnect; passive overlay geometry clearing; demonstration and diagnostics. |
 | 10. Movement and targeting quality | In progress; pointer containment deterministic and bounded Arduino-only live gates **PASS** | Polyline route lookahead, classified mandatory points, proactive yaw/pitch framing, authoritative polygon aim candidates, seeded pointer/timing variation, padded pointer containment, one bounded recovery/fresh retry, EngineFrame/overlay diagnostics, focused tests, live route/Tree/cycle proof, full gate, commit, and clean worktree. The pointer submilestone is complete; broader route/Tree/cycle and clean-worktree acceptance remain. |
-| 11. Telemetry, observation, and decision-pipeline reliability | Prior deterministic/full gates **PASS**; production-soak hardening implemented in isolated integration; current-build live timing remains a documented gap | Explicit anchors and per-request budgets; 10,000-row raw census versus 64-row return/enrichment ceiling; cache budget enforcement; request/response provenance binding; bounded typed backpressure; truthful priority absence; asynchronous bounded live recorder; repeatable soak command. Live `8890`/`8893` listeners were unavailable, so no synthetic-to-live after comparison is claimed. |
+| 11. Telemetry, observation, and decision-pipeline reliability | Integrated deterministic/full and production-soak gates **PASS**; current-build live timing remains a documented gap | Explicit anchors and per-request budgets; 10,000-row raw census versus 64-row return/enrichment ceiling; cache budget enforcement; request/response provenance binding; bounded typed backpressure; truthful priority absence; asynchronous bounded live recorder; repeatable soak command. The production `8893` endpoint was unavailable, so no synthetic-to-live after comparison is claimed. |
 | Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
@@ -1115,13 +1115,20 @@ release, and asynchronous bounded live-evidence writing. The repeatable entry
 points are `python -m osrs_bot.telemetry_soak` and `run.cmd telemetry-soak`,
 which emit stable synthetic evidence separately from live artifacts.
 
-The current sandbox could not write the authoritative sibling checkout, so this
-continuation was implemented in the isolated writable
-`2026-06-stabilize/telemetry_pipeline_worktree` while preserving the original
-worktree. The continuation gate is PASS there: Python 981/981, forced-fresh Java
-127/127, retained replay 7/7, syntax compilation 79/79, and the repeatable
-5,000-sample plus 1/2/4/8-poller soak passed with bounded thread/result state.
-The timestamped proof bundle is authoritative for the distributions and explicit
-Java tail regressions. No loaded-scene after sample was possible because `8890`
-and `8893` were not listening. No input was sent, no firmware was changed, and
-the production input default remains `InputCoordinator` through Arduino.
+The continuation is integrated on the repository-consolidation branch from the
+independently verified 27-file patch after reconstructing the complete dirty
+authoritative baseline. The original authoritative and isolated checkouts remain
+preserved in the external recovery record. The retained handoff gate is PASS:
+Python 981/981, forced-fresh Java 127/127, retained replay 7/7, syntax compilation
+79/79, and the repeatable 5,000-sample plus 1/2/4/8-poller soak passed with bounded
+thread/result state. The timestamped telemetry proof bundle remains authoritative
+for the distributions and explicit Java tail regressions. No loaded-scene after
+sample was possible because the production `8893` endpoint was not listening. No
+input was sent, no firmware was changed, and the production input path remains
+`InputCoordinator` through Arduino.
+
+Fresh repository-consolidation validation expands the current gate to 984/984
+Python tests with the documented test-only sandbox ACL harness, 127/127 forced-
+fresh Java tests, replay 7/7, compilation 79/79, firmware protocol 8/8, focused
+input regressions 201/201, and a fresh bounded soak PASS. This adds no live or
+hardware evidence; the production `8893` timing gap remains.

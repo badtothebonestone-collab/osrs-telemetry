@@ -34,13 +34,12 @@ serialization latency. Repeatable synthetic soak evidence is available through
 `telemetry_pipeline_soak.v1` output separates parse, publication, concurrency,
 memory/thread, and endpoint-backpressure scenarios from live evidence.
 
-This continuation was implemented in the isolated writable checkout
-`2026-06-stabilize/telemetry_pipeline_worktree` because the current execution
-sandbox could read but not write the authoritative sibling checkout. The
-authoritative checkout was preserved; this document does not claim that the
-isolated delta has already been applied there. Neither local `8890` nor `8893`
-was listening, so no production input was sent and no current-build live after
-sample is claimed.
+This continuation is integrated on the repository-consolidation branch after
+independent verification of the exact 27-file patch and overlay. The original
+authoritative and isolated checkouts are preserved in the external repository
+recovery record; no telemetry milestone remains stranded outside the branch.
+The production endpoint on `8893` was not listening, so no production input was
+sent and no current-build live after sample is claimed.
 
 This milestone changes internal observation and target-selection behavior. It
 does not add a second telemetry authority or an input path. Production
@@ -274,8 +273,9 @@ reliability fixes.
 
 ## Validation
 
-- complete Python regression: **PASS**, 981/981 with zero failures, errors, or
-  skips;
+- complete Python regression: **PASS**, 984/984 with zero failures, errors, or
+  skips, using the documented test-only Windows sandbox temporary-directory ACL
+  harness;
 - forced-fresh Java `--rerun-tasks`: **PASS**, 127/127 across 12 suites with all
   four Gradle tasks executed;
 - retained golden-cycle and camera replay: **PASS**, 7/7;
@@ -286,8 +286,8 @@ reliability fixes.
 - focused cache-budget, malformed-request recovery, response-shape,
   target-continuity, GUI/EngineFrame, recorder, and Arduino activation-boundary
   gates: **PASS**; and
-- current-build loaded-scene live timing: **NOT AVAILABLE** because neither the
-  `8890` nor `8893` local listener was running. No input or firmware change was
+- current-build loaded-scene live timing: **NOT AVAILABLE** because the
+  production `8893` endpoint was not running. No input or firmware change was
   attempted.
 
 ## Remaining limits

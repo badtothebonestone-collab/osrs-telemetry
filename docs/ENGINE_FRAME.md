@@ -5,7 +5,9 @@
 `osrs_bot.engine_frame.EngineFrame` is the immutable read-only status contract
 published by the real `TaskRuntime` path. `EngineFramePublisher` retains only
 the latest frame under a monotonic sequence and supports passive readers. It
-does not keep history, invoke callbacks, mutate the task, or authorize input.
+invokes registered passive subscribers with failure isolation, but does not keep
+history, mutate the task, or authorize input. Subscriber callbacks have no
+control authority.
 
 Frames are published after real observation, decision, execution, and verifier
 boundaries, plus terminal outcomes. A terminal frame retains the last real

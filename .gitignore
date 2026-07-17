@@ -12,6 +12,17 @@ __pycache__/
 *.pyc
 *.log
 *.jsonl
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+junit*.xml
+hs_err_pid*.log
+Thumbs.db
+.DS_Store
+_tmp_architecture_tests/
 _run_proofs/
 demo_runs/
 interaction_geometry/live/

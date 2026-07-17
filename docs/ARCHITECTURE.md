@@ -656,10 +656,12 @@ verification, target, cursor, PID/session, and input state are never restored.
 
 The facade imports the concrete task only to compose the sole supported engine.
 It has no target selection, SafetyGate, Verifier, InputCoordinator, Arduino, or
-raw-input calls. `run.cmd gui` launches the operator frontend. `run.cmd app`
-retains catalog/profile and foreground run commands as diagnostics; Ctrl+C
-becomes cooperative safe stop. There is no daemon or IPC layer. See
-`docs/FRONTEND_CONTRACT.md`.
+raw-input calls. `run.cmd task`, `run.cmd execute`, and the compatibility
+`python -m osrs_bot task` alias all route through this composition root and emit
+the `engine_application.v1` status contract. `run.cmd gui` launches the operator
+frontend. `run.cmd app` retains catalog/profile and foreground run commands as
+diagnostics; Ctrl+C becomes cooperative safe stop. There is no daemon or IPC
+layer. See `docs/FRONTEND_CONTRACT.md`.
 
 ## Vision and LLM boundaries
 

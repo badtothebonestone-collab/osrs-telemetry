@@ -80,6 +80,10 @@ Ask the task engine for its first action without sending input:
 ```powershell
 .\run.cmd task
 ```
+Task and execute results use the `engine_application.v1` JSON schema with the
+latest EngineFrame and runtime-owned statistics. Both commands enter the same
+`EngineApplication` composition root used by the GUI and facade CLI.
+
 
 Live execution is opt-in and Arduino-only:
 
@@ -123,6 +127,15 @@ Replay the committed deterministic fixtures without RuneLite or Arduino:
 ```powershell
 .\run.cmd replay
 ```
+
+Run the bounded synthetic telemetry pressure harness separately from live proof:
+
+```powershell
+.\run.cmd telemetry-soak
+```
+
+The soak reports parse, publication, target, concurrency, resource, and typed
+backpressure evidence; it does not claim RuneLite or Arduino behavior.
 
 The replay drives the final task FSM through 28 verified log gains, the fixed
 outbound route, bank open/deposit/close, the fixed return route, and `COMPLETE`.
@@ -199,6 +212,8 @@ or IPC service.
 - `docs/FRONTEND_CONTRACT.md`: implemented facade and future GUI screen contract.
 - `docs/QUICKSTART.md`: non-programmer operator GUI guide.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
+- `docs/REPOSITORY_CONSOLIDATION.md`: selected authority, integration provenance,
+  current architecture, evidence boundaries, launch/test commands, and next work.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
 

@@ -4,10 +4,10 @@
 
 ### Telemetry pipeline production-soak continuation
 
-**The isolated integration checkout contains the pressure-path reliability
-hardening and repeatable soak harness. A current-build live RuneLite after
-sample is unavailable because neither local telemetry listener was running; no
-production input or firmware change occurred.**
+**The pressure-path reliability hardening and repeatable soak harness are
+integrated on the repository-consolidation branch. A current-build live
+RuneLite after sample is unavailable because the production telemetry endpoint
+on `8893` was not running; no production input or firmware change occurred.**
 
 This continuation separates the 10,000-identity raw census safety ceiling from
 the 64-row returned/definition-enrichment ceiling, applies every request's
@@ -29,31 +29,39 @@ errors, and writer shutdown state. Repeatable synthetic coverage is available
 as `python -m osrs_bot.telemetry_soak` and `run.cmd telemetry-soak`, emitting the
 stable `telemetry_pipeline_soak.v1` evidence family.
 
-The current execution sandbox could read but not write the authoritative sibling
-checkout, so these continuation changes were made and validated in
-`2026-06-stabilize/telemetry_pipeline_worktree` while preserving the original
-worktree. The isolated delta must still be applied to the authoritative checkout
-after that filesystem boundary is removed.
+The selected writable integration checkout reconstructs the complete dirty
+authoritative baseline and then applies the independently verified 27-file
+telemetry delta. The original authoritative and isolated checkouts remain
+preserved in the external consolidation recovery record; no telemetry change is
+stranded outside the publication branch.
 
-The final gate is **PASS** in the isolated checkout: 981/981 Python tests,
+The fresh repository-consolidation gate is **PASS**: 984/984 Python tests,
 127/127 forced-fresh Java tests across 12 suites with 4/4 tasks executed,
-retained replay 7/7, and 79/79 Python files compiled. The repeatable synthetic
-soak ran 5,000 serial samples plus 1,000 calls at each of 1/2/4/8 concurrent
-pollers. It ended at one thread after peaking at the configured worker count,
-produced one result signature at every level, and grew RSS by 2,691,072 bytes
-over the full serial/target run. At eight pollers parse p50/p95/p99/maximum was
-0.1754/0.3116/0.4279/61.6591 ms; the maximum is retained as a scheduler/host tail,
-not hidden behind the percentiles.
+retained replay 7/7, and 79/79 tracked Python files compiled. The repeatable
+synthetic soak ran 5,000 serial samples plus 1,000 calls at each of 1/2/4/8
+concurrent pollers, produced one result signature at every level, and returned
+to one thread.
 
-Final 1,001-row target classification p50/p95/p99/maximum was
-0.0824/0.1741/0.2657/1.3814 ms with 33 identity evaluations, one ranked
-candidate, and 32 bounded rejection records. Final EngineFrame publication
-p50/p95/p99/maximum was 0.0030/0.0057/0.0063/0.1326 ms. The forced-fresh dense
-Java benchmark was 7.316/16.288/20.334/20.334 ms for refresh and
-0.896/3.310/7.579/9.263 ms for exact-source reuse. Compared with this run's
-pre-change Java baseline, refresh p50 improved but refresh maximum and exact-hit
-tails regressed; those load/JIT-sensitive regressions remain explicit in the
-proof comparison.
+Python 3.12 creates mode-`0700` temporary directories that the restricted
+Windows sandbox token cannot re-enter. The exact full suite therefore used a
+test-only `os.mkdir` mode-`0777` wrapper; product code, test selection, and
+assertions were unchanged. The stock failure occurred at filesystem setup or
+cleanup before affected assertions, not in engine behavior.
+
+The fresh serial soak grew RSS by 2,797,568 bytes. At eight pollers parse
+p50/p95/p99/maximum was 0.1444/0.2799/0.7982/53.2393 ms. Fresh 1,001-row target
+classification p50/p95/p99/maximum was 0.0768/0.1647/0.2469/0.7983 ms with 33
+identity evaluations, one ranked candidate, and 32 bounded rejection records.
+EngineFrame publication p50/p95/p99/maximum was
+0.0030/0.0032/0.0059/0.2113 ms.
+
+The fresh dense Java benchmark was 7.511/13.368/13.803/13.803 ms for refresh
+and 1.194/3.392/3.557/3.563 ms for exact-source reuse, with 4,225 scanned and
+discovered identities but only 64 enriched, projected, and returned rows. The
+retained handoff comparison remains explicit: exact-source p95 regressed
+83.89%, exact-source maximum regressed 9.39%, and dense refresh maximum
+regressed 14.82%. The milestone benefit is bounded correctness, not a blanket
+latency improvement.
 
 ### Previous telemetry, observation, and decision-pipeline reliability gate
 
@@ -93,8 +101,9 @@ its normal Java gate; forced fresh Java `--rerun-tasks` completed 124/124 tests
 across 12 suites with all four Gradle tasks executed; retained replay completed
 7/7; and compile, input-boundary, and retained Java snapshot-fixture checks
 passed. A bounded live observation was attempted only after these deterministic
-gates, but neither `8890` nor `8893` was listening and the request failed with
-connection refused. It sent no input, created no operator-versus-engine action
+gates, but the production `8893` endpoint was not listening and the request
+failed with connection refused. It sent no input, created no operator-versus-
+engine action
 evidence, and required no input cleanup. No current-build live after timing is
 claimed. Firmware was not flashed. Detailed contracts and limitations are in
 [`TELEMETRY_PIPELINE.md`](TELEMETRY_PIPELINE.md).
@@ -718,14 +727,15 @@ the geometry condition and recovery behavior rather than source attribution.
 
 ## Validation
 
-- Production-soak continuation: **PASS** in the isolated checkout. Full Python
-  981/981; forced-fresh Java 127/127 across 12 suites with 4/4 Gradle tasks
-  executed; retained replay 7/7; Python compilation 79/79; repeatable 5,000-
-  sample serial plus 1/2/4/8-poller synthetic soak PASS. Focused cache/budget,
-  malformed-request recovery, strict-response-shape, bounded backpressure,
-  target-continuity, frontend vocabulary, GUI/EngineFrame compatibility,
-  Arduino input-boundary, and asynchronous-recorder gates pass. Loaded-scene
-  live after evidence was unavailable because `8890` and `8893` were not
+- Production-soak continuation: **PASS** in the integrated checkout. Full Python
+  984/984 with the documented test-only sandbox ACL harness; forced-fresh Java
+  127/127 across 12 suites with 4/4 Gradle tasks executed; retained replay 7/7;
+  Python compilation 79/79; repeatable 5,000-sample serial plus 1/2/4/8-poller
+  synthetic soak PASS. Focused cache/budget, malformed-request recovery,
+  strict-response-shape, bounded backpressure, target-continuity, frontend
+  vocabulary, GUI/EngineFrame compatibility, Arduino input-boundary, firmware
+  protocol, and asynchronous-recorder gates pass. Loaded-scene live after
+  evidence was unavailable because the production `8893` endpoint was not
   listening; no input or firmware change occurred.
 - Phase 11 telemetry/observation/decision-pipeline gate: 973/973 Python tests
   plus the normal Java gate through `run.cmd test`; forced fresh Java 124/124
