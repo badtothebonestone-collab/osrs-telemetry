@@ -8,7 +8,9 @@ from dataclasses import replace
 
 from .application import EngineApplication, LifecycleState, SUPPORTED_TASK_ID
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
+from .definition import TaskSiteDefinition
 from .profile import DEFAULT_PROFILE
+from .task_authoring import load_task_definition
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -20,13 +22,28 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("catalog")
     schema = commands.add_parser("profile-schema")
     schema.add_argument("--task-id", default=SUPPORTED_TASK_ID)
-    schema.add_argument("--definition-id", default=DEFAULT_PROFILE.definition_id)
+    schema.add_argument("--definition-id")
+    schema.add_argument("--definition-file")
     validate = commands.add_parser("validate-profile")
     run = commands.add_parser("run")
     for child in (validate, run):
         child.add_argument("--profile-id", default=DEFAULT_PROFILE.profile_id)
-        child.add_argument("--definition-id", default=DEFAULT_PROFILE.definition_id)
+        child.add_argument("--definition-id")
+        child.add_argument("--definition-file")
         child.add_argument("--cycle-goal", type=int, default=DEFAULT_PROFILE.cycle_goal)
+        child.add_argument(
+            "--no-cycle-goal",
+            action="store_true",
+            help="disable the cycle stop condition; another stop goal is required",
+        )
+        child.add_argument("--item-quantity-goal", type=int)
+        child.add_argument("--inventories-banked-goal", type=int)
+        child.add_argument("--duration-seconds", type=float)
+        child.add_argument("--start-at-utc")
+        child.add_argument("--stop-at-utc")
+        child.add_argument("--stop-when-inventory-full", action="store_true")
+        child.add_argument("--profile-max-actions", type=int)
+        child.add_argument("--no-reconcile-on-start", action="store_true")
     run.add_argument("--execute", action="store_true")
     run.add_argument(
         "--overlay",
@@ -63,11 +80,42 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _profile_values(args: argparse.Namespace) -> dict[str, object]:
+def _load_explicit_definition(args: argparse.Namespace) -> TaskSiteDefinition | None:
+    path = getattr(args, "definition_file", None)
+    return None if path is None else load_task_definition(path)
+
+
+def _resolved_definition_id(
+    args: argparse.Namespace,
+    definition: TaskSiteDefinition | None,
+) -> str:
+    requested = getattr(args, "definition_id", None)
+    if definition is None:
+        return DEFAULT_PROFILE.definition_id if requested is None else requested
+    if requested is not None and requested != definition.definition_id:
+        raise ValueError(
+            "--definition-id does not match --definition-file: "
+            f"{requested!r} != {definition.definition_id!r}"
+        )
+    return definition.definition_id
+
+
+def _profile_values(
+    args: argparse.Namespace,
+    definition: TaskSiteDefinition | None = None,
+) -> dict[str, object]:
     return {
         "profileId": args.profile_id,
-        "definitionId": args.definition_id,
-        "cycleGoal": args.cycle_goal,
+        "definitionId": _resolved_definition_id(args, definition),
+        "cycleGoal": None if args.no_cycle_goal else args.cycle_goal,
+        "itemQuantityGoal": args.item_quantity_goal,
+        "inventoriesBankedGoal": args.inventories_banked_goal,
+        "durationSeconds": args.duration_seconds,
+        "startAtUtc": args.start_at_utc,
+        "stopAtUtc": args.stop_at_utc,
+        "stopWhenInventoryFull": bool(args.stop_when_inventory_full),
+        "maxActions": args.profile_max_actions,
+        "reconcileOnStart": not args.no_reconcile_on_start,
     }
 
 
@@ -87,6 +135,7 @@ def _report_overlay_status(application: EngineApplication) -> None:
 def _run_application(
     args: argparse.Namespace,
     application: EngineApplication,
+    definition: TaskSiteDefinition | None = None,
 ) -> int:
     overlay_requested = bool(args.overlay)
     try:
@@ -102,7 +151,9 @@ def _run_application(
             )
         try:
             started = application.start(
-                profile_values=_profile_values(args), execute=args.execute
+                profile_values=_profile_values(args, definition),
+                definition=definition,
+                execute=args.execute,
             )
             if overlay_requested:
                 _report_overlay_status(application)
@@ -162,14 +213,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "catalog":
             print(json.dumps(EngineApplication.catalog(), indent=2, sort_keys=True))
             return 0
+        definition = _load_explicit_definition(args)
         if args.command == "profile-schema":
             payload = EngineApplication.profile_contract(
-                args.task_id, args.definition_id
+                args.task_id,
+                _resolved_definition_id(args, definition),
+                definition=definition,
             )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
         if args.command == "validate-profile":
-            binding = EngineApplication.validate_profile(_profile_values(args))
+            binding = EngineApplication.validate_profile(
+                _profile_values(args, definition),
+                definition,
+            )
             print(
                 json.dumps(
                     {
@@ -177,6 +234,21 @@ def main(argv: list[str] | None = None) -> int:
                         "profileId": binding.profile.profile_id,
                         "definitionId": binding.definition.definition_id,
                         "cycleGoal": binding.profile.cycle_goal,
+                        "itemQuantityGoal": binding.profile.item_quantity_goal,
+                        "inventoriesBankedGoal": (
+                            binding.profile.inventories_banked_goal
+                        ),
+                        "durationSeconds": binding.profile.duration_seconds,
+                        "startAtUtc": (
+                            binding.profile.start_at_utc.isoformat()
+                            if binding.profile.start_at_utc is not None
+                            else None
+                        ),
+                        "stopAtUtc": (
+                            binding.profile.stop_at_utc.isoformat()
+                            if binding.profile.stop_at_utc is not None
+                            else None
+                        ),
                     },
                     indent=2,
                     sort_keys=True,
@@ -200,8 +272,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         application = EngineApplication(configuration=configuration)
-        return _run_application(args, application)
-    except (TypeError, ValueError, RuntimeError) as error:
+        return _run_application(args, application, definition)
+    except (OSError, TypeError, ValueError, RuntimeError) as error:
         print(
             json.dumps(
                 {"status": "ERROR", "reason": f"{type(error).__name__}: {error}"},

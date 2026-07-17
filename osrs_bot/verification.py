@@ -221,6 +221,8 @@ class Outcome:
     observed_tick: int
     camera_pose_result: CameraPoseResult | None = None
     camera_zoom_result: CameraZoomResult | None = None
+    item_id: int | None = None
+    item_quantity_delta: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, OutcomeKind):
@@ -243,6 +245,17 @@ class Outcome:
             )
         if self.camera_pose_result is not None and self.camera_zoom_result is not None:
             raise ValueError("an outcome may carry only one camera result")
+        if (self.item_id is None) != (self.item_quantity_delta is None):
+            raise ValueError("item outcome metadata must be complete or absent")
+        if self.item_id is not None:
+            if self.kind is not OutcomeKind.ITEM_QUANTITY_INCREASED:
+                raise ValueError(
+                    "item outcome metadata is only valid for a quantity increase"
+                )
+            if not _is_positive_integer(self.item_id):
+                raise ValueError("item_id must be positive")
+            if not _is_positive_integer(self.item_quantity_delta):
+                raise ValueError("item_quantity_delta must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,7 +540,13 @@ def _successful_outcome(
             and observation.inventory.quantity(specification.item_id)
             > specification.before_quantity
         ):
-            return Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, observation.tick)
+            after_quantity = observation.inventory.quantity(specification.item_id)
+            return Outcome(
+                OutcomeKind.ITEM_QUANTITY_INCREASED,
+                observation.tick,
+                item_id=specification.item_id,
+                item_quantity_delta=after_quantity - specification.before_quantity,
+            )
         return None
 
     if specification.kind is VerificationKind.ITEM_QUANTITY_EQUALS:

@@ -1507,6 +1507,7 @@ public class TelemetryPlugin extends Plugin
 		Map<String, Object> inventory = itemContainerSnapshot(snapshot.inventory);
 		inventory.put("source", snapshot.inventoryCaptureSource);
 		payload.put("inventory", inventory);
+		payload.put("equipment", itemContainerSnapshot(snapshot.equipment));
 		return payload;
 	}
 
@@ -2545,6 +2546,19 @@ public class TelemetryPlugin extends Plugin
 						: null);
 		snapshot.inventory = capture == null ? null : capture.slots;
 		snapshot.inventoryCaptureSource = capture == null ? null : capture.source;
+
+		// Equipment is part of the same authoritative core fact as inventory.  A
+		// missing or temporarily unreadable container stays explicitly unknown and
+		// must never invalidate otherwise-current inventory evidence.
+		try
+		{
+			snapshot.equipment = itemContainerSlots(
+					client.getItemContainer(InventoryID.EQUIPMENT), 0);
+		}
+		catch (RuntimeException ignored)
+		{
+			snapshot.equipment = null;
+		}
 	}
 
 	private TickSnapshot.InventorySlot[] itemContainerSlots(ItemContainer container, int minSlotCount)

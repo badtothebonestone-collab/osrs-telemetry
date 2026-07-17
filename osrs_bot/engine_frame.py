@@ -15,6 +15,7 @@ from .behavior import (
 from .input_coordinator import InputReceipt
 from .model import (
     Action,
+    EquipmentObservation,
     InventoryItem,
     InventoryObservation,
     Observation,
@@ -32,8 +33,10 @@ from .task_contract import (
     RejectedCandidateEvidence,
     TargetContinuityEvidence,
     TargetEvidence,
+    TaskLifecycleSnapshot,
     TaskProgressSnapshot,
     TaskSnapshot,
+    VerificationDisposition,
 )
 from .verification import VerificationResult
 
@@ -82,6 +85,7 @@ class ObservationReference:
     player_location: WorldPoint | None = None
     player_plane: int | None = None
     inventory: InventoryObservation | None = None
+    equipment: EquipmentObservation | None = None
     max_source_age_millis: int = 2_000
     scene_census: SceneCensusEvidence = SceneCensusEvidence()
     pipeline: ObservationPipelineEvidence = ObservationPipelineEvidence()
@@ -172,6 +176,10 @@ class ObservationReference:
                 raise TypeError(
                     "inventory items must be an immutable tuple of InventoryItem values"
                 )
+        if self.equipment is not None and not isinstance(
+            self.equipment, EquipmentObservation
+        ):
+            raise TypeError("equipment must be EquipmentObservation or None")
         if (
             not isinstance(self.max_source_age_millis, int)
             or isinstance(self.max_source_age_millis, bool)
@@ -227,6 +235,7 @@ class ObservationReference:
             player_location=observation.location,
             player_plane=observation.plane,
             inventory=observation.inventory,
+            equipment=observation.equipment,
             max_source_age_millis=observation.max_source_age_millis,
             scene_census=observation.scene_census,
             pipeline=observation.pipeline,
@@ -261,6 +270,7 @@ class ObservationReference:
             "playerLocation": _world_point_dict(self.player_location),
             "playerPlane": self.player_plane,
             "inventory": _inventory_dict(self.inventory),
+            "equipment": _equipment_dict(self.equipment),
             "maxSourceAgeMillis": self.max_source_age_millis,
             "sceneCensus": _scene_census_dict(self.scene_census),
             "observationPipeline": _observation_pipeline_dict(self.pipeline),
@@ -352,6 +362,7 @@ class EngineFrame:
     safety_checks: tuple[SafetyCheck, ...] = ()
     pending_verification: VerificationSpec | None = None
     last_verification: VerificationResult | None = None
+    verification_disposition: VerificationDisposition | None = None
     last_execution_status: str | None = None
     last_execution_reason: str | None = None
     last_execution_activation_attempted: bool = False
@@ -389,6 +400,12 @@ class EngineFrame:
             self.last_verification, VerificationResult
         ):
             raise TypeError("last_verification must be VerificationResult or None")
+        if self.verification_disposition is not None and not isinstance(
+            self.verification_disposition, VerificationDisposition
+        ):
+            raise TypeError(
+                "verification_disposition must be VerificationDisposition or None"
+            )
         if self.last_execution_receipt is not None and not isinstance(
             self.last_execution_receipt, InputReceipt
         ):
@@ -472,6 +489,11 @@ class EngineFrame:
                 else {
                     "status": self.last_verification.status.value,
                     "reason": self.last_verification.reason,
+                    "disposition": (
+                        self.verification_disposition.value
+                        if self.verification_disposition is not None
+                        else None
+                    ),
                     "failureKind": (
                         self.last_verification.failure_kind.value
                         if self.last_verification.failure_kind is not None
@@ -483,6 +505,8 @@ class EngineFrame:
                         else {
                             "kind": outcome.kind.value,
                             "observedTick": outcome.observed_tick,
+                            "itemId": outcome.item_id,
+                            "itemQuantityDelta": outcome.item_quantity_delta,
                             "cameraPoseResult": (
                                 None
                                 if outcome.camera_pose_result is None
@@ -546,6 +570,7 @@ class EngineFramePublisher:
         safety_checks: tuple[SafetyCheck, ...] = (),
         pending_verification: VerificationSpec | None = None,
         last_verification: VerificationResult | None = None,
+        verification_disposition: VerificationDisposition | None = None,
         last_execution_status: str | None = None,
         last_execution_reason: str | None = None,
         last_execution_activation_attempted: bool = False,
@@ -565,6 +590,7 @@ class EngineFramePublisher:
                 safety_checks=safety_checks,
                 pending_verification=pending_verification,
                 last_verification=last_verification,
+                verification_disposition=verification_disposition,
                 last_execution_status=last_execution_status,
                 last_execution_reason=last_execution_reason,
                 last_execution_activation_attempted=(
@@ -843,6 +869,8 @@ def _task_dict(task: TaskSnapshot) -> dict[str, Any]:
         "routeStep": task.route_step,
         "routeProgress": _progress_dict(task.route_progress),
         "cycleProgress": _progress_dict(task.cycle_progress),
+        "metrics": [_progress_dict(metric) for metric in task.metrics],
+        "lifecycle": _lifecycle_dict(task.lifecycle),
         "targetContinuity": _target_continuity_dict(task.target_continuity),
         "blocker": task.blocker,
     }
@@ -860,6 +888,20 @@ def _target_continuity_dict(
         "incompleteOmissionFrames": evidence.incomplete_omission_frames,
         "retentionReason": evidence.retention_reason,
         "lastUnlockReason": evidence.last_unlock_reason,
+    }
+
+
+def _lifecycle_dict(
+    lifecycle: TaskLifecycleSnapshot | None,
+) -> dict[str, Any] | None:
+    if lifecycle is None:
+        return None
+    return {
+        "startAtUtc": lifecycle.start_at_utc,
+        "stopAtUtc": lifecycle.stop_at_utc,
+        "runStartedAtUtc": lifecycle.run_started_at_utc,
+        "reconciliationStatus": lifecycle.reconciliation_status,
+        "completionReason": lifecycle.completion_reason,
     }
 
 
@@ -893,6 +935,28 @@ def _inventory_dict(
                 "name": item.name,
             }
             for item in inventory.items
+        ],
+    }
+
+
+def _equipment_dict(
+    equipment: EquipmentObservation | None,
+) -> dict[str, Any] | None:
+    if equipment is None:
+        return None
+    return {
+        "known": equipment.known,
+        "slotCount": equipment.slot_count,
+        "occupiedSlots": equipment.occupied_slots,
+        "freeSlots": equipment.free_slots,
+        "items": [
+            {
+                "slot": item.slot,
+                "itemId": item.item_id,
+                "quantity": item.quantity,
+                "name": item.name,
+            }
+            for item in equipment.items
         ],
     }
 

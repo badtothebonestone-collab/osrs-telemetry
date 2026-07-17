@@ -7,7 +7,9 @@ from pathlib import Path
 import unittest
 
 import osrs_bot.definition as definition_module
+from osrs_bot.contract_limits import MAX_PRIORITY_OBJECT_IDS
 from osrs_bot.definition import (
+    LUMBRIDGE_SWAMP_COPPER_V1,
     FixedRoute,
     LUMBRIDGE_WEST_TREES_V1,
     RoutePointClassification,
@@ -47,20 +49,28 @@ class BuiltinDefinitionFactTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
 
-    def test_exactly_one_validated_builtin_definition_exists(self) -> None:
+    def test_two_validated_builtin_definitions_share_the_platform(self) -> None:
         builtins = [
             value
             for value in vars(definition_module).values()
             if isinstance(value, TaskSiteDefinition)
         ]
 
-        self.assertEqual([LUMBRIDGE_WEST_TREES_V1], builtins)
+        self.assertEqual(
+            [LUMBRIDGE_WEST_TREES_V1, LUMBRIDGE_SWAMP_COPPER_V1],
+            builtins,
+        )
         self.assertEqual("lumbridge_west_trees_v1", LUMBRIDGE_WEST_TREES_V1.definition_id)
         self.assertEqual(
             "Lumbridge West ordinary Trees to Lumbridge Castle bank",
             LUMBRIDGE_WEST_TREES_V1.display_name,
         )
         self.assertEqual(1, LUMBRIDGE_WEST_TREES_V1.version)
+        self.assertEqual(
+            "lumbridge_swamp_copper_v1",
+            LUMBRIDGE_SWAMP_COPPER_V1.definition_id,
+        )
+        self.assertEqual(frozenset({436}), LUMBRIDGE_SWAMP_COPPER_V1.resource.produced_item_ids)
 
     def test_resource_bank_inventory_and_verification_facts_are_exact(self) -> None:
         definition = LUMBRIDGE_WEST_TREES_V1
@@ -251,6 +261,23 @@ class DefinitionValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     builder()
 
+    def test_object_selector_priority_id_ceiling_is_a_typed_model_invariant(self) -> None:
+        selector = self.definition.resource.selector
+        exact_boundary = replace(
+            selector,
+            object_ids=frozenset(range(1, MAX_PRIORITY_OBJECT_IDS + 1)),
+        )
+
+        self.assertEqual(MAX_PRIORITY_OBJECT_IDS, len(exact_boundary.object_ids))
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"object_ids must contain at most {MAX_PRIORITY_OBJECT_IDS} priority object IDs",
+        ):
+            replace(
+                selector,
+                object_ids=frozenset(range(1, MAX_PRIORITY_OBJECT_IDS + 2)),
+            )
+
     def test_bool_and_nonpositive_ids_radii_versions_and_deadlines_are_rejected(self) -> None:
         resource_selector = self.definition.resource.selector
         object_step = self.definition.route_to_bank.steps[14]
@@ -412,16 +439,14 @@ class DefinitionValidationTests(unittest.TestCase):
             allowed_item_ids=frozenset({995}),
             deposit_item_ids=frozenset({995}),
         )
-        produced_excluded_from_deposit = replace(
-            self.definition.inventory,
-            allowed_item_ids=frozenset({995, 1511}),
-            deposit_item_ids=frozenset({995}),
-        )
-
-        for inventory in (produced_excluded_from_all, produced_excluded_from_deposit):
-            with self.subTest(inventory=inventory):
-                with self.assertRaises(ValueError):
-                    replace(self.definition, inventory=inventory)
+        with self.assertRaises(ValueError):
+            replace(self.definition, inventory=produced_excluded_from_all)
+        with self.assertRaises(ValueError):
+            replace(
+                self.definition.inventory,
+                allowed_item_ids=frozenset({995, 1511}),
+                deposit_item_ids=frozenset({995}),
+            )
 
     def test_definition_rejects_incoherent_route_anchors(self) -> None:
         shifted_tree_anchor = WorldPoint(3195, 3240, 0)

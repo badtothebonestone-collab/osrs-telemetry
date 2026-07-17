@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from osrs_bot.model import ScreenBounds, ScreenPoint, WorldPoint
+from osrs_bot.model import EquipmentObservation, ScreenBounds, ScreenPoint, WorldPoint
 from osrs_bot.observation import (
     CANONICAL_NEEDS,
     DEMONSTRATION_NEEDS,
@@ -156,6 +156,88 @@ class FakeResponse:
 
 
 class ObservationParsingTests(unittest.TestCase):
+    def test_equipment_is_typed_immutable_and_legacy_absence_is_unknown(self) -> None:
+        observation = parse_observation(load_fixture())
+
+        self.assertEqual(EquipmentObservation(), observation.equipment)
+        self.assertFalse(observation.equipment.known)
+        self.assertEqual(frozenset(), observation.equipment.item_ids)
+        self.assertEqual(0, observation.equipment.quantity(1265))
+        with self.assertRaises(FrozenInstanceError):
+            observation.equipment.known = True  # type: ignore[misc]
+
+    def test_equipment_is_parsed_from_the_inventory_core_fact(self) -> None:
+        payload = load_fixture()
+        payload["payloads"]["inventory"]["equipment"] = {
+            "slotCount": 14,
+            "known": True,
+            "freeSlots": 12,
+            "occupiedSlots": 2,
+            "items": [
+                {
+                    "slot": 3,
+                    "itemId": 1265,
+                    "quantity": 1,
+                    "name": "Bronze pickaxe",
+                },
+                {
+                    "slot": 5,
+                    "itemId": 1275,
+                    "quantity": 2,
+                    "name": "Rune pickaxe",
+                },
+            ],
+        }
+
+        equipment = parse_observation(payload).equipment
+
+        self.assertTrue(equipment.known)
+        self.assertEqual(14, equipment.slot_count)
+        self.assertEqual(2, equipment.occupied_slots)
+        self.assertEqual(12, equipment.free_slots)
+        self.assertEqual(frozenset({1265, 1275}), equipment.item_ids)
+        self.assertEqual(1, equipment.quantity(1265))
+        self.assertEqual(2, equipment.quantity(1275))
+
+    def test_malformed_equipment_evidence_is_rejected_fail_closed(self) -> None:
+        valid = {
+            "slotCount": 14,
+            "known": True,
+            "freeSlots": 13,
+            "occupiedSlots": 1,
+            "items": [{"slot": 3, "itemId": 1265, "quantity": 1}],
+        }
+        malformed_cases = {
+            "duplicate slots": {
+                **valid,
+                "freeSlots": 12,
+                "occupiedSlots": 2,
+                "items": [
+                    {"slot": 3, "itemId": 1265, "quantity": 1},
+                    {"slot": 3, "itemId": 1275, "quantity": 1},
+                ],
+            },
+            "invalid values": {
+                **valid,
+                "items": [{"slot": 3, "itemId": 0, "quantity": 1}],
+            },
+            "items and slot counts disagree": {
+                **valid,
+                "freeSlots": 12,
+                "occupiedSlots": 2,
+            },
+            "unknown equipment cannot contain item evidence": {
+                **valid,
+                "known": False,
+            },
+        }
+        for expected, equipment in malformed_cases.items():
+            with self.subTest(expected=expected):
+                payload = load_fixture()
+                payload["payloads"]["inventory"]["equipment"] = equipment
+                with self.assertRaisesRegex(ObservationSchemaError, expected):
+                    parse_observation(payload)
+
     def test_text_input_state_is_optional_typed_authoritative_evidence(self) -> None:
         legacy = load_fixture()
         self.assertIsNone(parse_observation(legacy).text_input_active)

@@ -528,6 +528,54 @@ public class TelemetryPluginSensorContractTest
 		assertEquals("inventory_widget", inventory.get("source"));
 	}
 
+	@Test
+	@SuppressWarnings("unchecked")
+	public void inventoryFactCarriesKnownEquipmentItemsAndQuantities()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.inventory = inventorySlots(1351);
+		snapshot.inventoryCaptureSource = "item_container";
+		snapshot.equipment = new TickSnapshot.InventorySlot[14];
+		snapshot.equipment[3] = inventorySlot(3, 1265, 1);
+		snapshot.equipment[5] = inventorySlot(5, 1275, 2);
+
+		Map<String, Object> fact = TelemetryPlugin.inventoryPayload(snapshot);
+		Map<String, Object> equipment =
+				(Map<String, Object>) fact.get("equipment");
+		List<Map<String, Object>> items =
+				(List<Map<String, Object>>) equipment.get("items");
+
+		assertEquals(2, fact.size());
+		assertEquals(Boolean.TRUE, equipment.get("known"));
+		assertEquals(14, equipment.get("slotCount"));
+		assertEquals(12, equipment.get("freeSlots"));
+		assertEquals(2, equipment.get("occupiedSlots"));
+		assertEquals(2, items.size());
+		assertEquals(1265, items.get(0).get("itemId"));
+		assertEquals(1, items.get(0).get("quantity"));
+		assertEquals(1275, items.get(1).get("itemId"));
+		assertEquals(2, items.get(1).get("quantity"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void inventoryFactKeepsMissingEquipmentExplicitlyUnknown()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.inventory = inventorySlots(1351);
+		snapshot.inventoryCaptureSource = "item_container";
+
+		Map<String, Object> fact = TelemetryPlugin.inventoryPayload(snapshot);
+		Map<String, Object> inventory =
+				(Map<String, Object>) fact.get("inventory");
+		Map<String, Object> equipment =
+				(Map<String, Object>) fact.get("equipment");
+
+		assertEquals(Boolean.TRUE, inventory.get("known"));
+		assertEquals(Boolean.FALSE, equipment.get("known"));
+		assertFalse(equipment.containsKey("items"));
+	}
+
 	private static TickSnapshot.InventorySlot[] inventorySlots(int itemId)
 	{
 		TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
@@ -535,6 +583,16 @@ public class TelemetryPluginSensorContractTest
 		slot.itemId = itemId;
 		slot.quantity = 1;
 		return new TickSnapshot.InventorySlot[]{slot};
+	}
+
+	private static TickSnapshot.InventorySlot inventorySlot(
+			int slotIndex, int itemId, int quantity)
+	{
+		TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
+		slot.slot = slotIndex;
+		slot.itemId = itemId;
+		slot.quantity = quantity;
+		return slot;
 	}
 
 	private static int[] inventoryIndexes()

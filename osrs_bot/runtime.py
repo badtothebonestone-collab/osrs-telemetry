@@ -42,7 +42,14 @@ from .observability import (
     WaitState,
     safe_elapsed_millis,
 )
-from .task_contract import Decision, ObservationRequest, Task, TaskSnapshot, TaskStatus
+from .task_contract import (
+    Decision,
+    ObservationRequest,
+    Task,
+    TaskSnapshot,
+    TaskStatus,
+    VerificationDisposition,
+)
 from .verification import (
     VerificationFailureKind,
     VerificationResult,
@@ -593,6 +600,7 @@ class TaskRuntime:
         self._frame_decision: Decision | None = None
         self._frame_execution: ExecutionResult | None = None
         self._frame_verification: VerificationResult | None = None
+        self._frame_verification_disposition: VerificationDisposition | None = None
         self._frame_pending: VerificationSpec | None = None
         self._frame_publish_error: str | None = None
         self._frame_stage = EngineStage.STARTING
@@ -1428,7 +1436,8 @@ class TaskRuntime:
                     )
 
                 try:
-                    self._task.apply_verification(result)
+                    disposition = self._task.apply_verification(result)
+                    self._frame_verification_disposition = disposition
                 except Exception as error:
                     return self._result(
                         "ERROR",
@@ -1475,19 +1484,8 @@ class TaskRuntime:
                             execution,
                             task_snapshot=post_verification_snapshot,
                         )
-                    recoverable_failure = (
-                        result.failure_kind
-                        is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
-                        or (
-                            result.failure_kind
-                            is VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE
-                            and verification.kind
-                            is VerificationKind.CAMERA_POSE_CHANGED
-                            and verification.camera_key in {"up", "down"}
-                        )
-                    )
                     if (
-                        recoverable_failure
+                        disposition is VerificationDisposition.RECOVERED
                         and post_verification_snapshot.status
                         is TaskStatus.RUNNING
                     ):
@@ -1574,6 +1572,7 @@ class TaskRuntime:
         self._frame_decision = None
         self._frame_execution = None
         self._frame_verification = None
+        self._frame_verification_disposition = None
         self._frame_pending = None
         self._frame_publish_error = None
         self._frame_stage = EngineStage.STARTING
@@ -1621,6 +1620,7 @@ class TaskRuntime:
                 safety_checks=checks,
                 pending_verification=self._frame_pending,
                 last_verification=self._frame_verification,
+                verification_disposition=self._frame_verification_disposition,
                 last_execution_status=(
                     execution.status if execution is not None else None
                 ),
@@ -1743,7 +1743,7 @@ class TaskRuntime:
             failure_kind=VerificationFailureKind.RUNTIME_FAILURE,
         )
         try:
-            self._task.apply_verification(result)
+            self._frame_verification_disposition = self._task.apply_verification(result)
         except Exception as error:
             return f"{type(error).__name__}: {error}"
         self._frame_verification = result

@@ -325,13 +325,14 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertIs(task.binding, DEFAULT_BINDING)
         self.assertIs(task.definition, DEFINITION)
         snapshot = task.snapshot()
-        self.assertEqual("woodcut_bank", snapshot.task_id)
+        self.assertEqual("gather_bank", snapshot.task_id)
         self.assertEqual(DEFINITION.definition_id, snapshot.definition_id)
         self.assertEqual(DEFAULT_BINDING.profile.profile_id, snapshot.profile_id)
         self.assertEqual("cycles", snapshot.progress.label)
         self.assertEqual(0, snapshot.progress.current)
         self.assertEqual(DEFAULT_BINDING.profile.cycle_goal, snapshot.progress.total)
-        self.assertIs(snapshot.progress, snapshot.cycle_progress)
+        self.assertEqual(snapshot.progress, snapshot.cycle_progress)
+        self.assertEqual((snapshot.cycle_progress,), snapshot.metrics)
         self.assertIsNone(snapshot.route_step)
         self.assertIsNone(snapshot.route_progress)
 
@@ -1767,7 +1768,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            "inventory is full; fixed bank route selected",
+            "inventory reached the bank threshold; fixed bank route selected",
             full.reason,
         )
         self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
@@ -2002,7 +2003,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
             location=WorldPoint(TREE_AREA.x + 1, TREE_AREA.y, TREE_AREA.plane),
         )
 
-        eligible, rejected = task._classify_trees(
+        eligible, rejected = task._classify_resources(
             observation(objects=(hidden, visible))
         )
 
@@ -3090,13 +3091,16 @@ class WoodcutBankTaskTests(unittest.TestCase):
     def test_open_bank_requires_exact_lumbridge_booth_and_verification(self) -> None:
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.OPEN_BANK
-        invalid = task.decide(
-            observation(
-                location=BANK_ANCHOR,
-                inv=inventory(logs=28, full=True),
-                objects=(bank_object(object_id=10355),),
-            )
+        invalid_observation = observation(
+            location=BANK_ANCHOR,
+            inv=inventory(logs=28, full=True),
+            objects=(bank_object(object_id=10355),),
         )
+        first_wait = task.decide(invalid_observation)
+        second_wait = task.decide(invalid_observation)
+        invalid = task.decide(invalid_observation)
+        self.assertEqual(ActionKind.WAIT, first_wait.action.kind)
+        self.assertEqual(ActionKind.WAIT, second_wait.action.kind)
         self.assertEqual(TaskPhase.BLOCKED.value, invalid.state)
         self.assertEqual(
             ("object_id_not_supported",),

@@ -53,6 +53,7 @@ from osrs_bot.task_contract import (
     ObservationRequest,
     TaskSnapshot,
     TaskStatus,
+    VerificationDisposition,
 )
 from osrs_bot.verification import (
     CameraUiState,
@@ -468,7 +469,7 @@ class _Task:
 
 
 class _RecoveringVerificationTask(_Task):
-    def apply_verification(self, result: VerificationResult) -> None:
+    def apply_verification(self, result: VerificationResult):
         if (
             result.failure_kind
             is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
@@ -476,12 +477,12 @@ class _RecoveringVerificationTask(_Task):
             self.applied.append(result)
             self.status = TaskStatus.RUNNING
             self.state = "recovered"
-            return
-        super().apply_verification(result)
+            return VerificationDisposition.RECOVERED
+        return super().apply_verification(result)
 
 
 class _RecoveringCameraVerificationTask(_Task):
-    def apply_verification(self, result: VerificationResult) -> None:
+    def apply_verification(self, result: VerificationResult):
         if (
             result.failure_kind
             is VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE
@@ -489,8 +490,8 @@ class _RecoveringCameraVerificationTask(_Task):
             self.applied.append(result)
             self.status = TaskStatus.RUNNING
             self.state = "camera_pitch_suppressed"
-            return
-        super().apply_verification(result)
+            return VerificationDisposition.RECOVERED
+        return super().apply_verification(result)
 
 
 class _FaultyFailureTask(_Task):

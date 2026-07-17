@@ -6,6 +6,7 @@ import math
 import re
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from .contract_limits import MAX_PRIORITY_OBJECT_IDS
 from .model import Action, Observation, ScreenBounds, ScreenPoint, WorldPoint
 
 if TYPE_CHECKING:
@@ -13,7 +14,6 @@ if TYPE_CHECKING:
 
 
 _MAX_TILE_PROJECTIONS = 16
-_MAX_PRIORITY_OBJECT_IDS = 32
 _MAX_PRIORITY_OBJECT_KEYS = 32
 _MAX_PRIORITY_OBJECT_KEY_LENGTH = 256
 # These task-facing ceilings must match the sole snapshot adapter. A request
@@ -35,6 +35,13 @@ _OBSERVATION_PURPOSE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 class TaskStatus(str, Enum):
     RUNNING = "running"
     COMPLETE = "complete"
+    BLOCKED = "blocked"
+
+
+class VerificationDisposition(str, Enum):
+    """Task-owned semantic disposition for a failed shared verification."""
+
+    RECOVERED = "recovered"
     BLOCKED = "blocked"
 
 
@@ -88,9 +95,9 @@ class ObservationRequest:
 
         if not isinstance(self.priority_object_ids, tuple):
             raise ValueError("priority_object_ids must be a tuple")
-        if len(self.priority_object_ids) > _MAX_PRIORITY_OBJECT_IDS:
+        if len(self.priority_object_ids) > MAX_PRIORITY_OBJECT_IDS:
             raise ValueError(
-                f"at most {_MAX_PRIORITY_OBJECT_IDS} priority object IDs are allowed"
+                f"at most {MAX_PRIORITY_OBJECT_IDS} priority object IDs are allowed"
             )
         if len(set(self.priority_object_ids)) != len(self.priority_object_ids):
             raise ValueError("priority_object_ids must be unique")
@@ -750,6 +757,30 @@ class TargetContinuityEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskLifecycleSnapshot:
+    start_at_utc: str | None = None
+    stop_at_utc: str | None = None
+    run_started_at_utc: str | None = None
+    reconciliation_status: str = "pending_fresh_observation"
+    completion_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "start_at_utc",
+            "stop_at_utc",
+            "run_started_at_utc",
+            "completion_reason",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                _validate_nonempty_text(value, field_name)
+        _validate_nonempty_text(
+            self.reconciliation_status,
+            "reconciliation_status",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskSnapshot:
     task_id: str
     status: TaskStatus
@@ -762,6 +793,8 @@ class TaskSnapshot:
     route_progress: TaskProgressSnapshot | None = None
     cycle_progress: TaskProgressSnapshot | None = None
     target_continuity: TargetContinuityEvidence | None = None
+    metrics: tuple[TaskProgressSnapshot, ...] = ()
+    lifecycle: TaskLifecycleSnapshot | None = None
 
     def __post_init__(self) -> None:
         _validate_nonempty_text(self.task_id, "task_id")
@@ -794,6 +827,17 @@ class TaskSnapshot:
             raise ValueError(
                 "target_continuity must be TargetContinuityEvidence or None"
             )
+        if type(self.metrics) is not tuple or any(
+            not isinstance(metric, TaskProgressSnapshot) for metric in self.metrics
+        ):
+            raise ValueError("metrics must be a tuple of TaskProgressSnapshot values")
+        labels = tuple(metric.label for metric in self.metrics)
+        if len(labels) != len(set(labels)):
+            raise ValueError("metric labels must be unique")
+        if self.lifecycle is not None and not isinstance(
+            self.lifecycle, TaskLifecycleSnapshot
+        ):
+            raise ValueError("lifecycle must be TaskLifecycleSnapshot or None")
 
 
 @runtime_checkable
@@ -804,7 +848,10 @@ class Task(Protocol):
     def decide(self, observation: Observation) -> Decision:
         ...
 
-    def apply_verification(self, result: "VerificationResult") -> None:
+    def apply_verification(
+        self,
+        result: "VerificationResult",
+    ) -> VerificationDisposition | None:
         ...
 
     def discard_pending_action(

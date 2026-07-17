@@ -159,7 +159,15 @@ class VerifierTest(unittest.TestCase):
 
         self.assertTrue(result.passed)
         self.assertEqual("item_quantity_increased", result.reason)
-        self.assertEqual(Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 101), result.outcome)
+        self.assertEqual(
+            Outcome(
+                OutcomeKind.ITEM_QUANTITY_INCREASED,
+                101,
+                item_id=ITEM_ID,
+                item_quantity_delta=1,
+            ),
+            result.outcome,
+        )
 
     def test_emits_item_quantity_equals_without_an_interface(self) -> None:
         spec = specification(

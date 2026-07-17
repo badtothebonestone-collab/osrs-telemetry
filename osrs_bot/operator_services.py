@@ -29,7 +29,7 @@ from .profile import profile_contract
 
 OPERATOR_PREFLIGHT_SCHEMA = "operator_preflight.v1"
 OPERATOR_DIAGNOSTICS_SCHEMA = "operator_diagnostics.v1"
-APPLICATION_SCHEMA = "engine_application.v1"
+APPLICATION_SCHEMA = "engine_application.v2"
 MAX_OPERATOR_ERROR_LENGTH = 2_000
 MAX_PROCESS_OUTPUT_TAIL_BYTES = 32_768
 MAX_ARTIFACT_DIRECTORIES = 4_096

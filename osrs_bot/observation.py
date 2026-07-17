@@ -12,20 +12,21 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-from .model import CAMERA_YAW_UNITS, DialogueOption, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
+from .contract_limits import MAX_PRIORITY_OBJECT_IDS
+from .model import CAMERA_YAW_UNITS, DialogueOption, EquipmentObservation, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
 from .model import ObservationPipelineEvidence, PlayerObservation, SceneCensusEvidence, SceneIndex, ScreenBounds, ScreenPoint, TargetGeometry, WidgetObservation, WidgetTarget, WorldPoint
 
 RESPONSE_SCHEMA = "plugin_snapshot_response.v2"
 SENSOR_FRAME_SCHEMA = "sensor_frame.v1"
 MAX_SOURCE_AGE_MILLIS = 2_000
 MAX_TILE_PROJECTIONS = 16
-MAX_PRIORITY_OBJECT_IDS = 32
 MAX_PRIORITY_OBJECT_KEY_LENGTH = 256
 MAX_SNAPSHOT_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_ERROR_RESPONSE_BYTES = 64 * 1024
 MAX_SCENE_OBJECT_ROWS = 64
 MAX_MENU_ENTRY_ROWS = 16
 MAX_INVENTORY_ITEM_ROWS = 28
+MAX_EQUIPMENT_ITEM_ROWS = 32
 MAX_DIALOGUE_OPTION_ROWS = 16
 CORE_FACT_NEEDS = ("baseline", "inventory", "activity", "bank_ui", "dialogue_state")
 CANONICAL_NEEDS = ("baseline", "inventory", "activity", "interaction_hot",
@@ -720,6 +721,78 @@ def _inventory(payloads: Mapping[str, Any]) -> InventoryObservation:
     if known and (occupied + free != slot_count or len(unique_slots) != occupied):
         raise ObservationSchemaError("known inventory items and slot counts disagree")
     return InventoryObservation(tuple(sorted(items, key=lambda item: item.slot)), slot_count, occupied, free, known)
+
+
+def _equipment(payloads: Mapping[str, Any]) -> EquipmentObservation:
+    outer = _payload(payloads, "inventory")
+    raw = _mapping(
+        outer.get("equipment"),
+        "payloads.inventory.equipment",
+        optional=True,
+    )
+    if not raw:
+        return EquipmentObservation()
+    slot_count = _integer(raw.get("slotCount", 14), "equipment.slotCount")
+    if not 0 < slot_count <= MAX_EQUIPMENT_ITEM_ROWS:
+        raise ObservationSchemaError(
+            f"equipment.slotCount must be between 1 and {MAX_EQUIPMENT_ITEM_ROWS}"
+        )
+    items_value = _bounded_list(
+        raw.get("items", []), "equipment.items", MAX_EQUIPMENT_ITEM_ROWS
+    )
+    items: list[InventoryItem] = []
+    for index, value in enumerate(items_value):
+        item = _mapping(value, f"equipment.items[{index}]")
+        slot = _integer(item.get("slot"), f"equipment.items[{index}].slot")
+        item_id = _integer(
+            item.get("itemId"), f"equipment.items[{index}].itemId"
+        )
+        quantity = _integer(
+            item.get("quantity"), f"equipment.items[{index}].quantity"
+        )
+        name = item.get("name")
+        if (
+            not 0 <= slot < slot_count
+            or item_id <= 0
+            or quantity <= 0
+            or (name is not None and not isinstance(name, str))
+        ):
+            raise ObservationSchemaError(
+                f"equipment.items[{index}] has invalid values"
+            )
+        items.append(InventoryItem(slot, item_id, quantity, name))
+    unique_slots = {item.slot for item in items}
+    if len(unique_slots) != len(items):
+        raise ObservationSchemaError("equipment contains duplicate slots")
+    occupied = _integer(
+        raw.get("occupiedSlots", raw.get("filledSlots", len(unique_slots))),
+        "equipment.occupiedSlots",
+    )
+    free = _integer(
+        raw.get("freeSlots", max(0, slot_count - occupied)),
+        "equipment.freeSlots",
+    )
+    known = _boolean(raw.get("known"), "equipment.known")
+    if min(occupied, free) < 0 or occupied + free > slot_count:
+        raise ObservationSchemaError("equipment slot counts are inconsistent")
+    if known and (
+        occupied + free != slot_count or len(unique_slots) != occupied
+    ):
+        raise ObservationSchemaError(
+            "known equipment items and slot counts disagree"
+        )
+    if not known and (items or occupied):
+        raise ObservationSchemaError(
+            "unknown equipment cannot contain item evidence"
+        )
+    return EquipmentObservation(
+        tuple(sorted(items, key=lambda item: item.slot)),
+        slot_count,
+        occupied,
+        free,
+        known,
+    )
+
 
 def _menu_state(
     payloads: Mapping[str, Any], transform: _CanvasTransform | None
@@ -2140,6 +2213,7 @@ def parse_observation(
     )
     menus, menu_client_tick, menu_mouse_point, menu_open, menu_bounds = _menu_state(payloads, transform)
     inventory = _inventory(payloads)
+    equipment = _equipment(payloads)
     widgets = _widgets(payloads, transform)
     nearby_objects, object_evidence = _nearby_objects(
         payloads, transform, location, dict(tiles)
@@ -2194,6 +2268,7 @@ def parse_observation(
                        max_source_age_millis=max_source_age_millis,
                        scene_census=scene_census,
                        pipeline=pipeline,
+                       equipment=equipment,
                        _prebuilt_scene_index=scene_index)
 
 class ObservationClient:

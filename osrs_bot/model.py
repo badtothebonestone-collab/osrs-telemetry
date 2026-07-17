@@ -88,6 +88,61 @@ class InventoryObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class EquipmentObservation:
+    """Authoritative equipment-container evidence from the current tick.
+
+    Legacy snapshots do not carry this core fact.  Their safe representation is
+    therefore the immutable default below: an unknown, empty equipment view.
+    Callers must check ``known`` before treating absence from ``item_ids`` as
+    evidence that an item is not equipped.
+    """
+
+    items: tuple[InventoryItem, ...] = ()
+    slot_count: int = 14
+    occupied_slots: int = 0
+    free_slots: int = 14
+    known: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple) or not all(
+            isinstance(item, InventoryItem) for item in self.items
+        ):
+            raise TypeError("equipment items must be a tuple of InventoryItem values")
+        if self.slot_count <= 0:
+            raise ValueError("equipment slot_count must be positive")
+        if self.occupied_slots < 0 or self.free_slots < 0:
+            raise ValueError("equipment slot counts must be non-negative")
+        if self.occupied_slots + self.free_slots > self.slot_count:
+            raise ValueError("equipment slot counts are inconsistent")
+        slots = {item.slot for item in self.items}
+        if len(slots) != len(self.items):
+            raise ValueError("equipment contains duplicate slots")
+        if any(
+            not 0 <= item.slot < self.slot_count
+            or item.item_id <= 0
+            or item.quantity <= 0
+            or (item.name is not None and not isinstance(item.name, str))
+            for item in self.items
+        ):
+            raise ValueError("equipment contains an invalid item")
+        if self.known:
+            if (
+                self.occupied_slots + self.free_slots != self.slot_count
+                or len(self.items) != self.occupied_slots
+            ):
+                raise ValueError("known equipment items and slot counts disagree")
+        elif self.items or self.occupied_slots:
+            raise ValueError("unknown equipment cannot contain item evidence")
+
+    def quantity(self, item_id: int) -> int:
+        return sum(item.quantity for item in self.items if item.item_id == item_id)
+
+    @property
+    def item_ids(self) -> frozenset[int]:
+        return frozenset(item.item_id for item in self.items)
+
+
+@dataclass(frozen=True, slots=True)
 class TargetGeometry:
     available: bool = False
     on_screen: bool = False
@@ -581,6 +636,7 @@ class Observation:
     scene_census: SceneCensusEvidence = SceneCensusEvidence()
     pipeline: ObservationPipelineEvidence = ObservationPipelineEvidence()
     _prebuilt_scene_index: InitVar[SceneIndex | None] = None
+    equipment: EquipmentObservation = EquipmentObservation()
     _scene_index: SceneIndex = field(init=False, repr=False, compare=False)
 
     def __post_init__(self, _prebuilt_scene_index: SceneIndex | None) -> None:
@@ -592,6 +648,8 @@ class Observation:
             raise TypeError("scene_census must be SceneCensusEvidence")
         if not isinstance(self.pipeline, ObservationPipelineEvidence):
             raise TypeError("pipeline must be ObservationPipelineEvidence")
+        if not isinstance(self.equipment, EquipmentObservation):
+            raise TypeError("equipment must be EquipmentObservation")
         if _prebuilt_scene_index is None:
             index = SceneIndex.build(self.nearby_objects)
         elif not isinstance(_prebuilt_scene_index, SceneIndex):
