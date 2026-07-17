@@ -38,7 +38,10 @@ from osrs_bot.model import (
     WidgetObservation,
     WorldPoint,
 )
-from osrs_bot.observation import ObservationBackpressureError
+from osrs_bot.observation import (
+    ObservationBackpressureError,
+    ObservationWorldModelHandoffError,
+)
 from osrs_bot.observability import TimingPhase, WaitState
 from osrs_bot.runtime import (
     RuntimeControl,
@@ -1075,6 +1078,137 @@ class TaskRuntimeTests(unittest.TestCase):
                 for frame in publisher.frames
             ),
         )
+
+    def test_world_model_handoff_storm_is_bounded_without_counting_observations(
+        self,
+    ) -> None:
+        client = _Client(
+            *[
+                ObservationWorldModelHandoffError(("scene_object_census",))
+                for _ in range(9)
+            ]
+        )
+        publisher = _RecordingPublisher()
+        task = _Task([_wait(10)])
+        runtime = TaskRuntime(
+            client,
+            task,
+            _Verifier(None),
+            frame_publisher=publisher,
+            sleep=lambda _seconds: None,
+        )
+
+        result = runtime.run()
+
+        self.assertEqual("ERROR", result.status)
+        self.assertEqual(0, result.observations)
+        self.assertEqual(0, result.actions)
+        self.assertEqual(0, task.decide_calls)
+        self.assertIn("8-retry budget", result.reason)
+        self.assertEqual([], client.results)
+        self.assertIn(
+            WaitState.WAITING_FOR_SOURCE_COHERENCE,
+            tuple(
+                frame.observability.wait_state
+                for frame in publisher.frames
+            ),
+        )
+
+    def test_verification_retries_world_model_handoff_without_reexecuting(self) -> None:
+        decision, _verification = _executable(10)
+        task = _Task([decision, _wait(12, "complete")])
+        interface = _ActionInterface(_sent_execution(decision.action, 10, 10))
+        gained_log = replace(
+            _observation(11),
+            inventory=InventoryObservation(
+                items=(InventoryItem(slot=0, item_id=1511, quantity=1),),
+                occupied_slots=1,
+                free_slots=27,
+                known=True,
+            ),
+        )
+        publisher = _RecordingPublisher()
+        runtime = TaskRuntime(
+            _Client(
+                _observation(10),
+                ObservationWorldModelHandoffError(("scene_object_census",)),
+                gained_log,
+                _observation(12),
+            ),
+            task,
+            Verifier(max_observation_age_seconds=10.0),
+            interface,
+            configuration=replace(DEFAULT_RUNTIME_CONFIG, max_observations=3),
+            frame_publisher=publisher,
+            sleep=lambda _seconds: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        self.assertEqual(3, result.observations)
+        self.assertEqual(1, result.actions)
+        self.assertEqual(1, len(interface.calls))
+        self.assertEqual(1, len(task.applied))
+        self.assertTrue(task.applied[0].passed)
+        self.assertIn(
+            WaitState.WAITING_FOR_SOURCE_COHERENCE,
+            tuple(
+                frame.observability.wait_state
+                for frame in publisher.frames
+            ),
+        )
+
+    def test_verification_world_model_handoff_storm_is_bounded_without_reexecuting(
+        self,
+    ) -> None:
+        decision, _verification = _executable(10)
+        task = _Task([decision])
+        execution = _sent_execution(decision.action, 10, 10)
+        interface = _ActionInterface(execution)
+        client = _Client(
+            _observation(10),
+            *[
+                ObservationWorldModelHandoffError(
+                    ("scene_object_census",)
+                )
+                for _ in range(9)
+            ],
+        )
+        runtime = TaskRuntime(
+            client,
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _seconds: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual(1, result.observations)
+        self.assertEqual(1, result.actions)
+        self.assertEqual(1, task.decide_calls)
+        self.assertEqual(1, len(interface.calls))
+        self.assertIs(interface.calls[0][0], decision.action)
+        self.assertEqual(10, interface.calls[0][1].tick)
+        self.assertIs(execution, result.execution)
+        self.assertEqual([], client.results)
+        self.assertEqual(1, len(task.applied))
+        failure = task.applied[0]
+        self.assertIs(VerificationStatus.FAIL, failure.status)
+        self.assertIs(
+            VerificationFailureKind.RUNTIME_FAILURE,
+            failure.failure_kind,
+        )
+        self.assertIn("verification observation remained", failure.reason)
+        self.assertIn("8-retry budget", failure.reason)
+        self.assertEqual(failure.reason, result.reason)
+        self.assertIs(TaskStatus.BLOCKED, task.status)
+        self.assertEqual("blocked", task.state)
+        self.assertEqual(failure.reason, task.blocker)
+        self.assertIs(TaskStatus.BLOCKED, result.task_snapshot.status)
+        self.assertEqual(failure.reason, result.task_snapshot.blocker)
 
     def test_runtime_records_additive_phase_timing_without_control_clock_reads(self) -> None:
         evidence_value = 0.0

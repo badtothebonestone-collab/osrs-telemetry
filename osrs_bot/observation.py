@@ -60,6 +60,19 @@ class ObservationDecodeError(ObservationError): pass
 class ObservationSchemaError(ObservationError): pass
 
 
+class ObservationWorldModelHandoffError(ObservationError):
+    """A bounded retry signal for one exact dynamic-provenance handoff."""
+
+    error_code = "world_model_provenance_mismatch"
+    retryable = True
+
+    def __init__(self, missing_capabilities: tuple[str, ...]) -> None:
+        self.missing_capabilities = missing_capabilities
+        super().__init__(
+            "planned snapshot crossed a transient world-model provenance handoff"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _TransportEvidence:
     response_bytes: int
@@ -2077,6 +2090,176 @@ def _validate_planned_response_contract(
         )
 
 
+def _is_complete_planned_tile_projection_payload(
+    payload: Mapping[str, Any],
+    requested_tiles: tuple[tuple[str, WorldPoint], ...],
+) -> bool:
+    """Validate the request-bound identity shape of a successful tile lane."""
+    rows = payload.get("tiles")
+    if (
+        payload.get("schema") != "tile_projection_response.v1"
+        or payload.get("status") not in {"PASS", "WARN"}
+        or not isinstance(rows, list)
+        or len(rows) != len(requested_tiles)
+    ):
+        return False
+    requested = dict(requested_tiles)
+    seen: set[str] = set()
+    row_statuses: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return False
+        label = row.get("label")
+        status = row.get("status")
+        if (
+            row.get("schema") != "tile_projection.v1"
+            or not isinstance(label, str)
+            or label in seen
+            or label not in requested
+            or status not in {"PASS", "WARN"}
+        ):
+            return False
+        point = requested[label]
+        if (
+            row.get("worldX") != point.x
+            or row.get("worldY") != point.y
+            or row.get("plane") != point.plane
+        ):
+            return False
+        seen.add(label)
+        row_statuses.append(status)
+    expected_status = (
+        "PASS" if all(status == "PASS" for status in row_statuses) else "WARN"
+    )
+    return seen == set(requested) and payload.get("status") == expected_status
+
+
+def _is_transient_planned_world_model_handoff(
+    root: Mapping[str, Any],
+    payloads: Mapping[str, Any],
+    observation: Observation,
+    *,
+    requested_tile_projections: tuple[tuple[str, WorldPoint], ...],
+) -> bool:
+    """Recognize only the endpoint's exact non-authoritative handoff shape.
+
+    A snapshot request can straddle a SensorFrame/world-model refresh.  The
+    endpoint then returns its still-coherent core as WARN and deliberately
+    omits the rejected dynamic census.  That response is useful retry evidence,
+    but it is never a planned observation and cannot satisfy the census lock.
+    """
+    raw_missing = root.get("missingCapabilities")
+    raw_warnings = root.get("warnings")
+    if (
+        not isinstance(raw_missing, list)
+        or any(not isinstance(value, str) for value in raw_missing)
+        or not isinstance(raw_warnings, list)
+        or any(not isinstance(value, str) for value in raw_warnings)
+    ):
+        return False
+
+    missing = frozenset(observation.missing_capabilities)
+    warnings = frozenset(observation.warnings)
+    world_missing = frozenset({"scene_object_census"})
+    world_warnings = frozenset({"world_model_provenance_mismatch"})
+    interaction_missing = frozenset({"interaction_hot"})
+    interaction_warnings = frozenset(
+        {"menu_evidence_provenance_mismatch_or_stale"}
+    )
+    tile_missing = frozenset({"tile_projection"})
+    tile_warnings = frozenset({"tile_projection_provenance_mismatch"})
+    combined = "interaction_hot" in missing
+    tile_handoff = "tile_projection" in missing
+    expected_missing = (
+        world_missing
+        | (interaction_missing if combined else frozenset())
+        | (tile_missing if tile_handoff else frozenset())
+    )
+    expected_warnings = (
+        world_warnings
+        | (interaction_warnings if combined else frozenset())
+        | (tile_warnings if tile_handoff else frozenset())
+    )
+
+    if (
+        observation.status != "WARN"
+        or root.get("status") != "WARN"
+        or observation.game_state != "LOGGED_IN"
+        or observation.location is None
+        or observation.tick < 0
+        or not observation.fresh
+        or not observation.cache_wall_clock_fresh
+        or not observation.source_coherent
+        or not observation.scene_playable
+        or not observation.timestamp_not_future
+        or observation.scene_census.metadata_present
+        or "scene_object_census" in payloads
+        or "worldModel" in root
+        or "worldModelQuality" in root
+        or "pipeline" in root
+        or (
+            tile_handoff
+            and (
+                not requested_tile_projections
+                or "tile_projection" in payloads
+                or "tileProjections" in root
+            )
+        )
+        or missing != expected_missing
+        or warnings != expected_warnings
+        or frozenset(raw_missing) != missing
+        or frozenset(raw_warnings) != warnings
+        or len(raw_missing) != len(missing)
+        or len(raw_warnings) != len(warnings)
+    ):
+        return False
+
+    tile_payload = payloads.get("tile_projection")
+    root_tile_payload = root.get("tileProjections")
+    if requested_tile_projections:
+        if tile_handoff:
+            if (
+                "tile_projection" in payloads
+                or "tileProjections" in root
+            ):
+                return False
+        elif not (
+            isinstance(tile_payload, Mapping)
+            and isinstance(root_tile_payload, Mapping)
+            and dict(tile_payload) == dict(root_tile_payload)
+            and _is_complete_planned_tile_projection_payload(
+                tile_payload,
+                requested_tile_projections,
+            )
+        ):
+            return False
+    elif (
+        tile_handoff
+        or "tile_projection" in payloads
+        or "tileProjections" in root
+    ):
+        return False
+
+    interaction = payloads.get("interaction_hot")
+    root_interaction = root.get("clientTickHot")
+    freshness = root.get("freshness")
+    expected_menu_fresh = not combined
+    return bool(
+        isinstance(interaction, Mapping)
+        and isinstance(root_interaction, Mapping)
+        and isinstance(freshness, Mapping)
+        and dict(interaction) == dict(root_interaction)
+        and interaction.get("schema") == "client_tick_hot.v1"
+        and interaction.get("sessionId") == observation.session_id
+        and interaction.get("clientProcessId") == observation.client_process_id
+        and observation.menu_source_tick is not None
+        and observation.menu_source_tick >= 0
+        and observation.menu_timestamp is not None
+        and observation.menu_fresh is expected_menu_fresh
+        and freshness.get("menuFresh") is expected_menu_fresh
+    )
+
+
 def parse_observation(
     value: Mapping[str, Any],
     tile_projections: Iterable[tuple[str, WorldPoint]] | None = None,
@@ -2233,14 +2416,7 @@ def parse_observation(
         parse_millis=(perf_counter() - parse_started) * 1000.0,
         index_millis=index_millis,
     )
-    if _planned_response_contract is not None:
-        _validate_planned_response_contract(
-            _planned_response_contract,
-            location,
-            scene_census,
-            pipeline,
-        )
-    return Observation(player=player, location=location, plane=location.plane if location else None,
+    observation = Observation(player=player, location=location, plane=location.plane if location else None,
                        inventory=inventory, nearby_objects=nearby_objects,
                        menus=menus, widgets=widgets,
                        canvas_bounds=transform.canvas_bounds if transform else None,
@@ -2270,6 +2446,23 @@ def parse_observation(
                        pipeline=pipeline,
                        equipment=equipment,
                        _prebuilt_scene_index=scene_index)
+    if _planned_response_contract is not None:
+        if _is_transient_planned_world_model_handoff(
+            root,
+            payloads,
+            observation,
+            requested_tile_projections=tiles,
+        ):
+            raise ObservationWorldModelHandoffError(
+                observation.missing_capabilities
+            )
+        _validate_planned_response_contract(
+            _planned_response_contract,
+            location,
+            scene_census,
+            pipeline,
+        )
+    return observation
 
 class ObservationClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8893", *, auth_token: str | None = None,

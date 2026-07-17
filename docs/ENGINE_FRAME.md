@@ -348,8 +348,9 @@ frame age. `WAITING_FOR_NEXT_SCENE_UPDATE`,
 `WAITING_FOR_SOURCE_COHERENCE`, `ENDPOINT_BACKPRESSURE`,
 `INPUT_TRANSACTION_BUSY`, and `CURSOR_FEEDBACK_SETTLING` are neutral
 expected/busy states, not fault aliases. `ENDPOINT_BACKPRESSURE` is emitted only
-for the typed retryable endpoint-busy response and is bounded to eight
-consecutive retries before runtime terminates the affected path.
+for the typed retryable endpoint-busy response. It permits eight events in that
+independent lane before the next accepted planned Observation and terminates the
+affected path on the ninth, subject to existing deadlines.
 `SENSOR_STALE` is exact sensor safety truth. `PRESENTATION_FRAME_STALE` and
 `ARDUINO_HEALTH_STALE` are distinct passive-age facts.
 `ARDUINO_COMMAND_FAILED` is a real command-path failure and is presented

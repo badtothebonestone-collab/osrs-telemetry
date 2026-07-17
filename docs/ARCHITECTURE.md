@@ -214,11 +214,33 @@ workers and eight pending slots, while only one expensive snapshot may be
 active; overlap returns retryable `503 endpoint_busy`. Python recognizes only
 the typed retryable busy response, publishes neutral `ENDPOINT_BACKPRESSURE`
 wait/timing evidence, and does not spend the ordinary observation-error budget.
-At most eight consecutive busy responses are retried; the next one terminates
-the affected runtime path. Malformed request JSON
+Up to eight busy-lane events may occur before the next accepted planned
+Observation; the ninth terminates the affected runtime path, subject to existing
+deadlines.
+Interleaved provenance-handoff events do not reset that independent count.
+Malformed request JSON
 returns `400`, and endpoint admission is released for the next request. JSON
 encoding is exactly two passes and the final byte array is reused for the
 response write.
+
+Admission backpressure is distinct from a dynamic provenance handoff. A
+request may be admitted against SensorFrame N while its client-thread world
+queries complete at a different tick or geometry frame. The endpoint then
+truthfully returns a partial HTTP 200 `WARN`, omits the rejected census, and
+reports `world_model_provenance_mismatch`. A planned host fetch recognizes only
+that exact fresh/coherent omission shape. The interaction payload/root mirror
+and raw/parsed `menuFresh` state must agree; an interaction handoff requires
+its exact missing/warning pair. Requested tile evidence must either be complete,
+mirrored, schema-valid, and bound to every requested label/location, or be
+absent with the exact tile-provenance missing/warning pair. Unrequested tile
+evidence is contradictory. The typed source-coherence retry is raised before
+the Observation reaches task code, spends neither an observation nor an
+additional action attempt, and never re-executes a sent action. Up to eight lane
+events are permitted before the next accepted planned Observation; the ninth is
+terminal, subject to existing runtime or verification deadlines. Diagnostic
+legacy fetches retain the non-loaded `WARN`; every partial census, extra
+warning/capability, stale core, contradictory or unrequested dynamic envelope,
+or malformed planned shape remains a schema failure.
 
 Scene discovery captures immutable identity and location before it consults
 definitions, actions, or projection. Exact duplicate keys resolve

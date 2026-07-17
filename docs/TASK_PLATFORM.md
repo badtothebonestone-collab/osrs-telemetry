@@ -202,8 +202,13 @@ proof of the new task platform.
 
 The current platform's deterministic, adversarial, replay, full-suite, input,
 firmware, authoring, soak, publication-hygiene, and diff gates pass and are
-recorded in `docs/ENGINE_STATUS.md`. No current loaded scene or gameplay client
-was available: the `8890`/`8893` telemetry listeners were absent and a read-only
-observation attempt was refused before input. No live mining route, current
-woodcut cycle, Arduino gameplay action, hardware cleanup receipt, or firmware
-flash is claimed for this milestone.
+recorded in `docs/ENGINE_STATUS.md`. At milestone start the telemetry listeners
+were absent and the read-only observation attempt was refused before input. A
+follow-up current-build continuation subsequently proved a loaded/fresh/
+coherent woodcut scene, exact typed world and requested-tile provenance
+handoffs, and one Arduino `CAMERA_HOLD left 327` action with changed-pose
+verification. Its final `STOP_ALL -> DISARM -> STATUS` receipt proves disarmed
+firmware, zero held input and command errors, closed ledger/backend, and a
+released COM6 lease. The exact v2 firmware was already installed; this
+continuation did not flash it. This bounded component evidence is not a live
+mining route, ordinary target interaction, bank flow, or current woodcut cycle.

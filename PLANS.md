@@ -292,8 +292,9 @@ system, learned policy, anti-detection system, or GUI runtime logic.
   changed-geometry evidence proves overshoot and may not repeat an unchanged-
   pose pitch limit. Materially unsatisfied zoom that cannot be framed safely is
   typed `zoom_required_but_unavailable` and sends no compensating key. The
-  current protocol adapter injects a 250 ms maximum; current firmware `CAPS`
-  reports hold-key support but does not numerically advertise that maximum.
+  protocol adapter at that historical v1 milestone injected a 250 ms maximum;
+  the then-installed firmware `CAPS` reported hold-key support but did not
+  numerically advertise that maximum.
 - **D041 - Bounded scene queries are explicitly anchored facts:** every scene
   census uses either a validated task-neutral world anchor or the authoritative
   player anchor. Radius and row/projection budgets bound work; they do not
@@ -345,6 +346,22 @@ system, learned policy, anti-detection system, or GUI runtime logic.
   banks, withdrawal/resupply, automatic equipment management, production NPC
   interaction, combat, and quest orchestration remain unsupported rather than
   partially implemented.
+- **D048 - Dynamic provenance handoff is retry evidence, never task input:** an
+  admitted snapshot can straddle the immutable SensorFrame and request-time
+  query lanes. Only a planned fetch can type the exact fresh/coherent `WARN`
+  envelope: the census is absent with `world_model_provenance_mismatch`; the
+  duplicated interaction envelope and `menuFresh` flag agree; and requested
+  tile projections are either complete, mirrored, and request-bound or absent
+  with the exact `tile_projection_provenance_mismatch` companion pair. The
+  optional interaction handoff likewise requires its exact missing/warning
+  pair and `menuFresh=false`. This lane is separate from HTTP admission
+  backpressure, spends no observation or additional action attempt, never
+  repeats a sent action, and permits at most eight lane events before the next
+  accepted planned Observation; the ninth terminates, subject to the existing
+  deadlines.
+  Diagnostic `fetch()` retains the non-loaded `WARN`. Any partial census,
+  extra warning/capability, stale core, contradictory or unrequested dynamic
+  envelope, or malformed shape remains terminal.
 
 ## Phases and acceptance
 
@@ -362,7 +379,7 @@ system, learned policy, anti-detection system, or GUI runtime logic.
 | 9. Operator GUI | Base GUI complete; lifecycle truth implemented, production recheck blocked (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; current/historical/terminal EngineFrame presentation; stale/disconnected Start Live gate; identity-bound reconnect; passive overlay geometry clearing; demonstration and diagnostics. |
 | 10. Movement and targeting quality | In progress; pointer containment deterministic and bounded Arduino-only live gates **PASS** | Polyline route lookahead, classified mandatory points, proactive yaw/pitch framing, authoritative polygon aim candidates, seeded pointer/timing variation, padded pointer containment, one bounded recovery/fresh retry, EngineFrame/overlay diagnostics, focused tests, live route/Tree/cycle proof, full gate, commit, and clean worktree. The pointer submilestone is complete; broader route/Tree/cycle and clean-worktree acceptance remain. |
 | 11. Telemetry, observation, and decision-pipeline reliability | Integrated deterministic/full and production-soak gates **PASS**; current-build live timing remains a documented gap | Explicit anchors and per-request budgets; 10,000-row raw census versus 64-row return/enrichment ceiling; cache budget enforcement; request/response provenance binding; bounded typed backpressure; truthful priority absence; asynchronous bounded live recorder; repeatable soak command. The production `8893` endpoint was unavailable, so no synthetic-to-live after comparison is claimed. |
-| 12. Task-agnostic gathering platform | Complete on the feature branch; deterministic/full gates **PASS**, current-build live evidence unavailable | One capability-negotiated `GatherBankTask`; woodcut and copper definitions; equipment truth; schedules, OR-composed stop conditions and lower run caps; fresh restart reconciliation and task-owned recovery; strict authoring CLI/examples; adversarial tests and measurements; complete gates; truthful live limitation; checkpoint commits and stacked draft PR. |
+| 12. Task-agnostic gathering platform | Complete on the feature branch; deterministic/full gates and bounded current-build component proof **PASS** | One capability-negotiated `GatherBankTask`; woodcut and copper definitions; equipment truth; schedules, OR-composed stop conditions and lower run caps; fresh restart reconciliation and task-owned recovery; strict authoring CLI/examples; adversarial tests and measurements; exact planned-handoff retries; one verified Arduino camera hold with complete cleanup; truthful no-cycle/no-mining limitation; checkpoint commits and stacked draft PR. |
 | Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
@@ -1026,15 +1043,12 @@ waits for a fresh authoritative final geometry after the episode reaches ready.
 One coarse correction plus at most one fine correction is the default and hard
 configured camera budget for this milestone. Hold duration scales with wrap-safe
 world-bearing and fresh screen error using a bounded response model retained from
-verified camera receipts. The injected `CameraKeyCapabilities` maximum clamps
-every request to the current protocol's 250 ms. This is deliberately not
-documented as a numeric firmware negotiation: current `CAPS` text advertises
-`holdKeys=1` but contains no maximum-hold value. Fresh capability negotiation can
-replace that adapter-provided value later without changing controller ownership.
-The controller itself therefore needs no redesign, but the present
-`CameraConstraint`, typed key intent, and Arduino transport still fail closed at
-250 ms; a later firmware/protocol milestone must raise those downstream bounds
-atomically with the newly negotiated capability.
+verified camera receipts. The injected `CameraKeyCapabilities` maximum clamped
+every request in that historical v1 milestone to 250 ms. This was deliberately
+not documented as a numeric firmware negotiation: the v1 `CAPS` text advertised
+`holdKeys=1` but contained no maximum-hold value. The later v2 milestone replaced
+that adapter-provided limit with exact capability negotiation without changing
+controller ownership; installed v2 now advertises the camera-only 600 ms maximum.
 
 The retained 79-camera-action trace is now a deterministic replay fixture. It
 reproduces camera bursts of `2,2,10,12,2,27,2,1,21`, 36 yaw reversals of which 31
@@ -1083,11 +1097,12 @@ in `environment_cleanup.json`. The disconnect split the camera episode and
 interaction across two `EngineApplication` runs, so the required one
 uninterrupted loaded-scene run is not claimed.
 
-The live 250 ms maximum moved 1,109 yaw units but left 5,035 world-bearing units;
-the 80 ms fine hold moved 479 units and reached safe usable framing. Together
-with the retained replay, this shows the current cap materially constrains large
-otherwise-correct coarse turns even though a safe fine-framed interaction was
-reached here. No firmware, `InputCoordinator`, wheel, middle-drag, chord, raw
+The historical v1 live 250 ms maximum moved 1,109 yaw units but left 5,035
+world-bearing units; the 80 ms fine hold moved 479 units and reached safe usable
+framing. Together with the retained replay, this showed that then-current cap
+materially constrained large otherwise-correct coarse turns even though a safe
+fine-framed interaction was reached here. No firmware, `InputCoordinator`,
+wheel, middle-drag, chord, raw
 key-down/up, software-input, or alternate input path changed.
 
 ## Phase 11 telemetry, observation, and decision-pipeline reliability
@@ -1196,12 +1211,20 @@ PR carry this completed milestone. Exact counts and measured tails are retained
 in `docs/ENGINE_STATUS.md` and the external proof bundle.
 
 The copper object/item/equipment IDs and Lumbridge Swamp East anchor are pinned
-to upstream RuneLite source hashes in the definition. The swamp surface route is
-authored, not live-proven. At the start of this phase no RuneLite/Java/Python
-client and no `8890`/`8893` listener was present; the read-only observe attempt
-failed with connection refused before input. Arduino Leonardo ports enumerated,
-but no port was opened and no firmware was flashed. A final status update must
-retain that limitation unless a current loaded-scene proof is actually produced.
+to upstream RuneLite source hashes in the definition. The swamp surface route
+is authored, not live-proven. At phase start no RuneLite/Java/Python client or
+telemetry listener was present and the read-only observe attempt failed before
+input. The follow-up current-build continuation later proved a loaded, fresh,
+coherent woodcut scene; 500 exact planned route fetches produced 469 ordinary
+observations, 25 typed world-only handoffs, 6 typed requested-tile-plus-world
+handoffs, and no schema failure. One production `CAMERA_HOLD left 327` action
+was acknowledged and verified from yaw `10757 -> 9213`; the configured one-
+action cap stopped the proposed walk before a second activation. Final
+`STOP_ALL`, `DISARM`, and `STATUS` were acknowledged, firmware was disarmed with
+zero held input, all command-error counts were zero, the ledger/backend closed,
+and COM6 was released. Firmware v2 was already installed; no flash occurred in
+this continuation. This is a component proof, not a copper-route, ordinary
+interaction, bank, or complete woodcut-cycle claim.
 
 See `docs/TASK_PLATFORM.md` and `docs/DEFINITIONS_AND_PROFILES.md` for the
 governing contract.

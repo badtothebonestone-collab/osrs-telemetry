@@ -4,9 +4,57 @@
 
 ### Task-agnostic gathering platform
 
-**The task-platform implementation and deterministic final gate pass. Current-
-build loaded-scene and gameplay proof remains unavailable, so this is not a
-live mining-route or current woodcut-cycle claim.**
+**The task-platform implementation, deterministic final gate, exact planned-
+handoff live diagnostic, and one-action Arduino component proof pass. This is
+not a current woodcut cycle, ordinary route interaction, or mining-route
+claim.**
+
+The current-build continuation pinned RuneLite PID `11336` and session
+`plugin-11336-1784296265281`. Across 500 exact locked-route planned requests,
+469 returned ordinary observations, 25 raised the exact world-only typed
+handoff, 6 raised the exact requested-tile-plus-world handoff, and none failed
+schema. The planned parser accepts no task authority from those HTTP 200
+`WARN`s. It requires the world omission pair, exact mirrored interaction state,
+and either complete request-bound tile mirrors or the exact requested-tile
+omission pair. The optional interaction handoff requires its exact pair and
+`menuFresh=false`. Up to eight handoff-lane events may occur before the next
+accepted planned Observation; the ninth terminates, subject to existing
+deadlines. No
+event spends an observation or additional action attempt, and post-action
+verification cannot re-execute the sent action. Legacy diagnostic `fetch()`
+retains the non-loaded `WARN`; every partial census, extra warning/capability,
+stale core, contradictory or unrequested dynamic envelope, or malformed planned
+shape remains terminal.
+
+The final production run consumed 7 observations and sent exactly one gameplay
+action: acknowledged `CAMERA_HOLD left 327`, requested and applied for 327 ms.
+A newer geometry/camera sample moved yaw `10757 -> 9213`; semantic camera
+verification passed. The next walk was proposed but never sent because the
+configured one-action ceiling produced the expected terminal `LIMIT` (`action
+limit reached`). All 13 wire commands were acknowledged with zero failed,
+unresolved, or ACK-missing commands. Final `STOP_ALL`, `DISARM`, and `STATUS`
+passed; firmware reported disarmed with zero keys and mouse buttons held; the
+ledger and backend closed and COM6 was released. Hardware negotiated exact
+`arduino_hid.v2` / `2.0.0`; that firmware was already installed and no flash
+occurred in this continuation.
+
+The external proof root is
+`_run_proofs/task_platform_live/20260717T135046.8968378Z/host_handoff_fix/`.
+SHA-256 is
+`EF2FAB1D01DB47172E52AD631B622171A259551D72E2E672DA85CEA5D05B4AC4`
+for `planned-route-final-classifier-live.json`,
+`846EFEA620C26D63D801BBA9D3F9060887E4F03751EC8C76DBE2831B2E9EE14D`
+for `live-one-action-final.json`, and
+`FC9FADE8B835820F177852B225C7D79D1EBC2D203C29981D7A5B7864D486D165`
+for `observe-final.json`.
+An accidental `run.cmd login COM6 --help` invocation exposed that the wrapper
+does not forward help: it sent the acknowledged Play Now step, then the saved-
+session helper's bounded final-pointer correction overshoot blocked the final
+activation. A separate cleanup-only transaction proved authoritative safe state
+(`post-accidental-login-wire-cleanup.json`, SHA-256
+`31654F57CAED25586AC20EC1DC5B651A587E4B8E38B6361E77E9CC4F336143D8`).
+A Computer Use click on the already-authenticated `Click here to play` surface
+was operator setup only and is not production gameplay evidence.
 
 The application now exposes one `gather_bank` task with two immutable built-in
 definitions: the proven `lumbridge_west_trees_v1` regression baseline and
@@ -76,12 +124,12 @@ The clean consolidation base was independently revalidated before this work:
 79/79, firmware protocol 8/8, focused input gates, and bounded synthetic soak
 passed. Those are baseline results, not the new platform's final gate.
 
-At milestone start no RuneLite/Java/Python client and no `8890`/`8893` listener
-was present. A bounded read-only observation failed with connection refused
-before any input. Arduino Leonardo ports enumerated but were not opened. No
-current mining route, woodcut cycle, Arduino gameplay action, firmware upload,
-or flash is claimed. The final validation section must be updated only from
-actual retained outputs.
+At milestone start no RuneLite/Java/Python client or telemetry listener was
+present, and a bounded read-only observation failed before input. That initial
+limitation is historical: the follow-up proof above established a current
+loaded/fresh/coherent scene and one verified Arduino camera action. It does not
+prove the copper route, an ordinary target activation, bank flow, or a complete
+woodcut cycle. No firmware upload or flash occurred.
 
 See [`TASK_PLATFORM.md`](TASK_PLATFORM.md) and
 [`DEFINITIONS_AND_PROFILES.md`](DEFINITIONS_AND_PROFILES.md).
@@ -105,9 +153,11 @@ plan.
 
 Typed retryable `503 endpoint_busy` now publishes neutral
 `ENDPOINT_BACKPRESSURE` and `endpoint_backpressure_wait` evidence, does not
-spend the ordinary observation-error budget, and is bounded to eight
-consecutive retries. The production live-evidence subscriber only enqueues to a
-bounded 256-frame queue; one daemon writer performs JSON and filesystem work.
+spend the ordinary observation-error budget, and permits eight events in its
+independent lane before the next accepted planned Observation; the ninth
+terminates.
+The production live-evidence subscriber only enqueues to a bounded 256-frame
+queue; one daemon writer performs JSON and filesystem work.
 Its receipt reports queue capacity/high-water, dropped frames, bounded recorder
 errors, and writer shutdown state. Repeatable synthetic coverage is available
 as `python -m osrs_bot.telemetry_soak` and `run.cmd telemetry-soak`, emitting the
@@ -840,6 +890,10 @@ the geometry condition and recovery behavior rather than source attribution.
   4/4 tasks executed; Java snapshot-fixture tests passed 2/2; firmware protocol
   passed 8/8; capability/transport passed 78/78; and InputCoordinator/static-
   boundary tests passed 139/139.
+- Planned-handoff follow-up gate: **PASS**. The focused observation/runtime
+  suite passed 121/121; final public `run.cmd test` passed 1,045/1,045 Python
+  tests and retained the 129/129 Java result; `run.cmd replay` passed 7/7. This
+  extends the task-platform gate above without changing RuneLite Java source.
 - Authoring validation accepted both runnable examples, rejected the unsupported
   NPC-fishing example and deliberately non-runnable scaffold, and validated
   built-in plus external-definition profiles. Publication hygiene found no
@@ -860,12 +914,19 @@ the geometry condition and recovery behavior rather than source attribution.
   -33.00%, and RSS growth -35.01%. The comparison also records
   decode-plus-parse p99 +9.32% and target maximum +5.60%; maxima are scheduler-
   sensitive, so no blanket latency improvement is claimed.
-- Current loaded-scene/live gameplay remains unavailable. Final read-only
-  enumeration found no RuneLite/Python client and no `8890`/`8893` listener;
-  the only Java process was a Gradle daemon. Leonardo COM6/COM7 enumerated but
-  no port was opened, no input was sent, and no firmware was flashed. Therefore
-  no current hardware-cleanup receipt, live mining route, or woodcut cycle is
-  implied by the deterministic gate.
+- Current loaded-scene component proof: **PASS with bounded scope**. A 500-call
+  exact planned-route diagnostic produced 469 ordinary observations, 25 typed
+  world-only handoffs, 6 typed requested-tile-plus-world handoffs, and zero
+  schema failures. One production run then sent exactly one acknowledged
+  `CAMERA_HOLD left 327`; a newer same-session sample changed yaw
+  `10757 -> 9213`, so semantic verification passed. The expected terminal
+  `LIMIT` came only from the configured one-action ceiling, and the proposed
+  next walk was never sent. All 13 wire commands were acknowledged; final
+  `STOP_ALL`, `DISARM`, and `STATUS` proved disarmed zero-held state, with a
+  closed ledger/backend and released COM6 lease. Exact `arduino_hid.v2` /
+  `2.0.0` was already installed; this continuation did not flash. This does not
+  prove wheel polarity, an ordinary target activation, the copper route, bank
+  flow, or a complete woodcut cycle.
 - Production-soak continuation: **PASS** in the integrated checkout. Full Python
   984/984 with the documented test-only sandbox ACL harness; forced-fresh Java
   127/127 across 12 suites with 4/4 Gradle tasks executed; retained replay 7/7;
@@ -1330,10 +1391,10 @@ the interaction across two `EngineApplication` runs, so the stricter requirement
 for one uninterrupted loaded-scene run is not met. The measured 250 ms hold moved
 1,109 yaw units but left 5,035 world-bearing units. The 80 ms fine hold moved 479
 units and safe usable framing was reached. Combined with the retained replay,
-this supports the conclusion that the current 250 ms limit materially constrains
-large otherwise-correct coarse turns. No firmware, wheel, middle drag, chord,
-raw KEY_DOWN/KEY_UP, software-input, window mutation, `InputCoordinator`, or
-parallel input path changed.
+this supports the conclusion that the historical v1 250 ms limit materially
+constrained large otherwise-correct coarse turns. No firmware, wheel, middle
+drag, chord, raw KEY_DOWN/KEY_UP, software-input, window mutation,
+`InputCoordinator`, or parallel input path changed.
 
 ## Observability stabilization status
 
@@ -1386,7 +1447,8 @@ this increment without reconstructing or overwriting pre-existing work.
 ## Versioned camera-input capability expansion status
 
 The source implementation is **IMPLEMENTED, DETERMINISTICALLY AND FULL-
-REGRESSION VERIFIED, AND NOT FLASHED**. `InputCoordinator` remains the only
+REGRESSION VERIFIED; EXACT V2 IS INSTALLED AND ONE CAMERA HOLD IS LIVE-
+VERIFIED**. `InputCoordinator` remains the only
 production input owner,
 `_ArduinoHIDTransport` remains private, and production input remains Arduino-
 only. There is still one runtime, one lease, one command ledger, one cleanup
@@ -1394,7 +1456,7 @@ path, and no task-visible raw command surface. No generic `KEY_DOWN`/`KEY_UP`,
 middle drag, chord, software-input path, window mutation, controller, or parallel
 recovery path was added.
 
-The proposed firmware identifies as `arduino_hid.v2` / `2.0.0` and advertises
+The installed firmware identifies as `arduino_hid.v2` / `2.0.0` and advertises
 exact `input_capabilities.v2`. Its retained pointer/button/generic-key/cleanup
 limits remain 20 relative counts and 250 ms. It adds only:
 
@@ -1445,11 +1507,13 @@ Deterministic and complete regression evidence is:
 - capability plus full Arduino transport modules: **PASS**, 78/78 tests;
 - full InputCoordinator plus ownership/software-input boundary gate: **PASS**,
   139/139 tests;
-- complete Python regression: **PASS**, 949/949 tests;
+- complete current Python regression: **PASS**, 1,045/1,045 tests;
 - Python compileall for host, tests, and protocol harness: **PASS**;
 - golden-cycle and retained-camera replay: **PASS**, 7/7 tests;
-- forced Java rebuild/regression: **PASS**, 105/105 tests across 10 suites with
-  zero failures, errors, or skips and all four Gradle tasks executed;
+- current Java regression: **PASS**, 129/129 tests (RuneLite Java source was
+  unchanged by the planned-handoff follow-up); the earlier forced rebuild also
+  passed 105/105 tests across 10 suites with zero failures, errors, or skips and
+  all four Gradle tasks executed;
 - Leonardo firmware compile: **PASS**, 14,038/28,672 flash bytes and
   682/2,560 RAM bytes; and
 - audited documentation/code diff whitespace check: **PASS** for the protocol
@@ -1457,16 +1521,17 @@ Deterministic and complete regression evidence is:
 
 The harness binds exact CAPS text, constants, dispatch, handler ordering, fatal
 cleanup, limits, ACK shapes, and watchdog relationships to a deterministic
-Python model. The Leonardo compile proves the sketch builds; it does not execute
-the compiled handlers on hardware. Actual HID timing and wheel/`zoom3d` polarity
-remain post-flash live-proof questions. The completed offline gates above are not
-a hardware-installation or live-input claim.
+Python model. The Leonardo compile proves the sketch builds. The current host
+also negotiated the installed board's exact v2 identity/CAPS/STATUS and sent
+one acknowledged 327 ms camera hold whose requested and applied durations
+matched; a newer sample verified changed camera pose. Wheel/`zoom3d` polarity,
+ordinary target interaction, and full-route behavior remain live-proof gaps.
 
-No upload command was run and no board was flashed. Existing historical 250 ms
-camera evidence remains v1 evidence only. The proposed v2 firmware must not be
-treated as installed, negotiated from hardware, or live-proven.
+No upload or reflash command was run in this continuation. The already-installed
+v2 firmware was negotiated from hardware and is live-proven only for the one
+bounded camera hold and authoritative cleanup described above.
 
-The proposed bounded host-first flash and live-proof procedure is:
+The historical bounded host-first v2 rollout checklist was:
 
 1. Freeze the intended host/firmware diff and record its commit or source hashes.
    Rerun the protocol harness, complete Python and forced Java suites, golden
@@ -1510,6 +1575,10 @@ The proposed bounded host-first flash and live-proof procedure is:
    receipts/samples/timings. Record all commands and explicitly distinguish any
    Computer Use setup from Arduino production evidence.
 
-This procedure is proposed only. Steps 4--9 remain prohibited until the user
-explicitly approves the flash after every deterministic and full-regression gate
-passes.
+This checklist records the pre-install v1-to-v2 rollout sequence; step 2 is not a
+description of the currently installed board. No reflash was authorized or
+performed in this continuation. The installed-board handshake, cleanup, and
+one-camera-hold portions corresponding to steps 5--7 passed. Any future reflash
+requires a freshly scoped procedure and explicit approval after its deterministic
+gates; wheel testing and an ordinary target interaction remain outside this proof
+and require fresh safe decisions and scope.
