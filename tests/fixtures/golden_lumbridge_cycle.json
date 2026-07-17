@@ -1,0 +1,135 @@
+{
+  "schema": "osrs_bot.golden_cycle.v1",
+  "id": "woodcut-lumbridge-west-castle-bank-return",
+  "description": "Sanitized deterministic semantic replay of the proven ordinary-log cycle with a live-evidenced tree-lane route anchor.",
+  "provenance": {
+    "evidenceDate": "2026-07-13",
+    "baselineParent": "a843915c68b1c8ab2bcc0661ad467ec7bfa231b1",
+    "proofRoot": "_run_proofs",
+    "evidenceKind": "stitched bounded live component traces plus current live route-recovery evidence",
+    "limitations": "The earlier ignored live traces were resumed across bounded runs while source was changing. They prove the component interactions and terminal COMPLETE state, but are not one uninterrupted raw Observation or SafetyGate replay. The 2026-07-13 production receipt additionally proves a full inventory at (3194,3248,0), a safe terminal cleanup, and the missing tree-lane reentry that motivated the corrected anchor; its stopped run did not reach the bank. This committed fixture freezes the semantic FSM, corrected definition facts, and typed verification sequence without retaining process IDs, session IDs, or screen coordinates.",
+    "evidence": [
+      {
+        "path": "_run_proofs/vertical_slice/20260710_152906/trace.jsonl",
+        "sha256": "8f9ee6680b1c1b7ff0e27068b252f8ceea2a041bfcba4449fbf2c4250c99d32f",
+        "proves": "final log gain to a 28-log inventory and bank-route selection"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_161528/trace.jsonl",
+        "sha256": "059a5d6de13619a0f4bc3151f4539f89b5bf56a81dd0cf564cf787148a50f33b",
+        "proves": "ground-floor staircase transition to plane 1"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_163433/trace.jsonl",
+        "sha256": "5c3c824c2d80e423bd65dabefcafcd76a857dc66aaf97cc36d291c9fe14d6dd2",
+        "proves": "first-floor staircase transition to plane 2"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_163648/trace.jsonl",
+        "sha256": "6268071f25971427cad9be9f319bf6f89e96a7012fa83a698b20ff4105fe6707",
+        "proves": "exact bank open and verified 28-to-0 log deposit"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_165547/trace.jsonl",
+        "sha256": "560dc54a66b0c72f39447e2c76d42eb9bdbcadc69bea636edcd5a3f8745c55c7",
+        "proves": "verified Escape bank close and return-route start"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_170631/trace.jsonl",
+        "sha256": "acfa9336e5e278ed0828a076e047efd6acb6445fa2825fd603dfe9362167ebf0",
+        "proves": "bounded return-route continuation"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_170659/trace.jsonl",
+        "sha256": "5b9a32e6f0734eb7e9042137c92fbfa03dec69068be03aaba12a68dea1839906",
+        "proves": "bounded return-route continuation"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_170818/trace.jsonl",
+        "sha256": "acaccd0ced677d42f0f3a1a098b9c28a6b2b569e753152d29886f7b42c681530",
+        "proves": "arrival at the final tree-lane waypoint"
+      },
+      {
+        "path": "_run_proofs/vertical_slice/20260710_170849/trace.jsonl",
+        "sha256": "86df453ec2470cb8acf744ea87b7c9f7cabb99309e4846d4397e7177bd7a7f9a",
+        "proves": "terminal COMPLETE state and acknowledged STOP_ALL/DISARM cleanup"
+      },
+      {
+        "path": "_run_proofs/movement_targeting_quality/20260713T055558.877889Z/run_receipt.json",
+        "sha256": "4f04d7b784321d51d43c8dc913e3cf48bc4990f5faeab0d155a201f465c0326f",
+        "proves": "full inventory north of the historical tree anchor, missing route reentry, and acknowledged safe-stop cleanup"
+      }
+    ]
+  },
+  "task": {
+    "treeArea": [3196, 3244, 0],
+    "tree": {
+      "objectId": 1276,
+      "name": "Tree",
+      "action": "Chop down",
+      "producedItemId": 1511
+    },
+    "bankAnchor": [3208, 3221, 2],
+    "bank": {
+      "objectId": 18491,
+      "name": "Bank booth",
+      "action": "Bank"
+    },
+    "routeToBank": [
+      {"id": "tree_lane_exit", "kind": "walk", "location": [3196, 3244, 0], "arrivalRadius": 1},
+      {"id": "west_approach_bridge", "kind": "walk", "location": [3200, 3238, 0], "arrivalRadius": 2},
+      {"id": "west_corridor_north", "kind": "walk", "location": [3196, 3237, 0], "arrivalRadius": 2},
+      {"id": "west_wall_corner", "kind": "walk", "location": [3196, 3234, 0], "arrivalRadius": 1},
+      {"id": "west_wall_descent_1", "kind": "walk", "location": [3197, 3231, 0], "arrivalRadius": 1},
+      {"id": "west_wall_descent_2", "kind": "walk", "location": [3198, 3228, 0], "arrivalRadius": 1},
+      {"id": "west_wall_descent_3", "kind": "walk", "location": [3197, 3225, 0], "arrivalRadius": 1},
+      {"id": "west_wall_descent_4", "kind": "walk", "location": [3197, 3222, 0], "arrivalRadius": 1},
+      {"id": "west_corridor_south", "kind": "walk", "location": [3197, 3221, 0], "arrivalRadius": 2},
+      {"id": "south_corridor_entry", "kind": "walk", "location": [3199, 3218, 0], "arrivalRadius": 1},
+      {"id": "south_corridor_west", "kind": "walk", "location": [3202, 3215, 0], "arrivalRadius": 2},
+      {"id": "south_corridor_bridge", "kind": "walk", "location": [3205, 3214, 0], "arrivalRadius": 1},
+      {"id": "south_corridor_safe", "kind": "walk", "location": [3208, 3212, 0], "arrivalRadius": 2},
+      {"id": "south_stairs_approach", "kind": "walk", "location": [3205, 3209, 0], "arrivalRadius": 2},
+      {"id": "ground_floor_stairs_up", "kind": "object", "location": [3204, 3207, 0], "arrivalRadius": 4, "objectId": 56230, "name": "Staircase", "action": "Climb-up", "expectedPlane": 1},
+      {"id": "first_floor_stairs_up", "kind": "object", "location": [3204, 3207, 1], "arrivalRadius": 4, "objectId": 16672, "name": "Staircase", "action": "Climb-up", "expectedPlane": 2},
+      {"id": "bank_floor_south_1", "kind": "walk", "location": [3205, 3211, 2], "arrivalRadius": 2},
+      {"id": "bank_floor_south_2", "kind": "walk", "location": [3205, 3215, 2], "arrivalRadius": 2},
+      {"id": "bank_floor_north", "kind": "walk", "location": [3207, 3218, 2], "arrivalRadius": 2},
+      {"id": "bank_booth_approach", "kind": "walk", "location": [3208, 3221, 2], "arrivalRadius": 2}
+    ],
+    "routeToTrees": [
+      {"id": "bank_booth_exit_turn", "kind": "walk", "location": [3206, 3222, 2], "arrivalRadius": 1},
+      {"id": "bank_floor_return_1", "kind": "walk", "location": [3206, 3226, 2], "arrivalRadius": 2},
+      {"id": "bank_floor_return_2", "kind": "walk", "location": [3206, 3228, 2], "arrivalRadius": 1},
+      {"id": "bank_floor_bottom", "kind": "object", "location": [3205, 3229, 2], "arrivalRadius": 3, "objectId": 56231, "name": "Staircase", "action": "Bottom-floor", "expectedPlane": 0},
+      {"id": "ground_corridor_east_1", "kind": "walk", "location": [3210, 3228, 0], "arrivalRadius": 2},
+      {"id": "ground_corridor_east_mid", "kind": "walk", "location": [3213, 3228, 0], "arrivalRadius": 1},
+      {"id": "ground_corridor_east_2", "kind": "walk", "location": [3215, 3228, 0], "arrivalRadius": 2},
+      {"id": "ground_corridor_south_1", "kind": "walk", "location": [3215, 3225, 0], "arrivalRadius": 2},
+      {"id": "ground_corridor_south_2", "kind": "walk", "location": [3215, 3222, 0], "arrivalRadius": 2},
+      {"id": "ground_corridor_south_3", "kind": "walk", "location": [3215, 3219, 0], "arrivalRadius": 2},
+      {"id": "ground_corridor_west_mid", "kind": "walk", "location": [3213, 3219, 0], "arrivalRadius": 1},
+      {"id": "ground_corridor_west", "kind": "walk", "location": [3211, 3219, 0], "arrivalRadius": 2},
+      {"id": "ground_corridor_west_turn", "kind": "walk", "location": [3210, 3216, 0], "arrivalRadius": 1},
+      {"id": "ground_corridor_west_2", "kind": "walk", "location": [3207, 3214, 0], "arrivalRadius": 2},
+      {"id": "south_corridor_return", "kind": "walk", "location": [3203, 3214, 0], "arrivalRadius": 2},
+      {"id": "south_corridor_entry_return", "kind": "walk", "location": [3199, 3218, 0], "arrivalRadius": 1},
+      {"id": "west_corridor_return_1", "kind": "walk", "location": [3197, 3221, 0], "arrivalRadius": 1},
+      {"id": "west_wall_ascent_1", "kind": "walk", "location": [3197, 3225, 0], "arrivalRadius": 1},
+      {"id": "west_wall_ascent_2", "kind": "walk", "location": [3198, 3228, 0], "arrivalRadius": 1},
+      {"id": "west_wall_ascent_3", "kind": "walk", "location": [3197, 3231, 0], "arrivalRadius": 1},
+      {"id": "west_wall_corner_return", "kind": "walk", "location": [3196, 3234, 0], "arrivalRadius": 1},
+      {"id": "west_corridor_north_return", "kind": "walk", "location": [3196, 3237, 0], "arrivalRadius": 2},
+      {"id": "tree_lane_return", "kind": "walk", "location": [3196, 3240, 0], "arrivalRadius": 2},
+      {"id": "west_trees", "kind": "walk", "location": [3196, 3244, 0], "arrivalRadius": 2, "arrivalOnly": true}
+    ]
+  },
+  "expected": {
+    "chopActions": 28,
+    "depositedLogCount": 28,
+    "terminalPhase": "complete",
+    "cyclesCompleted": 1,
+    "finalLocation": [3196, 3244, 0],
+    "finalLogCount": 0
+  }
+}

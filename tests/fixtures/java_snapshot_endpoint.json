@@ -1,0 +1,195 @@
+{
+  "schema": "plugin_snapshot_response.v2",
+  "requestId": "java-snapshot-fixture-v1",
+  "assembledAtUtc": "2025-01-01T00:00:00.100Z",
+  "assemblyStartedAtUtc": "2025-01-01T00:00:00.100Z",
+  "latestTick": 4242,
+  "sensorFrame": {
+    "schema": "sensor_frame.v1",
+    "frameId": "java-fixture-session:4242",
+    "sourceTick": 4242,
+    "captureStartedMonotonicNanos": 123456789,
+    "capturedAtUtc": "2025-01-01T00:00:00Z",
+    "completedAtUtc": "2025-01-01T00:00:00.010Z",
+    "captureDurationMillis": 10,
+    "sessionId": "java-fixture-session",
+    "clientProcessId": 1234,
+    "geometryFrameId": "java-fixture-geometry-4242",
+    "coherent": true,
+    "complete": true,
+    "availableFacts": [
+      "baseline",
+      "inventory",
+      "activity",
+      "bank_ui",
+      "dialogue_state"
+    ],
+    "unavailableFacts": [],
+    "facts": {
+      "baseline": {
+        "sourceTick": 4242,
+        "capturedAtUtc": "2025-01-01T00:00:00.010Z",
+        "available": true,
+        "errors": [],
+        "sizeBytes": 630
+      },
+      "inventory": {
+        "sourceTick": 4242,
+        "capturedAtUtc": "2025-01-01T00:00:00.010Z",
+        "available": true,
+        "errors": [],
+        "sizeBytes": 103
+      },
+      "activity": {
+        "sourceTick": 4242,
+        "capturedAtUtc": "2025-01-01T00:00:00.010Z",
+        "available": true,
+        "errors": [],
+        "sizeBytes": 102
+      },
+      "bank_ui": {
+        "sourceTick": 4242,
+        "capturedAtUtc": "2025-01-01T00:00:00.010Z",
+        "available": true,
+        "errors": [],
+        "sizeBytes": 196
+      },
+      "dialogue_state": {
+        "sourceTick": 4242,
+        "capturedAtUtc": "2025-01-01T00:00:00.010Z",
+        "available": true,
+        "errors": [],
+        "sizeBytes": 84
+      }
+    }
+  },
+  "publication": {
+    "sequence": 1,
+    "publishedAtUtc": "2025-01-01T00:00:00.010Z"
+  },
+  "snapshotTier": "hot",
+  "status": "PASS",
+  "freshness": {
+    "latestTick": 4242,
+    "maxAgeTicks": 0,
+    "maxSourceAgeMillis": 2000,
+    "sourceAgeMillis": 100,
+    "sourceCaptureFresh": true,
+    "cacheWallClockFresh": true,
+    "frameCoherent": true,
+    "menuFresh": false,
+    "fresh": true
+  },
+  "payloads": {
+    "baseline": {
+      "tick": 4242,
+      "gameState": "LOGGED_IN",
+      "scenePlayable": true,
+      "player": {
+        "worldX": 3192,
+        "worldY": 3244,
+        "plane": 0,
+        "animation": -1,
+        "poseAnimation": 808,
+        "runEnergyPercent": 100.0,
+        "interacting": {
+          "type": "UNKNOWN",
+          "id": -1
+        }
+      },
+      "cameraViewport": {
+        "canvasWidth": 800,
+        "canvasHeight": 600,
+        "cameraYaw": 512,
+        "cameraPitch": 256,
+        "zoom3d": 384
+      },
+      "inputGeometry": {
+        "schema": "input_geometry.v1",
+        "sourceTick": 4242,
+        "geometryAvailable": true,
+        "canvasWidth": 800,
+        "canvasHeight": 600,
+        "sourceCanvasWidth": 800,
+        "sourceCanvasHeight": 600,
+        "coordinateSpace": "device_pixels",
+        "canvasScreenX": 100,
+        "canvasScreenY": 200,
+        "isCanvasShowing": true,
+        "isClientFocused": true,
+        "clientProcessId": 1234
+      }
+    },
+    "inventory": {
+      "inventory": {
+        "slotCount": 28,
+        "known": true,
+        "freeSlots": 28,
+        "filledSlots": 0,
+        "occupiedSlots": 0,
+        "items": []
+      }
+    },
+    "activity": {
+      "animation": -1,
+      "poseAnimation": 808,
+      "runEnergyPercent": 100.0,
+      "interacting": {
+        "type": "UNKNOWN",
+        "id": -1
+      }
+    },
+    "bank_ui": {
+      "known": true,
+      "bankOpen": false,
+      "bankPinOpen": false,
+      "bankContainerVisible": false,
+      "depositInventoryButtonVisible": false,
+      "closeButtonVisible": false,
+      "bankReadable": false,
+      "keyboardClosePossible": false
+    },
+    "dialogue_state": {
+      "active": false,
+      "type": "none",
+      "promptText": "",
+      "options": [],
+      "canUseNumberKeys": false
+    }
+  },
+  "clientTickHot": {
+    "schema": "client_tick_hot.v1",
+    "mouse": {},
+    "latency": {
+      "samplesBuffered": 0
+    }
+  },
+  "missingCapabilities": [],
+  "warnings": [],
+  "serviceTimingMillis": 0,
+  "endpointQueueDiagnostics": {
+    "schema": "plugin_snapshot_endpoint_queue_diagnostics.v1",
+    "workerLimit": 4,
+    "pendingCapacity": 8,
+    "activeWorkerCount": 0,
+    "pendingRequestCount": 0,
+    "pendingRemainingCapacity": 8,
+    "largestWorkerCount": 0,
+    "completedRequestCount": 0,
+    "executionRejectionCount": 0,
+    "rejectionPolicy": "CALLER_RUNS_BACKPRESSURE",
+    "snapshotRequestActive": false,
+    "snapshotBusyRejectionCount": 0,
+    "executorState": "NOT_STARTED"
+  },
+  "responseSizing": {
+    "maxResponseBytes": 1048576,
+    "requestedProjectionRefs": 16,
+    "effectiveProjectionRefs": 16,
+    "projectionFieldMode": "compact",
+    "responseMode": "compact",
+    "includeGeometry": true,
+    "snapshotTier": "hot",
+    "tileProjectionRequestCount": 0
+  }
+}

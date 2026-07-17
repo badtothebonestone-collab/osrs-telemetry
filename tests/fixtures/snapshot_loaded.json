@@ -1,0 +1,232 @@
+{
+  "schema": "plugin_snapshot_response.v2",
+  "assembledAtUtc": "2026-07-10T16:06:57.700000000Z",
+  "latestTick": 174,
+  "status": "PASS",
+  "sensorFrame": {
+    "schema": "sensor_frame.v1",
+    "frameId": "fixture-session:174",
+    "sourceTick": 174,
+    "captureStartedMonotonicNanos": 1000000,
+    "capturedAtUtc": "2026-07-10T16:06:57.694873900Z",
+    "completedAtUtc": "2026-07-10T16:06:57.696000000Z",
+    "captureDurationMillis": 1,
+    "sessionId": "fixture-session",
+    "clientProcessId": 1234,
+    "geometryFrameId": "fixture-geometry-174",
+    "coherent": true,
+    "complete": true,
+    "availableFacts": ["baseline", "inventory", "activity", "bank_ui", "dialogue_state"],
+    "unavailableFacts": [],
+    "facts": {
+      "baseline": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695000000Z", "available": true, "errors": [], "sizeBytes": 583},
+      "inventory": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695100000Z", "available": true, "errors": [], "sizeBytes": 264},
+      "activity": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695200000Z", "available": true, "errors": [], "sizeBytes": 102},
+      "bank_ui": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695300000Z", "available": true, "errors": [], "sizeBytes": 311},
+      "dialogue_state": {"sourceTick": 174, "capturedAtUtc": "2026-07-10T16:06:57.695400000Z", "available": true, "errors": [], "sizeBytes": 59}
+    }
+  },
+  "freshness": {
+    "fresh": true,
+    "sourceCaptureFresh": true,
+    "frameCoherent": true,
+    "menuFresh": true,
+    "maxSourceAgeMillis": 2000
+  },
+  "warnings": [],
+  "missingCapabilities": [],
+  "payloads": {
+    "baseline": {
+      "tick": 174,
+      "gameState": "LOGGED_IN",
+      "scenePlayable": true,
+      "player": {
+        "worldX": 3192,
+        "worldY": 3244,
+        "plane": 0,
+        "animation": -1,
+        "poseAnimation": 808,
+        "runEnergyPercent": 100.0,
+        "interacting": {
+          "type": "UNKNOWN",
+          "id": -1
+        }
+      },
+      "cameraViewport": {
+        "canvasWidth": 400,
+        "canvasHeight": 300
+      },
+      "inputGeometry": {
+        "schema": "input_geometry.v1",
+        "sourceTick": 174,
+        "geometryAvailable": true,
+        "canvasWidth": 800,
+        "canvasHeight": 600,
+        "sourceCanvasWidth": 400,
+        "sourceCanvasHeight": 300,
+        "coordinateSpace": "device_pixels",
+        "canvasScreenX": 1000,
+        "canvasScreenY": 2000,
+        "isCanvasShowing": true,
+        "isClientFocused": true,
+        "clientProcessId": 1234
+      }
+    },
+    "inventory": {
+      "inventory": {
+        "slotCount": 28,
+        "known": true,
+        "freeSlots": 25,
+        "filledSlots": 3,
+        "occupiedSlots": 3,
+        "items": [
+          {"slot": 0, "itemId": 1351, "quantity": 1, "name": "Bronze axe"},
+          {"slot": 1, "itemId": 1511, "quantity": 1, "name": "Logs"},
+          {"slot": 2, "itemId": 1511, "quantity": 1, "name": "Logs"}
+        ]
+      }
+    },
+    "activity": {
+      "animation": 879,
+      "poseAnimation": 808,
+      "runEnergyPercent": 99.5,
+      "interacting": {
+        "type": "UNKNOWN",
+        "id": -1
+      }
+    },
+    "interaction_hot": {
+      "schema": "client_tick_hot.v1",
+      "sourceTick": 174,
+      "capturedAtUtc": "2026-07-10T16:06:57.694000000Z",
+      "sessionId": "fixture-session",
+      "clientProcessId": 1234,
+      "postMenuSort": {
+        "clientTick": 500,
+        "gameTickAtSample": 174,
+        "wallTimeMillis": 1783699617694,
+        "mouseCanvasX": 100,
+        "mouseCanvasY": 50,
+        "menuOpen": false,
+        "entries": [
+          {
+            "option": "Chop down",
+            "target": "<col=ffff>Tree</col>",
+            "type": "GAME_OBJECT_FIRST_OPTION",
+            "identifier": 1276,
+            "param0": 49,
+            "param1": 52
+          },
+          {
+            "option": "Walk here",
+            "target": "",
+            "type": "WALK",
+            "identifier": 0,
+            "param0": 100,
+            "param1": 50
+          }
+        ],
+        "topOption": "Chop down",
+        "topTarget": "<col=ffff>Tree</col>",
+        "topIdentifier": 1276
+      }
+    },
+    "client_tick_tail": {
+      "schema": "client_tick_hot.v1",
+      "postMenuSortTail": []
+    },
+    "scene_object_census": {
+      "schema": "scene_object_census.v1",
+      "sourceTick": 174,
+      "capturedAtUtc": "2026-07-10T16:06:57.697000000Z",
+      "sessionId": "fixture-session",
+      "clientProcessId": 1234,
+      "geometryFrameId": "fixture-geometry-174",
+      "objects": [
+        {
+          "objectKey": "tree:3193:3244:1276",
+          "id": 1276,
+          "name": "Tree",
+          "kind": "GAME_OBJECT",
+          "actions": ["Chop down"],
+          "worldX": 3193,
+          "worldY": 3244,
+          "plane": 0,
+          "distanceToPlayer": 1,
+          "projection": {
+            "geometryAvailable": true,
+            "onScreen": true,
+            "visible": true,
+            "actionableByCanvas": true,
+            "canvasLocation": {"x": 100, "y": 50},
+            "aimPoint": {"canvasX": 100, "canvasY": 50},
+            "clickboxBounds": {"x": 80, "y": 30, "w": 40, "h": 60},
+            "visibleAreaRatio": 1.0
+          }
+        },
+        {
+          "objectKey": "tree:3193:3244:1276",
+          "id": 1276,
+          "name": "Tree",
+          "kind": "GAME_OBJECT",
+          "actions": ["Chop down", "Examine"],
+          "worldX": 3193,
+          "worldY": 3244,
+          "plane": 0,
+          "distanceToPlayer": 1,
+          "projection": {
+            "geometryAvailable": true,
+            "onScreen": true,
+            "visible": true,
+            "actionableByCanvas": true,
+            "aimPoint": {"canvasX": 100, "canvasY": 50},
+            "clickboxBounds": {"x": 80, "y": 30, "w": 40, "h": 60}
+          }
+        },
+        {
+          "objectKey": "bank:3208:3220:6943",
+          "id": 6943,
+          "name": "Bank booth",
+          "kind": "GAME_OBJECT",
+          "actions": ["Bank"],
+          "worldX": 3208,
+          "worldY": 3220,
+          "plane": 2,
+          "distanceToPlayer": 1000000,
+          "projection": {
+            "geometryAvailable": false,
+            "onScreen": false,
+            "visible": false,
+            "actionableByCanvas": false
+          }
+        }
+      ]
+    },
+    "bank_ui": {
+      "schema": "bank_ui_context_payload.v1",
+      "known": true,
+      "bankOpen": true,
+      "bankPinOpen": false,
+      "bankContainerVisible": true,
+      "depositInventoryButtonVisible": true,
+      "closeButtonVisible": true,
+      "depositInventoryButtonWidget": {
+        "x": 300,
+        "y": 250,
+        "width": 40,
+        "height": 20
+      },
+      "closeButtonWidget": {
+        "x": 380,
+        "y": 10,
+        "width": 16,
+        "height": 16
+      }
+    },
+    "dialogue_state": {
+      "schema": "dialogue_state.v1",
+      "active": false,
+      "type": "none"
+    }
+  }
+}

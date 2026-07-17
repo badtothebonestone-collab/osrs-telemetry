@@ -2,868 +2,938 @@ package com.osrstelemetry;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 
 public class PluginSnapshotEndpointTest
 {
+	private static final long SOURCE_TICK = 8L;
+	private static final String SESSION_ID = "fixture-session";
+	private static final long CLIENT_PROCESS_ID = 1234L;
+	private static final String GEOMETRY_FRAME_ID = "fixture-geometry-8";
+
 	private final Gson gson = new Gson();
 
 	@Test
-	public void configDefaultsKeepSnapshotEndpointDisabled()
+	public void configDefaultsEnableLoopbackSnapshotEndpoint()
 	{
-		TelemetryConfig config = new TelemetryConfig()
-		{
-		};
-
-		assertFalse(config.enablePluginSnapshotEndpoint());
+		TelemetryConfig config = new TelemetryConfig() { };
+		assertTrue(config.enabled());
+		assertTrue(config.enablePluginSnapshotEndpoint());
 		assertEquals("127.0.0.1", config.pluginSnapshotHost());
 		assertEquals(8893, config.pluginSnapshotPort());
 		assertFalse(config.pluginSnapshotAllowNonLocalHost());
-		assertFalse(config.pluginSnapshotEnabledInNormalLive());
-		assertEquals(TelemetryWorkflowPreset.DAILY_LIVE, config.workflowPreset());
-		assertFalse(config.applyWorkflowPreset());
-		assertFalse(config.presetPreviewOnly());
 	}
 
 	@Test
-	public void schemaReportsSupportedNeedsAndReadOnlyLimits()
+	public void schemaAdvertisesOnlyObservationContract()
 	{
+		Map<String, Object> schema = endpoint(new PluginLiveCache(gson)).schemaPayload();
+		assertEquals(
+				List.of("baseline", "inventory", "activity", "bank_ui", "dialogue_state", "interaction_hot",
+						"client_tick_tail", "scene_object_census", "actor_census", "collision_window"),
+				schema.get("supportedNeeds"));
+		assertEquals(List.of("GET /health", "GET /schema", "POST /snapshot"), schema.get("endpoints"));
+		assertEquals(List.of("hot"), schema.get("snapshotTiers"));
+		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(PluginSnapshotEndpoint.RESPONSE_SCHEMA));
+		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(
+				ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA));
+		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(
+				PluginSnapshotEndpoint.ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA));
+		assertTrue(((List<?>) schema.get("requestControls")).contains("maxClickedSamples"));
+		assertTrue(((List<?>) schema.get("requestControls")).contains("disableCameraInputCapture"));
+		assertEquals(
+				CameraInputCapture.CAPTURE_LEASE_MILLIS,
+				((Map<?, ?>) schema.get("configLimits")).get("cameraInputCaptureLeaseMillis"));
+		assertEquals(
+				PluginSnapshotEndpoint.ENDPOINT_WORKER_LIMIT,
+				((Map<?, ?>) schema.get("configLimits")).get("endpointWorkerLimit"));
+		assertEquals(
+				PluginSnapshotEndpoint.ENDPOINT_PENDING_CAPACITY,
+				((Map<?, ?>) schema.get("configLimits")).get("endpointPendingCapacity"));
+		assertTrue(((List<?>) schema.get("worldModelQueryControls")).contains("worldModel.maxActors"));
+		assertTrue(((List<?>) schema.get("worldModelQueryControls")).contains("worldModel.priorityObjectIds"));
+		assertEquals(
+				ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				schema.get("clientThreadQueryDiagnosticsSchema"));
+		assertTrue(String.valueOf(schema.get("readOnlyStatement")).contains("no configuration"));
+	}
+
+	@Test
+	public void boundedSnapshotEncodesTwiceAndReusesExactFinalBytes()
+	{
+		PluginSnapshotEndpoint.EncodedResponse encoded = endpoint(canonicalCache())
+				.encodedSnapshotResponse(request("baseline"));
+		Map<String, Object> payload = encoded.payload();
+		Map<?, ?> sizing = (Map<?, ?>) payload.get("responseSizing");
+		JsonObject decoded = gson.fromJson(
+				new String(encoded.body(), StandardCharsets.UTF_8),
+				JsonObject.class);
+
+		assertEquals(2, encoded.serializationPasses());
+		assertEquals(200, encoded.httpStatus());
+		assertEquals(encoded.body().length, ((Number) payload.get("estimatedResponseBytes")).intValue());
+		assertEquals(encoded.body().length, ((Number) sizing.get("estimatedResponseBytes")).intValue());
+		assertEquals(2, sizing.get("serializationPasses"));
+		assertEquals(true, sizing.get("serializedBytesReusedForWrite"));
+		assertEquals(gson.toJsonTree(payload), decoded);
+	}
+
+	@Test
+	public void oversizedSnapshotStillUsesOnlyTwoBoundedSerializationPasses()
+	{
+		SensorFrame largeFrame = completeFrame(
+				"large-frame",
+				SOURCE_TICK,
+				SESSION_ID,
+				CLIENT_PROCESS_ID,
+				GEOMETRY_FRAME_ID,
+				Map.of("gameState", "LOGGED_IN", "denseEvidence", "x".repeat(20_000)));
 		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
-				new PluginLiveCache(gson),
-				gson,
-				"127.0.0.1",
-				8893,
-				"",
-				100,
-				1024 * 1024,
-				false);
+				cacheWithFrame(largeFrame), gson, "127.0.0.1", 0, "", 50, 8 * 1024, false);
 
-		Map<String, Object> schema = endpoint.schemaPayload();
-		assertEquals("plugin_snapshot_schema.v1", schema.get("schema"));
-		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("projection"));
-		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("bank_ui"));
-		assertTrue(schema.containsKey("configLimits"));
-		assertTrue(((List<?>) schema.get("supportedSchemas")).contains("telemetry_preset_request.v1"));
-		assertTrue(((List<?>) schema.get("supportedPresets")).contains("DAILY_LIVE"));
-		assertTrue(((List<?>) schema.get("presetEndpoints")).contains("POST /preset/apply"));
+		PluginSnapshotEndpoint.EncodedResponse encoded = endpoint.encodedSnapshotResponse(request("baseline"));
+		Map<?, ?> sizing = (Map<?, ?>) encoded.payload().get("responseSizing");
+
+		assertEquals(413, encoded.httpStatus());
+		assertEquals(2, encoded.serializationPasses());
+		assertEquals("response_too_large", encoded.payload().get("errorCode"));
+		assertTrue(((Number) encoded.payload().get("estimatedResponseBytes")).intValue() > 8 * 1024);
+		assertEquals(2, sizing.get("serializationPasses"));
+		assertEquals(true, sizing.get("serializedBytesReusedForWrite"));
 	}
 
 	@Test
-	public void presetsEndpointPayloadListsFixedPresets()
+	public void retiredSemanticCensusNeedsFailExplicitly()
 	{
-		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024, new TelemetryPresetApplier(new FakeConfigStore()));
-
-		Map<String, Object> response = endpoint.presetsPayload();
-
-		assertEquals("telemetry_presets.v1", response.get("schema"));
-		assertTrue(((List<?>) response.get("presets")).contains("DAILY_LIVE"));
-		assertEquals(Boolean.TRUE, response.get("readOnlyGameState"));
-	}
-
-	@Test
-	public void presetPreviewAndApplyUseWhitelistedPresetOnly()
-	{
-		FakeConfigStore store = new FakeConfigStore();
-		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024, new TelemetryPresetApplier(store));
-		JsonObject request = new JsonObject();
-		request.addProperty("schema", "telemetry_preset_request.v1");
-		request.addProperty("preset", "DAILY_LIVE");
-		request.addProperty("arbitraryKey", "ignored");
-
-		Map<String, Object> preview = endpoint.presetPayload(request, true);
-		assertEquals("PASS", preview.get("status"));
-		assertTrue(store.values.isEmpty());
-
-		Map<String, Object> apply = endpoint.presetPayload(request, false);
-		assertEquals("PASS", apply.get("status"));
-		assertFalse(store.values.containsKey("telemetryRecordingMode"));
-		assertFalse(store.values.containsKey("emitCompactLiveStream"));
-		assertFalse(store.values.containsKey("arbitraryKey"));
-	}
-
-	@Test
-	public void unknownPresetRequestIsRejected()
-	{
-		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024, new TelemetryPresetApplier(new FakeConfigStore()));
-		JsonObject request = new JsonObject();
-		request.addProperty("preset", "MUTATE_ANYTHING");
-
-		Map<String, Object> response = endpoint.presetPayload(request, false);
+		List<String> retired = List.of(
+				"resource_object_census",
+				"route_object_census",
+				"service_object_census");
+		Map<String, Object> response = endpoint(canonicalCache()).snapshotPayload(
+				request(retired.toArray(new String[0])));
 
 		assertEquals("FAIL", response.get("status"));
-		assertTrue(((List<?>) response.get("warnings")).contains("unknown preset"));
+		assertTrue(jsonObject(response.get("payloads")).keySet().isEmpty());
+		assertEquals(retired, response.get("missingCapabilities"));
+		assertEquals(
+				List.of(
+						"unsupported need: resource_object_census",
+						"unsupported need: route_object_census",
+						"unsupported need: service_object_census"),
+				response.get("warnings"));
 	}
 
 	@Test
-	public void snapshotReturnsRequestedCachedPayloads()
+	public void snapshotV2ReturnsOneAtomicCanonicalFrameWithProvenance()
 	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		cache.update("live_inventory_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("freeSlots", 12));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("inventory");
-		request.add("needs", needs);
+		Map<String, Object> response = endpoint(canonicalCache()).snapshotPayload(request(
+				"baseline", "inventory", "activity", "bank_ui", "dialogue_state"));
 
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		Map<String, JsonElement> payloads = payloads(response);
-
+		assertEquals(PluginSnapshotEndpoint.RESPONSE_SCHEMA, response.get("schema"));
 		assertEquals("PASS", response.get("status"));
-		assertTrue(payloads.containsKey("baseline"));
-		assertTrue(payloads.containsKey("inventory"));
-		assertEquals(4L, response.get("latestTick"));
-	}
-
-	@Test
-	public void snapshotIncludesHotMenuSamplesWhenAvailable()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		ClientTickHotState hotState = new ClientTickHotState(4);
-		hotState.recordPostMenuSort(Map.of("clientTick", 8L, "topOption", "Chop down", "topTarget", "Oak tree", "topIdentifier", 10820));
-		hotState.recordMenuOptionClicked(Map.of("clientTick", 8L, "option", "Walk here", "target", "", "identifier", 0));
-		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
-				cache,
-				gson,
-				"127.0.0.1",
-				8893,
-				"",
-				50,
-				1024 * 1024,
-				false,
-				null,
-				hotState);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		request.add("needs", needs);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-
-		@SuppressWarnings("unchecked")
-		Map<String, Object> hoverMenu = (Map<String, Object>) response.get("hoverMenu");
-		@SuppressWarnings("unchecked")
-		Map<String, Object> lastClicked = (Map<String, Object>) response.get("lastMenuOptionClicked");
-		@SuppressWarnings("unchecked")
-		Map<String, Object> clientTickHot = (Map<String, Object>) response.get("clientTickHot");
-		assertEquals("Chop down", hoverMenu.get("topOption"));
-		assertEquals("Walk here", lastClicked.get("option"));
-		assertEquals("client_tick_hot.v1", clientTickHot.get("schema"));
-		assertEquals("Oak tree", ((Map<?, ?>) clientTickHot.get("postMenuSort")).get("topTarget"));
-		assertFalse(clientTickHot.containsKey("postMenuSortTail"));
-	}
-
-	@Test
-	public void snapshotCanIncludeRequestedTileProjections()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
-				cache,
-				gson,
-				"127.0.0.1",
-				8893,
-				"",
-				50,
-				1024 * 1024,
-				false,
-				null,
-				new ClientTickHotState(4),
-				requests -> Map.of(
-						"schema", "tile_projection_response.v1",
-						"status", "PASS",
-						"tiles", List.of(Map.of(
-								"status", "PASS",
-								"label", requests.get(0).get("label"),
-								"worldX", requests.get(0).get("worldX"),
-								"worldY", requests.get(0).get("worldY"),
-								"plane", requests.get(0).get("plane"),
-								"aimPoint", Map.of("canvasX", 300, "canvasY", 240, "source", "tileProjectionCenter")))));
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		request.add("needs", needs);
-		JsonArray tileRequests = new JsonArray();
-		JsonObject tile = new JsonObject();
-		tile.addProperty("label", "service-waypoint");
-		tile.addProperty("worldX", 3205);
-		tile.addProperty("worldY", 3229);
-		tile.addProperty("plane", 0);
-		tileRequests.add(tile);
-		request.add("tileProjectionRequests", tileRequests);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject tileProjection = payloads(response).get("tile_projection").getAsJsonObject();
-		JsonObject firstTile = tileProjection.getAsJsonArray("tiles").get(0).getAsJsonObject();
-
-		assertEquals("PASS", response.get("status"));
-		assertTrue(response.containsKey("tileProjections"));
-		assertEquals("service-waypoint", firstTile.get("label").getAsString());
-		assertEquals(300, firstTile.getAsJsonObject("aimPoint").get("canvasX").getAsInt());
-	}
-
-	@Test
-	public void snapshotCanIncludeExplicitClientTickTailPayload()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		ClientTickHotState hotState = new ClientTickHotState(4);
-		hotState.recordPostMenuSort(Map.of("clientTick", 7L, "topOption", "Walk here"));
-		hotState.recordPostMenuSort(Map.of("clientTick", 8L, "topOption", "Chop down"));
-		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
-				cache,
-				gson,
-				"127.0.0.1",
-				8893,
-				"",
-				50,
-				1024 * 1024,
-				false,
-				null,
-				hotState);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("client_tick_tail");
-		request.add("needs", needs);
-		request.addProperty("maxMenuSamples", 1);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		Map<String, JsonElement> payloads = payloads(response);
-
-		assertTrue(payloads.containsKey("client_tick_tail"));
-		JsonArray tail = payloads.get("client_tick_tail").getAsJsonObject().getAsJsonArray("postMenuSortTail");
-		assertEquals(1, tail.size());
-		assertEquals("Chop down", tail.get(0).getAsJsonObject().get("topOption").getAsString());
-	}
-
-	@Test
-	public void snapshotReturnsNavigationAndCollisionWindowWhenCached()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		cache.update("live_navigation_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("collision", Map.of("collisionKnown", true)));
-		cache.update("live_collision_window_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("collisionKnown", true, "windowRadius", 24));
-		cache.update("live_writer_health_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("liveCachePayloadTypes", cache.packetTypes()));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("navigation");
-		needs.add("collision_window");
-		needs.add("writer_health");
-		request.add("needs", needs);
-		request.addProperty("maxAgeTicks", 5);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		Map<String, JsonElement> payloads = payloads(response);
-
-		assertEquals("PASS", response.get("status"));
-		assertTrue(payloads.containsKey("navigation"));
-		assertTrue(payloads.containsKey("collision_window"));
-		assertFalse(((List<?>) response.get("missingCapabilities")).contains("navigation"));
-		assertFalse(((List<?>) response.get("missingCapabilities")).contains("collision_window"));
-	}
-
-	@Test
-	public void snapshotReturnsBankUiWhenCached()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 9L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		cache.update("live_bank_ui_packet.v1", 9L, "2026-05-11T00:00:00Z", Map.of(
-				"bankOpen", true,
-				"bankReadable", true,
-				"bankContainerVisible", true,
-				"inventorySummary", Map.of("freeSlots", 0, "occupiedSlots", 28),
-				"bankSummary", Map.of("occupiedSlots", 12, "uniqueItemCount", 3)));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("bank_ui");
-		request.add("needs", needs);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		Map<String, JsonElement> payloads = payloads(response);
-
-		assertEquals("PASS", response.get("status"));
-		assertTrue(payloads.containsKey("bank_ui"));
-		assertTrue(payloads.get("bank_ui").getAsJsonObject().get("bankOpen").getAsBoolean());
-	}
-
-	@Test
-	public void snapshotReturnsDialogueStateWhenCached()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		cache.update("live_dialogue_state_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of(
-				"schema", "dialogue_state.v1",
-				"active", true,
-				"type", "options",
-				"promptText", "Climb up or down the stairs?",
-				"canUseNumberKeys", true,
-				"options", List.of(Map.of("index", 1, "key", "1", "text", "Climb up the stairs."))));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("dialogue_state");
-		request.add("needs", needs);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		Map<String, JsonElement> payloads = payloads(response);
-
-		assertEquals("PASS", response.get("status"));
-		assertTrue(payloads.containsKey("dialogue_state"));
-		assertTrue(payloads.get("dialogue_state").getAsJsonObject().get("active").getAsBoolean());
-		assertEquals("options", payloads.get("dialogue_state").getAsJsonObject().get("type").getAsString());
-	}
-
-	@Test
-	public void snapshotReturnsInputGeometryInsideBaselineWhenCached()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of(
-				"gameState", "LOGGED_IN",
-				"inputGeometry", Map.of(
-						"schema", "input_geometry.v1",
-						"geometryAvailable", true,
-						"canvasWidth", 800,
-						"canvasHeight", 600,
-						"sourceCanvasWidth", 400,
-						"sourceCanvasHeight", 300,
-						"canvasScreenX", 1000,
-						"canvasScreenY", 2000,
-						"displayScaleX", 2.0,
-						"displayScaleY", 2.0)));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		request.add("needs", needs);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject baseline = payloads(response).get("baseline").getAsJsonObject();
-		JsonObject inputGeometry = baseline.getAsJsonObject("inputGeometry");
-
-		assertEquals("PASS", response.get("status"));
-		assertTrue(inputGeometry.get("geometryAvailable").getAsBoolean());
-		assertEquals(800, inputGeometry.get("canvasWidth").getAsInt());
-		assertEquals(400, inputGeometry.get("sourceCanvasWidth").getAsInt());
-		assertEquals(1000, inputGeometry.get("canvasScreenX").getAsInt());
-	}
-
-	@Test
-	public void missingPayloadReturnsMissingCapabilities()
-	{
-		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("navigation");
-		request.add("needs", needs);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-
-		assertEquals("FAIL", response.get("status"));
-		assertTrue(((List<?>) response.get("missingCapabilities")).contains("navigation"));
-		assertTrue(((List<?>) response.get("warnings")).contains("missing cached payload: navigation (live_navigation_packet.v1)"));
-	}
-
-	@Test
-	public void projectionRefsAreCappedAndCompacted()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", projectionPayload(3));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 2, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("projection");
-		request.add("needs", needs);
-		request.addProperty("maxProjectionRefs", 1);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject projection = payloads(response).get("projection").getAsJsonObject();
-		JsonArray refs = projection.getAsJsonArray("visibleObjectRefs");
-		JsonObject firstRef = refs.get(0).getAsJsonObject();
-
-		assertEquals("WARN", response.get("status"));
-		assertEquals(1, refs.size());
-		assertTrue(((List<?>) response.get("warnings")).contains("projection refs capped"));
-		assertTrue(firstRef.has("actions"));
-		assertFalse(firstRef.has("clickableHull"));
-		assertFalse(firstRef.has("clickboxPolygon"));
-		assertFalse(firstRef.has("canvasTilePolygon"));
-		assertTrue(firstRef.has("bounds"));
-	}
-
-	@Test
-	public void projectionCompactionPreservesLoadedServiceSceneObjects()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		Map<String, Object> payload = projectionPayload(5);
-		payload.put("serviceSceneObjects", List.of(serviceSceneRef("bank-booth-loaded", "Bank booth")));
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", payload);
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 5, 1024 * 1024);
-		JsonObject request = projectionRequest(1);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject projection = payloads(response).get("projection").getAsJsonObject();
-		JsonArray refs = projection.getAsJsonArray("visibleObjectRefs");
-		JsonArray serviceScene = projection.getAsJsonArray("serviceSceneObjects");
-
-		assertEquals("WARN", response.get("status"));
-		assertEquals(1, refs.size());
-		assertNotNull(serviceScene);
-		assertEquals(1, serviceScene.size());
-		assertEquals("bank-booth-loaded", serviceScene.get(0).getAsJsonObject().get("objectKey").getAsString());
-		assertEquals("Bank booth", serviceScene.get(0).getAsJsonObject().get("name").getAsString());
-	}
-
-	@Test
-	public void cappedCompactProjectionCanFitEvenWhenCachedProjectionIsLarge()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", heavyProjectionPayload(80, 250));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 80, 8192);
-		JsonObject request = projectionRequest(1);
-
-		Map<String, Object> response = endpoint.boundedSnapshotPayload(request);
-		JsonObject projection = payloads(response).get("projection").getAsJsonObject();
-		JsonArray refs = projection.getAsJsonArray("visibleObjectRefs");
-		@SuppressWarnings("unchecked")
-		Map<String, Object> sizing = (Map<String, Object>) response.get("responseSizing");
-
-		assertEquals("WARN", response.get("status"));
-		assertEquals(1, refs.size());
-		assertTrue(((Number) sizing.get("cachedProjectionBytes")).longValue() > ((Number) sizing.get("estimatedResponseBytes")).longValue());
-		assertEquals(Boolean.TRUE, sizing.get("projectionCapApplied"));
-		assertFalse("response_too_large".equals(response.get("errorCode")));
-	}
-
-	@Test
-	public void compactProjectionOmitHeavyFields()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", heavyProjectionPayload(1, 200));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 10, 1024 * 1024);
-		JsonObject request = projectionRequest(1);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject ref = payloads(response)
-				.get("projection")
-				.getAsJsonObject()
-				.getAsJsonArray("visibleObjectRefs")
-				.get(0)
-				.getAsJsonObject();
-
-		assertTrue(ref.has("objectKey"));
-		assertTrue(ref.has("id"));
-		assertTrue(ref.has("bounds"));
-		assertFalse(ref.has("geometrySummary"));
-		assertFalse(ref.has("source"));
-		assertFalse(ref.has("firstSeenTick"));
-		assertTrue(ref.has("actions"));
-		assertFalse(ref.has("clickableHull"));
-	}
-
-	@Test
-	public void projectionRefsArePrioritizedBeforeCapping()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		List<Map<String, Object>> refs = new java.util.ArrayList<>();
-		refs.add(projectionRef("offscreen", false, "tile", false, false));
-		refs.add(projectionRef("candidate", true, "sceneObject", true, true));
-		refs.add(projectionRef("other", true, "sceneObject", false, true));
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", projectionPayloadFromRefs(refs));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 3, 1024 * 1024);
-		JsonObject request = projectionRequest(1);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject ref = payloads(response)
-				.get("projection")
-				.getAsJsonObject()
-				.getAsJsonArray("visibleObjectRefs")
-				.get(0)
-				.getAsJsonObject();
-		@SuppressWarnings("unchecked")
-		Map<String, Object> sizing = (Map<String, Object>) response.get("responseSizing");
-
-		assertEquals("candidate", ref.get("objectKey").getAsString());
-		assertEquals(Boolean.TRUE, sizing.get("projectionPriorityApplied"));
-	}
-
-	@Test
-	public void projectionHintsPrioritizeMatchingClassBeforeCapping()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		List<Map<String, Object>> refs = new java.util.ArrayList<>();
-		refs.add(projectionRef("ore-rock", true, "sceneObject", true, true));
-		refs.get(0).put("name", "Copper rock");
-		refs.add(projectionRef("oak-tree", true, "sceneObject", true, true));
-		refs.get(1).put("name", "Oak tree");
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", projectionPayloadFromRefs(refs));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 2, 1024 * 1024);
-		JsonObject request = projectionRequest(1);
-		request.addProperty("snapshotTier", "hot");
-		request.addProperty("profileHint", "woodcutting");
-		request.addProperty("classHint", "tree");
-		request.addProperty("targetTypeHint", "sceneObject");
-		request.addProperty("requireOnScreen", true);
-		request.addProperty("requireGeometryAvailable", true);
-		JsonArray desired = new JsonArray();
-		desired.add("tree");
-		request.add("desiredClasses", desired);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		JsonObject ref = payloads(response)
-				.get("projection")
-				.getAsJsonObject()
-				.getAsJsonArray("visibleObjectRefs")
-				.get(0)
-				.getAsJsonObject();
-		@SuppressWarnings("unchecked")
-		Map<String, Object> sizing = (Map<String, Object>) response.get("responseSizing");
-
-		assertEquals("oak-tree", ref.get("objectKey").getAsString());
-		assertEquals("hot", response.get("snapshotTier"));
-		assertTrue(((Map<?, ?>) sizing.get("projectionHintsApplied")).containsKey("classHint"));
-	}
-
-	@Test
-	public void unknownProjectionHintsAreIgnoredSafely()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", projectionPayload(1));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 1, 1024 * 1024);
-		JsonObject request = projectionRequest(1);
-		request.addProperty("unknownHint", "ignored");
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-
-		assertEquals("PASS", response.get("status"));
-		assertEquals("hot", response.get("snapshotTier"));
-	}
-
-	@Test
-	public void cappedResponseStillFailsWhenCompactResponseExceedsLimit()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", heavyProjectionPayload(50, 1000));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 8192);
-		JsonObject request = projectionRequest(50);
-
-		Map<String, Object> response = endpoint.boundedSnapshotPayload(request);
-
-		assertEquals("plugin_snapshot_response.v1", response.get("schema"));
-		assertEquals("FAIL", response.get("status"));
-		assertEquals("response_too_large", response.get("errorCode"));
-		assertTrue(response.containsKey("responseSizing"));
-		assertTrue(((List<?>) response.get("warnings")).contains("responseTooLarge"));
-	}
-
-	@Test
-	public void stalePayloadProducesWarnStatus()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		cache.update("live_inventory_packet.v1", 15L, "2026-05-11T00:00:01Z", Map.of("freeSlots", 1));
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		request.add("needs", needs);
-		request.addProperty("maxAgeTicks", 1);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-
-		assertEquals("WARN", response.get("status"));
-		assertTrue(((List<?>) response.get("warnings")).contains("baseline cache age exceeded maxAgeTicks"));
-	}
-
-	@Test
-	public void staleWallClockCacheProducesWarnEvenWhenTickAgeLooksFresh()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		Instant oldCacheTime = Instant.now().minusSeconds(20);
-		cache.updateAt("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"), oldCacheTime);
-		cache.updateAt("live_inventory_packet.v1", 10L, "2026-05-11T00:00:01Z", Map.of("freeSlots", 1), oldCacheTime);
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("inventory");
-		request.add("needs", needs);
-		request.addProperty("maxAgeTicks", 5);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		@SuppressWarnings("unchecked")
-		Map<String, Object> freshness = (Map<String, Object>) response.get("freshness");
-
-		assertEquals("WARN", response.get("status"));
-		assertEquals(Boolean.FALSE, freshness.get("fresh"));
-		assertEquals(Boolean.TRUE, freshness.get("allCachedPacketsStale"));
-		assertTrue(((Number) freshness.get("maxCacheAgeMillis")).longValue() > PluginSnapshotEndpoint.CACHE_FRESHNESS_THRESHOLD_MILLIS);
-		assertTrue(((List<?>) freshness.get("staleReasons")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
-		assertTrue(((List<?>) response.get("warnings")).contains("baseline cache age exceeded maxAgeMillis"));
-		assertTrue(((List<?>) response.get("warnings")).contains("inventory cache age exceeded maxAgeMillis"));
-		assertTrue(((List<?>) response.get("warnings")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
-	}
-
-	@Test
-	public void healthDowngradesWhenAllCachedPacketsAreWallClockStale()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		Instant oldCacheTime = Instant.now().minusSeconds(20);
-		cache.updateAt("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"), oldCacheTime);
-		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
-
-		Map<String, Object> response = endpoint.healthPayload();
-
-		assertEquals("WARN", response.get("status"));
-		assertEquals(Boolean.FALSE, response.get("cacheWallClockFresh"));
-		assertEquals(Boolean.TRUE, response.get("allCachedPacketsStale"));
-		assertTrue(((List<?>) response.get("staleReasons")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
-		assertTrue(((List<?>) response.get("warnings")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
-	}
-
-	@Test
-	public void schemaReportsWorldModelNeeds()
-	{
-		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024);
-
-		Map<String, Object> schema = endpoint.schemaPayload();
-
-		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("world_model_summary"));
-		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("route_object_census"));
-		assertEquals("world_model_snapshot.v1", schema.get("worldModelSchema"));
-	}
-
-	@Test
-	public void snapshotCanIncludeWorldModelQueryPayloads()
-	{
-		PluginLiveCache cache = new PluginLiveCache(gson);
-		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
-		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
-				cache,
-				gson,
-				"127.0.0.1",
-				8893,
-				"",
-				50,
-				1024 * 1024,
-				false,
-				null,
-				new ClientTickHotState(4),
-				requests -> Map.of("schema", "tile_projection_response.v1", "status", "PASS", "tiles", List.of()),
-				(needs, request) -> Map.of(
-						"schema", "world_model_query_response.v1",
-						"snapshotSchema", "world_model_snapshot.v1",
-						"status", "PASS",
-						"payloads", Map.of(
-								"world_model_summary", Map.of("schema", "world_model_summary.v1", "objects", Map.of("total", 12)),
-								"resource_object_census", Map.of("schema", "resource_object_census.v1", "count", 2, "objects", List.of())),
-						"quality", Map.of(
-								"worldModelAvailable", true,
-								"worldModelAgeMs", 0,
-								"objectCensusCapHit", false,
-								"collisionAvailable", true,
-								"projectionAuditAvailable", true),
-						"sizing", Map.of("objectCount", 12)));
-		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("baseline");
-		needs.add("world_model_summary");
-		needs.add("resource_object_census");
-		request.add("needs", needs);
-
-		Map<String, Object> response = endpoint.snapshotPayload(request);
-		Map<String, JsonElement> payloads = payloads(response);
-
-		assertEquals("PASS", response.get("status"));
-		assertTrue(payloads.containsKey("world_model_summary"));
-		assertTrue(payloads.containsKey("resource_object_census"));
-		assertNotNull(response.get("worldModel"));
-		assertFalse(((Map<?, ?>) response.get("worldModel")).containsKey("payloads"));
-		assertEquals(true, ((Map<?, ?>) response.get("worldModel")).get("payloadsMirroredInTopLevel"));
-		assertEquals(true, ((Map<?, ?>) response.get("worldModelQuality")).get("worldModelAvailable"));
-	}
-
-	private PluginSnapshotEndpoint endpoint(PluginLiveCache cache, int maxProjectionRefs, int maxResponseBytes)
-	{
-		return endpoint(cache, maxProjectionRefs, maxResponseBytes, null);
-	}
-
-	private PluginSnapshotEndpoint endpoint(
-			PluginLiveCache cache,
-			int maxProjectionRefs,
-			int maxResponseBytes,
-			TelemetryPresetApplier presetApplier)
-	{
-		return new PluginSnapshotEndpoint(
-				cache,
-				gson,
-				"127.0.0.1",
-				8893,
-				"",
-				maxProjectionRefs,
-				maxResponseBytes,
-				false,
-				presetApplier);
-	}
-
-	@SuppressWarnings("unchecked")
-	private Map<String, JsonElement> payloads(Map<String, Object> response)
-	{
-		return (Map<String, JsonElement>) response.get("payloads");
-	}
-
-	private Map<String, Object> projectionPayload(int count)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		List<Map<String, Object>> refs = new java.util.ArrayList<>();
-		for (int i = 0; i < count; i++)
+		JsonObject payloads = jsonObject(response.get("payloads"));
+		for (String factName : SensorFrame.CORE_FACT_NAMES)
 		{
-			Map<String, Object> ref = new LinkedHashMap<>();
-			ref.put("objectKey", "tree:" + i);
-			ref.put("targetType", "sceneObject");
-			ref.put("id", 1276 + i);
-			ref.put("hash", 1000 + i);
-			ref.put("worldX", 3200 + i);
-			ref.put("worldY", 3200);
-			ref.put("plane", 0);
-			ref.put("sceneX", 20 + i);
-			ref.put("sceneY", 20);
-			ref.put("onScreen", true);
-			ref.put("geometryAvailable", true);
-			ref.put("aimPoint", Map.of("x", 100 + i, "y", 200));
-			ref.put("actions", List.of("Chop down"));
-			ref.put("clickableHull", Map.of("points", List.of(Map.of("x", 1, "y", 2))));
-			ref.put("clickboxPolygon", Map.of("points", List.of(Map.of("x", 1, "y", 2))));
-			ref.put("canvasTilePolygon", Map.of("points", List.of(Map.of("x", 3, "y", 4))));
-			ref.put("bounds", Map.of("x", 10 + i, "y", 20, "width", 12, "height", 14));
-			refs.add(ref);
+			assertTrue(payloads.has(factName));
 		}
-		payload.put("visibleObjectRefs", refs);
-		return payload;
+
+		JsonObject frame = jsonObject(response.get("sensorFrame"));
+		assertEquals(SensorFrame.SCHEMA, frame.get("schema").getAsString());
+		assertEquals(SOURCE_TICK, frame.get("sourceTick").getAsLong());
+		assertEquals(SESSION_ID, frame.get("sessionId").getAsString());
+		assertEquals(CLIENT_PROCESS_ID, frame.get("clientProcessId").getAsLong());
+		assertEquals(GEOMETRY_FRAME_ID, frame.get("geometryFrameId").getAsString());
+		assertTrue(frame.get("coherent").getAsBoolean());
+		assertTrue(frame.get("complete").getAsBoolean());
+		Instant.parse(frame.get("capturedAtUtc").getAsString());
+		JsonObject factMetadata = frame.getAsJsonObject("facts");
+		for (String factName : SensorFrame.CORE_FACT_NAMES)
+		{
+			assertEquals(SOURCE_TICK, factMetadata.getAsJsonObject(factName).get("sourceTick").getAsLong());
+		}
+		JsonObject freshness = jsonObject(response.get("freshness"));
+		assertTrue(freshness.get("sourceCaptureFresh").getAsBoolean());
+		assertTrue(freshness.get("frameCoherent").getAsBoolean());
+		assertTrue(freshness.get("fresh").getAsBoolean());
 	}
 
-	private Map<String, Object> serviceSceneRef(String objectKey, String name)
+	@Test
+	public void newlyAssembledResponseRejectsAnOldSourceFrame()
 	{
-		Map<String, Object> ref = new LinkedHashMap<>();
-		ref.put("objectKey", objectKey);
-		ref.put("targetType", "sceneObject");
-		ref.put("id", 10355);
-		ref.put("hash", objectKey.hashCode());
-		ref.put("name", name);
-		ref.put("actions", List.of("Bank"));
-		ref.put("kind", "GAME_OBJECT");
-		ref.put("worldX", 3208);
-		ref.put("worldY", 3221);
-		ref.put("plane", 0);
-		ref.put("sceneX", 28);
-		ref.put("sceneY", 31);
-		ref.put("present", true);
-		ref.put("source", "loadedServiceScene");
-		return ref;
+		String staleCapturedAtUtc = Instant.now().minusSeconds(60L).toString();
+		SensorFrame staleFrame = completeFrame(
+				"fixture-stale-frame",
+				SOURCE_TICK,
+				SESSION_ID,
+				CLIENT_PROCESS_ID,
+				GEOMETRY_FRAME_ID,
+				Map.of(
+						"gameState", "LOGGED_IN",
+						"player", Map.of(),
+						"inputGeometry", Map.of(
+								"geometryAvailable", true,
+								"clientProcessId", CLIENT_PROCESS_ID)),
+				staleCapturedAtUtc);
+
+		Map<String, Object> response = endpoint(cacheWithFrame(staleFrame)).snapshotPayload(
+				request("baseline", "inventory", "activity", "bank_ui", "dialogue_state"));
+
+		assertEquals("WARN", response.get("status"));
+		assertTrue(Instant.parse(String.valueOf(response.get("assembledAtUtc")))
+				.isAfter(Instant.parse(staleCapturedAtUtc)));
+		JsonObject freshness = jsonObject(response.get("freshness"));
+		assertFalse(freshness.get("sourceCaptureFresh").getAsBoolean());
+		assertFalse(freshness.get("cacheWallClockFresh").getAsBoolean());
+		assertFalse(freshness.get("fresh").getAsBoolean());
+		assertTrue(((List<?>) response.get("warnings")).contains("sensor_frame_source_stale"));
 	}
 
-	private JsonObject projectionRequest(int maxRefs)
+	@Test
+	public void incompleteUnavailableFrameFailsClosed()
+	{
+		Map<String, Object> response = endpoint(cacheWithFrame(incompleteFrame())).snapshotPayload(
+				request("baseline", "inventory"));
+
+		assertEquals("WARN", response.get("status"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+		assertTrue(payloads.has("baseline"));
+		assertFalse(payloads.has("inventory"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("inventory"));
+		assertTrue(((List<?>) response.get("warnings")).contains("sensor_fact_unavailable:inventory"));
+		assertTrue(((List<?>) response.get("warnings")).contains("sensor_frame_incomplete_or_incoherent"));
+		assertFalse(jsonObject(response.get("sensorFrame")).get("complete").getAsBoolean());
+	}
+
+	@Test
+	public void loginScreenFrameRoundTripsOwningProcessWithoutLoadedScene()
+	{
+		SensorFrame frame = completeFrame(
+				"fixture-login-frame",
+				0L,
+				"fixture-login-session",
+				4321L,
+				"fixture-login-geometry",
+				Map.of(
+						"gameState", "LOGIN_SCREEN",
+						"player", Map.of(),
+						"inputGeometry", Map.of(
+								"geometryAvailable", false,
+								"reason", "canvas_not_showing",
+								"clientProcessId", 4321L)));
+
+		Map<String, Object> response = endpoint(cacheWithFrame(frame)).snapshotPayload(request("baseline"));
+		JsonObject baseline = jsonObject(response.get("payloads")).getAsJsonObject("baseline");
+
+		assertEquals("LOGIN_SCREEN", baseline.get("gameState").getAsString());
+		assertEquals(4321L, baseline.getAsJsonObject("inputGeometry").get("clientProcessId").getAsLong());
+		assertEquals("fixture-login-session", jsonObject(response.get("sensorFrame")).get("sessionId").getAsString());
+	}
+
+	@Test
+	public void interactionHotAndTileProjectionUseMatchingFrameProvenance()
+	{
+		ClientTickHotState hot = new ClientTickHotState(4);
+		hot.recordPostMenuSort(Map.of(
+				"clientTick", 10L,
+				"gameTickAtSample", SOURCE_TICK,
+				"wallTimeMillis", System.currentTimeMillis(),
+				"gameState", "LOGGED_IN",
+				"sessionId", SESSION_ID,
+				"clientProcessId", CLIENT_PROCESS_ID,
+				"topOption", "Walk here",
+				"topTarget", ""));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false, hot,
+				requests -> tileProjectionResponse(SOURCE_TICK, GEOMETRY_FRAME_ID),
+				null);
+		JsonObject request = request("baseline", "interaction_hot");
+		request.add("tileProjectionRequests", tileProjectionRequests());
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		JsonObject payloads = jsonObject(response.get("payloads"));
+		JsonObject interaction = payloads.getAsJsonObject("interaction_hot");
+		JsonObject projection = payloads.getAsJsonObject("tile_projection");
+
+		assertEquals("PASS", response.get("status"));
+		assertEquals(SOURCE_TICK, interaction.get("sourceTick").getAsLong());
+		assertEquals(SESSION_ID, interaction.get("sessionId").getAsString());
+		assertEquals(CLIENT_PROCESS_ID, interaction.get("clientProcessId").getAsLong());
+		assertEquals(10L, interaction.getAsJsonObject("postMenuSort").get("clientTick").getAsLong());
+		Instant.parse(interaction.get("capturedAtUtc").getAsString());
+		assertEquals(SOURCE_TICK, projection.get("sourceTick").getAsLong());
+		assertEquals(GEOMETRY_FRAME_ID, projection.get("geometryFrameId").getAsString());
+	}
+
+	@Test
+	public void clientTickTailNeedReturnsAllFourBoundedLanesWithDropEvidence()
+	{
+		ClientTickHotState hot = new ClientTickHotState(2);
+		for (long tick = 1L; tick <= 3L; tick++)
+		{
+			hot.recordClientTick(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK));
+			hot.recordPostMenuSort(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "topOption", "Option " + tick));
+			hot.recordMenuOptionClicked(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "option", "Click " + tick));
+			hot.recordCameraInput(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "control", "W"));
+		}
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false, hot);
+		JsonObject request = request("clientTickTail");
+		request.addProperty("maxClientTickSamples", 99);
+		request.addProperty("maxMenuSamples", 99);
+		request.addProperty("maxClickedSamples", 99);
+		request.addProperty("maxCameraInputSamples", 99);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		JsonObject tail = jsonObject(response.get("payloads")).getAsJsonObject("client_tick_tail");
+
+		assertEquals("PASS", response.get("status"));
+		assertEquals(2, tail.getAsJsonArray("clientTickTail").size());
+		assertEquals(2, tail.getAsJsonArray("postMenuSortTail").size());
+		assertEquals(2, tail.getAsJsonArray("clickedTail").size());
+		assertEquals(2, tail.getAsJsonArray("cameraInputTail").size());
+		assertEquals(5L, tail.getAsJsonArray("clientTickTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(6L, tail.getAsJsonArray("postMenuSortTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(7L, tail.getAsJsonArray("clickedTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(8L, tail.getAsJsonArray("cameraInputTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		JsonObject latency = tail.getAsJsonObject("latency");
+		assertEquals(4L, latency.get("droppedSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedClientTickSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedPostMenuSortSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedClickedSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedCameraInputSamples").getAsLong());
+	}
+
+	@Test
+	public void onlyExplicitCameraSampleRequestsRenewAndExplicitDisableWins()
+	{
+		AtomicInteger renewals = new AtomicInteger();
+		AtomicInteger disables = new AtomicInteger();
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4));
+		endpoint.setCameraInputCaptureLeaseControls(
+				renewals::incrementAndGet,
+				disables::incrementAndGet);
+
+		endpoint.snapshotPayload(request("baseline"));
+		JsonObject zero = request("client_tick_tail");
+		zero.addProperty("maxClientTickSamples", 4);
+		zero.addProperty("maxCameraInputSamples", 0);
+		endpoint.snapshotPayload(zero);
+		JsonObject stringValue = request("client_tick_tail");
+		stringValue.addProperty("maxCameraInputSamples", "4");
+		endpoint.snapshotPayload(stringValue);
+		assertEquals(0, renewals.get());
+		assertEquals(0, disables.get());
+
+		JsonObject enabled = request("client_tick_tail");
+		enabled.addProperty("maxCameraInputSamples", 4);
+		endpoint.snapshotPayload(enabled);
+		endpoint.snapshotPayload(enabled);
+		assertEquals(2, renewals.get());
+
+		JsonObject disabled = request("client_tick_tail");
+		disabled.addProperty("maxCameraInputSamples", 4);
+		disabled.addProperty("disableCameraInputCapture", true);
+		endpoint.snapshotPayload(disabled);
+		assertEquals(2, renewals.get());
+		assertEquals(1, disables.get());
+
+		JsonObject stringDisable = request("baseline");
+		stringDisable.addProperty("disableCameraInputCapture", "true");
+		endpoint.snapshotPayload(stringDisable);
+		assertEquals(1, disables.get());
+	}
+
+	@Test
+	public void worldModelProviderServesNeutralObjectCensusWithFrameProvenance()
+	{
+		Map<String, Object> censuses = Map.of(
+				"scene_object_census", Map.of("objects", List.of()));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> worldModelResponse(SOURCE_TICK, GEOMETRY_FRAME_ID, censuses));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(payloads.has("scene_object_census"));
+		JsonObject sceneCensus = payloads.getAsJsonObject("scene_object_census");
+		assertEquals(SOURCE_TICK, sceneCensus.get("sourceTick").getAsLong());
+		assertEquals(SESSION_ID, sceneCensus.get("sessionId").getAsString());
+		assertEquals(CLIENT_PROCESS_ID, sceneCensus.get("clientProcessId").getAsLong());
+		assertEquals(GEOMETRY_FRAME_ID, sceneCensus.get("geometryFrameId").getAsString());
+		Instant.parse(sceneCensus.get("capturedAtUtc").getAsString());
+	}
+
+	@Test
+	public void compactWorldModelEnvelopeRetainsClientThreadQueryDiagnostics()
+	{
+		PluginLiveCache cache = canonicalCache();
+		Map<String, Object> providerResponse = new java.util.LinkedHashMap<>(worldModelResponse(
+				SOURCE_TICK,
+				GEOMETRY_FRAME_ID,
+				Map.of("scene_object_census", Map.of("objects", List.of()))));
+		providerResponse.put("queryDiagnostics", Map.of(
+				"schema", ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				"requestStatus", "SUCCESS",
+				"activeRequestCount", 0,
+				"pendingRequestCount", 0));
+		providerResponse.put("pipeline", Map.of(
+				"scannedTiles", 81,
+				"discoveredObjects", 14,
+				"enrichedObjects", 6));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cache, gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null, (needs, request) -> providerResponse);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+		JsonObject worldModel = jsonObject(response.get("worldModel"));
+		JsonObject diagnostics = worldModel.getAsJsonObject("queryDiagnostics");
+		JsonObject pipeline = worldModel.getAsJsonObject("pipeline");
+
+		assertEquals(ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA, diagnostics.get("schema").getAsString());
+		assertEquals("SUCCESS", diagnostics.get("requestStatus").getAsString());
+		assertEquals(0, diagnostics.get("activeRequestCount").getAsInt());
+		assertEquals(0, diagnostics.get("pendingRequestCount").getAsInt());
+		assertEquals(81, pipeline.get("scannedTiles").getAsInt());
+		assertEquals(14, pipeline.get("discoveredObjects").getAsInt());
+		assertEquals(6, pipeline.get("enrichedObjects").getAsInt());
+	}
+
+	@Test
+	public void queryDiagnosticsSurviveWorldModelProvenanceRejection()
+	{
+		Map<String, Object> providerResponse = new java.util.LinkedHashMap<>(worldModelResponse(
+				SOURCE_TICK - 1L,
+				GEOMETRY_FRAME_ID,
+				Map.of("scene_object_census", Map.of("objects", List.of()))));
+		providerResponse.put("queryDiagnostics", Map.of(
+				"schema", ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				"requestStatus", "LATE",
+				"lateResultCount", 1L));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null, (needs, request) -> providerResponse);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+		Map<?, ?> sizing = (Map<?, ?>) response.get("responseSizing");
+		Map<?, ?> diagnostics = (Map<?, ?>) sizing.get("worldModelQueryDiagnostics");
+
+		assertFalse(response.containsKey("worldModel"));
+		assertEquals(ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA, diagnostics.get("schema"));
+		assertEquals("LATE", diagnostics.get("requestStatus"));
+		assertEquals(1L, diagnostics.get("lateResultCount"));
+	}
+
+	@Test
+	public void actorAndCollisionNeedsAreNormalizedBoundedAndStampedToTheAtomicFrame()
+	{
+		AtomicReference<List<String>> requestedNeeds = new AtomicReference<>();
+		Map<String, Object> actor = Map.of(
+				"type", "NPC",
+				"index", 12,
+				"id", 123,
+				"name", "Guide",
+				"actions", List.of("Talk-to"),
+				"distanceToPlayer", 2);
+		Map<String, Object> actorCensus = Map.of(
+				"schema", "world_model_actor_census.v1",
+				"count", 1,
+				"returned", 1,
+				"capHit", false,
+				"actors", List.of(actor));
+		Map<String, Object> collisionWindow = Map.of(
+				"schema", "world_model_collision_window.v1",
+				"collisionAvailable", true,
+				"cellCount", 1,
+				"cellCapHit", false,
+				"cells", List.of(Map.of(
+						"worldX", 3200,
+						"worldY", 3230,
+						"plane", 0,
+						"sceneX", 50,
+						"sceneY", 50,
+						"flags", 0,
+						"blockedMovement", false)));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) ->
+				{
+					requestedNeeds.set(List.copyOf(needs));
+					return worldModelResponse(
+							SOURCE_TICK,
+							GEOMETRY_FRAME_ID,
+							Map.of(
+									"actor_census", actorCensus,
+									"collision_window", collisionWindow));
+				});
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("actorCensus", "collisionWindow"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+		JsonObject actors = payloads.getAsJsonObject("actor_census");
+		JsonObject collision = payloads.getAsJsonObject("collision_window");
+
+		assertEquals("PASS", response.get("status"));
+		assertEquals(List.of("actor_census", "collision_window"), requestedNeeds.get());
+		for (JsonObject payload : List.of(actors, collision))
+		{
+			assertEquals(SOURCE_TICK, payload.get("sourceTick").getAsLong());
+			assertEquals(SESSION_ID, payload.get("sessionId").getAsString());
+			assertEquals(CLIENT_PROCESS_ID, payload.get("clientProcessId").getAsLong());
+			assertEquals(GEOMETRY_FRAME_ID, payload.get("geometryFrameId").getAsString());
+			Instant.parse(payload.get("capturedAtUtc").getAsString());
+		}
+		assertEquals("NPC", actors.getAsJsonArray("actors").get(0).getAsJsonObject().get("type").getAsString());
+		assertEquals(1, collision.getAsJsonArray("cells").size());
+	}
+
+	@Test
+	public void actorAndCollisionEvidenceFromAnotherTickIsRejectedTogether()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> worldModelResponse(
+						SOURCE_TICK - 1L,
+						GEOMETRY_FRAME_ID,
+						Map.of(
+								"actor_census", Map.of("actors", List.of()),
+								"collision_window", Map.of("cells", List.of()))));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("actor_census", "collision_window"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+
+		assertEquals("FAIL", response.get("status"));
+		assertFalse(payloads.has("actor_census"));
+		assertFalse(payloads.has("collision_window"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("actor_census"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("collision_window"));
+		assertTrue(((List<?>) response.get("warnings")).contains("world_model_provenance_mismatch"));
+	}
+
+	@Test
+	public void missingSceneObjectCensusFailsClosed()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> worldModelResponse(SOURCE_TICK, GEOMETRY_FRAME_ID, Map.of()));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+
+		assertEquals("FAIL", response.get("status"));
+		assertFalse(jsonObject(response.get("payloads")).has("scene_object_census"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("scene_object_census"));
+		assertTrue(((List<?>) response.get("warnings")).contains(
+				"world_model_payload_unavailable:scene_object_census"));
+	}
+
+	@Test
+	public void worldModelCapturedBeforeSensorFrameIsRejected()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> Map.of(
+						"schema", WorldModelCache.SCHEMA,
+						"status", "PASS",
+						"metadata", sourceMetadata(
+								SOURCE_TICK,
+								GEOMETRY_FRAME_ID,
+								"2026-05-11T00:00:00Z"),
+						"payloads", Map.of("scene_object_census", Map.of("objects", List.of())),
+						"quality", Map.of("worldModelAvailable", true),
+						"warnings", List.of(),
+						"sizing", Map.of()));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+
+		assertEquals("FAIL", response.get("status"));
+		assertFalse(jsonObject(response.get("payloads")).has("scene_object_census"));
+		assertTrue(((List<?>) response.get("warnings")).contains("world_model_provenance_mismatch"));
+	}
+
+	@Test
+	public void sceneObjectCensusSourceTickMismatchIsRejected()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> worldModelResponse(
+						SOURCE_TICK - 1L,
+						GEOMETRY_FRAME_ID,
+						Map.of("scene_object_census", Map.of("objects", List.of()))));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+
+		assertEquals("FAIL", response.get("status"));
+		assertFalse(jsonObject(response.get("payloads")).has("scene_object_census"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("scene_object_census"));
+		assertTrue(((List<?>) response.get("warnings")).contains("world_model_provenance_mismatch"));
+		assertFalse(response.containsKey("worldModel"));
+	}
+
+	@Test
+	public void tileProjectionSameTickGeometryMismatchIsRejected()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4),
+				requests -> tileProjectionResponse(SOURCE_TICK, "fixture-geometry-stale"),
+				null);
+		JsonObject request = request("baseline");
+		request.add("tileProjectionRequests", tileProjectionRequests());
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+
+		assertEquals("WARN", response.get("status"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+		assertTrue(payloads.has("baseline"));
+		assertFalse(payloads.has("tile_projection"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("tile_projection"));
+		assertTrue(((List<?>) response.get("warnings")).contains("tile_projection_provenance_mismatch"));
+		assertFalse(response.containsKey("tileProjections"));
+	}
+
+	@Test
+	public void startedEndpointHasNoMutationRoutes() throws Exception
+	{
+		PluginSnapshotEndpoint endpoint = endpoint(canonicalCache());
+		endpoint.start();
+		try
+		{
+			assertEquals(200, httpStatus(endpoint, "GET", "/health", null));
+			assertEquals(200, httpStatus(endpoint, "POST", "/snapshot", "{\"needs\":[\"baseline\"]}"));
+			assertEquals(404, httpStatus(endpoint, "POST", "/preset/apply", "{}"));
+		}
+		finally
+		{
+			endpoint.close();
+		}
+	}
+
+	@Test
+	public void malformedJsonReturnsBadRequestAndReleasesAdmissionGate() throws Exception
+	{
+		PluginSnapshotEndpoint endpoint = endpoint(canonicalCache());
+		endpoint.start();
+		try
+		{
+			assertEquals(400, httpStatus(endpoint, "POST", "/snapshot", "{"));
+			assertEquals(200, httpStatus(
+					endpoint,
+					"POST",
+					"/snapshot",
+					gson.toJson(Map.of("needs", List.of("baseline")))));
+		}
+		finally
+		{
+			endpoint.close();
+		}
+	}
+
+	@Test
+	public void concurrentSnapshotOverloadFailsFastWithBoundedQueueDiagnostics() throws Exception
+	{
+		CountDownLatch providerEntered = new CountDownLatch(1);
+		CountDownLatch releaseProvider = new CountDownLatch(1);
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) ->
+				{
+					providerEntered.countDown();
+					try
+					{
+						if (!releaseProvider.await(2, TimeUnit.SECONDS))
+						{
+							throw new IllegalStateException("test provider release timed out");
+						}
+					}
+					catch (InterruptedException e)
+					{
+						Thread.currentThread().interrupt();
+						throw new IllegalStateException("test provider interrupted", e);
+					}
+					return worldModelResponse(
+							SOURCE_TICK,
+							GEOMETRY_FRAME_ID,
+							Map.of("scene_object_census", Map.of("objects", List.of())));
+				});
+		ExecutorService clients = Executors.newSingleThreadExecutor();
+		endpoint.start();
+		try
+		{
+			Future<Integer> first = clients.submit(() -> httpStatus(
+					endpoint,
+					"POST",
+					"/snapshot",
+					"{\"needs\":[\"scene_object_census\"]}"));
+			assertTrue(providerEntered.await(2, TimeUnit.SECONDS));
+
+			assertEquals(503, httpStatus(
+					endpoint,
+					"POST",
+					"/snapshot",
+					"{\"needs\":[\"scene_object_census\"]}"));
+			Map<String, Object> diagnostics = endpoint.endpointQueueDiagnostics();
+			assertEquals(PluginSnapshotEndpoint.ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA, diagnostics.get("schema"));
+			assertEquals(PluginSnapshotEndpoint.ENDPOINT_WORKER_LIMIT, diagnostics.get("workerLimit"));
+			assertEquals(PluginSnapshotEndpoint.ENDPOINT_PENDING_CAPACITY, diagnostics.get("pendingCapacity"));
+			assertEquals(1L, diagnostics.get("snapshotBusyRejectionCount"));
+			assertTrue((Boolean) diagnostics.get("snapshotRequestActive"));
+
+			releaseProvider.countDown();
+			assertEquals(200, (int) first.get(2, TimeUnit.SECONDS));
+		}
+		finally
+		{
+			releaseProvider.countDown();
+			clients.shutdownNow();
+			endpoint.close();
+		}
+	}
+
+	private SensorFrame canonicalFrame()
+	{
+		return completeFrame(
+				"fixture-frame-8",
+				SOURCE_TICK,
+				SESSION_ID,
+				CLIENT_PROCESS_ID,
+				GEOMETRY_FRAME_ID,
+				Map.of(
+						"gameState", "LOGGED_IN",
+						"player", Map.of(),
+						"inputGeometry", Map.of(
+								"geometryAvailable", true,
+								"clientProcessId", CLIENT_PROCESS_ID)));
+	}
+
+	private SensorFrame incompleteFrame()
+	{
+		String capturedAtUtc = Instant.now().toString();
+		return frameBuilder(
+				"fixture-incomplete-frame",
+				SOURCE_TICK,
+				SESSION_ID,
+				CLIENT_PROCESS_ID,
+				GEOMETRY_FRAME_ID,
+				capturedAtUtc)
+				.fact(gson, SensorFrame.FACT_BASELINE, SOURCE_TICK, capturedAtUtc, true, List.of(),
+						Map.of("gameState", "LOGGED_IN"))
+				.fact(gson, SensorFrame.FACT_INVENTORY, SOURCE_TICK, capturedAtUtc, false,
+						List.of("inventory_unavailable"), Map.of("inventory", Map.of("known", false)))
+				.build();
+	}
+
+	private SensorFrame completeFrame(
+			String frameId,
+			long sourceTick,
+			String sessionId,
+			long clientProcessId,
+			String geometryFrameId,
+			Map<String, Object> baseline)
+	{
+		return completeFrame(
+				frameId,
+				sourceTick,
+				sessionId,
+				clientProcessId,
+				geometryFrameId,
+				baseline,
+				Instant.now().toString());
+	}
+
+	private SensorFrame completeFrame(
+			String frameId,
+			long sourceTick,
+			String sessionId,
+			long clientProcessId,
+			String geometryFrameId,
+			Map<String, Object> baseline,
+			String capturedAtUtc)
+	{
+		return frameBuilder(
+				frameId,
+				sourceTick,
+				sessionId,
+				clientProcessId,
+				geometryFrameId,
+				capturedAtUtc)
+				.fact(gson, SensorFrame.FACT_BASELINE, sourceTick, capturedAtUtc, true, List.of(), baseline)
+				.fact(gson, SensorFrame.FACT_INVENTORY, sourceTick, capturedAtUtc, true, List.of(),
+						Map.of("inventory", Map.of("known", true)))
+				.fact(gson, SensorFrame.FACT_ACTIVITY, sourceTick, capturedAtUtc, true, List.of(),
+						Map.of("animation", -1))
+				.fact(gson, SensorFrame.FACT_BANK_UI, sourceTick, capturedAtUtc, true, List.of(),
+						Map.of("known", true, "bankOpen", false))
+				.fact(gson, SensorFrame.FACT_DIALOGUE_STATE, sourceTick, capturedAtUtc, true, List.of(),
+						Map.of("active", false))
+				.build();
+	}
+
+	private SensorFrame.Builder frameBuilder(
+			String frameId,
+			long sourceTick,
+			String sessionId,
+			long clientProcessId,
+			String geometryFrameId,
+			String capturedAtUtc)
+	{
+		return SensorFrame.builder(frameId, sourceTick, System.nanoTime(), capturedAtUtc)
+				.completedAtUtc(capturedAtUtc)
+				.sessionId(sessionId)
+				.clientProcessId(clientProcessId)
+				.geometryFrameId(geometryFrameId);
+	}
+
+	private PluginLiveCache canonicalCache()
+	{
+		return cacheWithFrame(canonicalFrame());
+	}
+
+	private PluginLiveCache cacheWithFrame(SensorFrame frame)
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		assertTrue(cache.publish(frame));
+		return cache;
+	}
+
+	private Map<String, Object> tileProjectionResponse(long sourceTick, String geometryFrameId)
+	{
+		return Map.of(
+				"schema", "tile_projection_response.v1",
+				"status", "PASS",
+				"capturedAtUtc", Instant.now().toString(),
+				"sourceTick", sourceTick,
+				"sessionId", SESSION_ID,
+				"clientProcessId", CLIENT_PROCESS_ID,
+				"geometryFrameId", geometryFrameId,
+				"tiles", List.of(Map.of(
+						"label", "route",
+						"worldX", 3200,
+						"worldY", 3230,
+						"plane", 0,
+						"geometryAvailable", true,
+						"onScreen", true,
+						"visible", true,
+						"actionable", true)));
+	}
+
+	private Map<String, Object> worldModelResponse(
+			long sourceTick,
+			String geometryFrameId,
+			Map<String, Object> payloads)
+	{
+		return Map.of(
+				"schema", WorldModelCache.SCHEMA,
+				"status", "PASS",
+				"metadata", sourceMetadata(sourceTick, geometryFrameId),
+				"payloads", payloads,
+				"quality", Map.of("worldModelAvailable", true),
+				"warnings", List.of(),
+				"sizing", Map.of());
+	}
+
+	private Map<String, Object> sourceMetadata(long sourceTick, String geometryFrameId)
+	{
+		return sourceMetadata(sourceTick, geometryFrameId, Instant.now().toString());
+	}
+
+	private Map<String, Object> sourceMetadata(
+			long sourceTick,
+			String geometryFrameId,
+			String capturedAtUtc)
+	{
+		return Map.of(
+				"capturedAtUtc", capturedAtUtc,
+				"sourceTick", sourceTick,
+				"sessionId", SESSION_ID,
+				"clientProcessId", CLIENT_PROCESS_ID,
+				"geometryFrameId", geometryFrameId);
+	}
+
+	private PluginSnapshotEndpoint endpoint(PluginLiveCache cache)
+	{
+		return new PluginSnapshotEndpoint(cache, gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false);
+	}
+
+	private JsonArray tileProjectionRequests()
+	{
+		JsonArray tiles = new JsonArray();
+		JsonObject tile = new JsonObject();
+		tile.addProperty("label", "route");
+		tile.addProperty("worldX", 3200);
+		tile.addProperty("worldY", 3230);
+		tile.addProperty("plane", 0);
+		tiles.add(tile);
+		return tiles;
+	}
+
+	private JsonObject request(String... needs)
 	{
 		JsonObject request = new JsonObject();
-		JsonArray needs = new JsonArray();
-		needs.add("projection");
-		request.add("needs", needs);
-		request.addProperty("maxProjectionRefs", maxRefs);
-		request.addProperty("responseMode", "compact");
-		request.addProperty("projectionFieldMode", "compact");
+		JsonArray values = new JsonArray();
+		for (String need : needs)
+		{
+			values.add(need);
+		}
+		request.add("needs", values);
+		request.addProperty("maxAgeTicks", 2);
+		request.addProperty("maxSourceAgeMillis", 5_000);
 		return request;
 	}
 
-	private Map<String, Object> heavyProjectionPayload(int count, int nameChars)
+	private JsonObject jsonObject(Object value)
 	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		List<Map<String, Object>> refs = new java.util.ArrayList<>();
-		for (int i = 0; i < count; i++)
-		{
-			Map<String, Object> ref = projectionRef("heavy:" + i, true, "sceneObject", true, true);
-			ref.put("name", "Oak tree " + "x".repeat(nameChars));
-			ref.put("actions", List.of("Chop down"));
-			ref.put("source", "debug-source-" + "y".repeat(nameChars));
-			ref.put("firstSeenTick", i);
-			ref.put("geometrySummary", Map.of(
-					"debug", "z".repeat(nameChars),
-					"clickboxBounds", Map.of("x", 1, "y", 2, "width", 3, "height", 4)));
-			ref.put("clickableHull", Map.of("points", List.of(Map.of("x", 1, "y", 2))));
-			refs.add(ref);
-		}
-		payload.put("visibleObjectRefs", refs);
-		return payload;
+		return gson.toJsonTree(value).getAsJsonObject();
 	}
 
-	private Map<String, Object> projectionPayloadFromRefs(List<Map<String, Object>> refs)
+	private int httpStatus(PluginSnapshotEndpoint endpoint, String method, String path, String body) throws Exception
 	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("visibleObjectRefs", refs);
-		return payload;
-	}
-
-	private Map<String, Object> projectionRef(
-			String objectKey,
-			boolean onScreen,
-			String targetType,
-			boolean geometryAvailable,
-			boolean stable)
-	{
-		Map<String, Object> ref = new LinkedHashMap<>();
-		ref.put("objectKey", objectKey);
-		ref.put("targetType", targetType);
-		if (stable)
+		HttpURLConnection connection = (HttpURLConnection) new URL(
+				"http://127.0.0.1:" + endpoint.getBoundPort() + path).openConnection();
+		connection.setRequestMethod(method);
+		connection.setConnectTimeout(2_000);
+		connection.setReadTimeout(2_000);
+		if (body != null)
 		{
-			ref.put("id", 10820);
-			ref.put("hash", objectKey.hashCode());
-			ref.put("worldX", 3200);
-			ref.put("worldY", 3200);
-			ref.put("plane", 0);
-			ref.put("sceneX", 20);
-			ref.put("sceneY", 20);
+			byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+			connection.setDoOutput(true);
+			connection.setRequestProperty("Content-Type", "application/json");
+			connection.setFixedLengthStreamingMode(bytes.length);
+			connection.getOutputStream().write(bytes);
 		}
-		ref.put("name", "Oak tree");
-		ref.put("onScreen", onScreen);
-		ref.put("geometryAvailable", geometryAvailable);
-		ref.put("aimPoint", Map.of("x", 100, "y", 200));
-		ref.put("bounds", Map.of("x", 90, "y", 190, "width", 20, "height", 20));
-		ref.put("geometrySource", "bounds");
-		ref.put("present", true);
-		return ref;
-	}
-
-	private static final class FakeConfigStore implements TelemetryPresetApplier.ConfigStore
-	{
-		private final Map<String, String> values = new LinkedHashMap<>();
-
-		@Override
-		public String get(String group, String key)
+		try
 		{
-			return values.get(key);
+			return connection.getResponseCode();
 		}
-
-		@Override
-		public void set(String group, String key, Object value)
+		finally
 		{
-			values.put(key, value instanceof Enum<?> ? ((Enum<?>) value).name() : String.valueOf(value));
+			connection.disconnect();
 		}
 	}
 }

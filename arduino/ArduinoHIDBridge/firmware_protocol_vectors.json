@@ -1,0 +1,185 @@
+{
+  "schema": "arduino_hid_firmware_golden_vectors.v2",
+  "caps": "OK CAPS schema=input_capabilities.v2 protocol=arduino_hid.v2 firmwareVersion=2.0.0 pointer=1 mouse=1 relativeMove=1 maxMoveDelta=20 buttons=left,right,middle buttonDownUp=1 click=1 maxClickHoldMs=250 keyboard=1 keys=basic keyPress=1 maxKeyPressMs=250 holdKeys=1 maxHoldKeysMs=250 cameraKeyHold=1 cameraKeys=left,right,up,down maxCameraHoldMs=600 wheel=1 maxWheelStep=3 arm=1 watchdog=1 watchdogMs=1000 stopAll=1 disarm=1 status=1 resetSafe=1",
+  "vectors": [
+    {
+      "name": "camera-left-minimum",
+      "armed": true,
+      "command": "CAMERA_HOLD left 1",
+      "expected": "OK CAMERA_HOLD direction=left requestedDurationMs=1 appliedDurationMs=1",
+      "delayMs": 1
+    },
+    {
+      "name": "camera-right-maximum",
+      "armed": true,
+      "command": "CAMERA_HOLD right 600",
+      "expected": "OK CAMERA_HOLD direction=right requestedDurationMs=600 appliedDurationMs=600",
+      "delayMs": 600
+    },
+    {
+      "name": "camera-up",
+      "armed": true,
+      "command": "CAMERA_HOLD up 125",
+      "expected": "OK CAMERA_HOLD direction=up requestedDurationMs=125 appliedDurationMs=125",
+      "delayMs": 125
+    },
+    {
+      "name": "camera-down",
+      "armed": true,
+      "command": "CAMERA_HOLD down 250",
+      "expected": "OK CAMERA_HOLD direction=down requestedDurationMs=250 appliedDurationMs=250",
+      "delayMs": 250
+    },
+    {
+      "name": "camera-zero-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD left 0",
+      "expected": "ERR ERR_LIMIT CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-negative-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD left -1",
+      "expected": "ERR ERR_LIMIT CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-oversized-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD right 601",
+      "expected": "ERR ERR_LIMIT CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-unsupported-key-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD enter 100",
+      "expected": "ERR UNSUPPORTED_KEY CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-missing-duration-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD left",
+      "expected": "ERR BAD_ARGS CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-malformed-duration-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD left 1.5",
+      "expected": "ERR BAD_ARGS CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-extra-token-rejected",
+      "armed": true,
+      "command": "CAMERA_HOLD left 100 extra",
+      "expected": "ERR BAD_ARGS CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "camera-unarmed-rejected",
+      "armed": false,
+      "command": "CAMERA_HOLD right 100",
+      "expected": "ERR NOT_ARMED CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "wheel-positive-minimum",
+      "armed": true,
+      "command": "WHEEL 1",
+      "expected": "OK WHEEL requestedAmount=1 appliedAmount=1",
+      "wheel": 1
+    },
+    {
+      "name": "wheel-positive-maximum",
+      "armed": true,
+      "command": "WHEEL 3",
+      "expected": "OK WHEEL requestedAmount=3 appliedAmount=3",
+      "wheel": 3
+    },
+    {
+      "name": "wheel-negative-minimum",
+      "armed": true,
+      "command": "WHEEL -1",
+      "expected": "OK WHEEL requestedAmount=-1 appliedAmount=-1",
+      "wheel": -1
+    },
+    {
+      "name": "wheel-negative-maximum",
+      "armed": true,
+      "command": "WHEEL -3",
+      "expected": "OK WHEEL requestedAmount=-3 appliedAmount=-3",
+      "wheel": -3
+    },
+    {
+      "name": "wheel-zero-rejected",
+      "armed": true,
+      "command": "WHEEL 0",
+      "expected": "ERR ERR_LIMIT WHEEL",
+      "error": true
+    },
+    {
+      "name": "wheel-positive-oversize-rejected",
+      "armed": true,
+      "command": "WHEEL 4",
+      "expected": "ERR ERR_LIMIT WHEEL",
+      "error": true
+    },
+    {
+      "name": "wheel-negative-oversize-rejected",
+      "armed": true,
+      "command": "WHEEL -4",
+      "expected": "ERR ERR_LIMIT WHEEL",
+      "error": true
+    },
+    {
+      "name": "wheel-malformed-rejected",
+      "armed": true,
+      "command": "WHEEL nope",
+      "expected": "ERR BAD_ARGS WHEEL",
+      "error": true
+    },
+    {
+      "name": "wheel-missing-amount-rejected",
+      "armed": true,
+      "command": "WHEEL",
+      "expected": "ERR BAD_ARGS WHEEL",
+      "error": true
+    },
+    {
+      "name": "wheel-extra-token-rejected",
+      "armed": true,
+      "command": "WHEEL 1 extra",
+      "expected": "ERR BAD_ARGS WHEEL",
+      "error": true
+    },
+    {
+      "name": "wheel-unarmed-rejected",
+      "armed": false,
+      "command": "WHEEL 1",
+      "expected": "ERR NOT_ARMED WHEEL",
+      "error": true
+    },
+    {
+      "name": "new-command-error-clears-dirty-state",
+      "armed": true,
+      "keysDown": 2,
+      "mouseButtonsDown": 1,
+      "command": "CAMERA_HOLD left -10",
+      "expected": "ERR ERR_LIMIT CAMERA_HOLD",
+      "error": true
+    },
+    {
+      "name": "unknown-command-clears-and-disarms",
+      "armed": true,
+      "keysDown": 1,
+      "mouseButtonsDown": 1,
+      "command": "FUTURE_OP 1",
+      "expected": "ERR UNKNOWN FUTURE_OP",
+      "error": true
+    }
+  ]
+}

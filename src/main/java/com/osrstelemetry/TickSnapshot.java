@@ -11,6 +11,7 @@ public class TickSnapshot
     public Integer cameraZ;
     public Integer cameraYaw;
     public Integer cameraPitch;
+    public Integer zoom3d;
     public Integer viewportWidth;
     public Integer viewportHeight;
     public Integer viewportXOffset;
@@ -18,9 +19,12 @@ public class TickSnapshot
     public Integer canvasWidth;
     public Integer canvasHeight;
     public InputGeometrySnapshot inputGeometry;
+    public Boolean welcomeScreenVisible;
+    public Boolean textInputActive;
 
     public LocalPlayer localPlayer;
     public InventorySlot[] inventory;
+    public String inventoryCaptureSource;
     public InventorySlot[] equipment;
     public SkillSnapshot[] skills;
     public NpcSnapshot[] npcs;
@@ -37,13 +41,7 @@ public class TickSnapshot
     public BankUiSnapshot bankUi;
     public DialogueStateSnapshot dialogueState;
     public ActivePrayerSnapshot[] activePrayers;
-    public String framePath;
-    public String frameCaptureStatus;
-    public String frameCaptureSource;
-    public String frameCaptureWarning;
     public String[] captureErrors;
-    public int writerQueueSize;
-    public long writerDroppedRecords;
     public Long sceneCaptureDurationMillis;
     public Long snapshotBuildDurationMillis;
 
@@ -140,8 +138,10 @@ public class TickSnapshot
         public Integer clientWindowHeight;
         public Double displayScaleX;
         public Double displayScaleY;
+        public String coordinateSpace;
         public Boolean isCanvasShowing;
         public Boolean isClientFocused;
+        public Long clientProcessId;
         public Long sourceTick;
     }
 
@@ -154,6 +154,8 @@ public class TickSnapshot
         public Integer localY;
         public Integer sceneX;
         public Integer sceneY;
+        public Integer canvasX;
+        public Integer canvasY;
         public int animation;
         public int poseAnimation;
         public int combatLevel;

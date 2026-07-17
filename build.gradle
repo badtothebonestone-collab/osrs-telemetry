@@ -2,8 +2,14 @@ plugins {
 	id 'java'
 }
 
+// OneDrive can hold Gradle's transient test-result files open. Keep generated
+// build output outside the checkout, with a stable per-clone directory.
+def configuredBuildDir = System.getenv('OSRS_TELEMETRY_BUILD_DIR')
+def buildKey = Integer.toUnsignedString(rootDir.canonicalPath.toLowerCase(Locale.ROOT).hashCode(), 16)
+def defaultBuildDir = new File(System.getProperty('java.io.tmpdir'), "osrs-telemetry-build-${buildKey}")
+layout.buildDirectory.set(file(configuredBuildDir ?: defaultBuildDir))
+
 repositories {
-	mavenLocal()
 	maven {
 		url = 'https://repo.runelite.net'
 		content {
@@ -13,7 +19,7 @@ repositories {
 	mavenCentral()
 }
 
-def runeLiteVersion = 'latest.release'
+def runeLiteVersion = '1.12.32'
 def pluginMainClass = 'com.osrstelemetry.TelemetryPluginTest'
 
 dependencies {
@@ -41,6 +47,13 @@ tasks.register('run', JavaExec) {
 
 	jvmArgs "-ea"
 	args "--developer-mode", "--debug"
+}
+
+tasks.register('generateJavaSnapshotFixture', JavaExec) {
+	dependsOn tasks.named('testClasses')
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.osrstelemetry.JavaSnapshotFixture'
+	args file('tests/fixtures/java_snapshot_endpoint.json').absolutePath
 }
 
 tasks.register('shadowJar', Jar) {

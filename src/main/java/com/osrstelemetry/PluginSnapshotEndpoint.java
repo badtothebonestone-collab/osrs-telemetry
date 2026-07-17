@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
@@ -24,8 +25,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 
@@ -34,50 +38,30 @@ public class PluginSnapshotEndpoint implements Closeable
 {
 	static final String HEALTH_SCHEMA = "plugin_snapshot_health.v1";
 	static final String REQUEST_SCHEMA = "plugin_snapshot_request.v1";
-	static final String RESPONSE_SCHEMA = "plugin_snapshot_response.v1";
-	static final String PRESET_REQUEST_SCHEMA = "telemetry_preset_request.v1";
-	static final String PRESET_RESPONSE_SCHEMA = "telemetry_preset_response.v1";
+	static final String RESPONSE_SCHEMA = "plugin_snapshot_response.v2";
 	static final int MAX_REQUEST_BODY_BYTES = 16 * 1024;
 	static final int MAX_TILE_PROJECTION_REQUESTS = 16;
 	static final long CACHE_FRESHNESS_THRESHOLD_MILLIS = 5_000L;
 	static final String STALE_REASON_ALL_PACKETS = "plugin_all_packets_stale";
+	static final String ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA = "plugin_snapshot_endpoint_queue_diagnostics.v1";
+	static final int ENDPOINT_WORKER_LIMIT = 4;
+	static final int ENDPOINT_PENDING_CAPACITY = 8;
 	private static final String CONTENT_TYPE_JSON = "application/json; charset=utf-8";
 	private static final List<String> SUPPORTED_NEEDS = Arrays.asList(
 			"baseline",
-			"scene_delta",
-			"projection",
 			"inventory",
-			"inventory_delta",
 			"activity",
-			"navigation",
-			"collision_window",
 			"bank_ui",
 			"dialogue_state",
 			"interaction_hot",
 			"client_tick_tail",
-			"world_model_summary",
 			"scene_object_census",
-			"route_object_census",
-			"resource_object_census",
-			"service_object_census",
-			"pathing_frontier",
-			"projection_audit",
-			"minimap_projection",
-			"view_quality_inputs",
-			"full_world_model_debug",
-			"writer_health",
-			"watch_values");
+			"actor_census",
+			"collision_window");
 	private static final List<String> WORLD_MODEL_NEEDS = Arrays.asList(
-			"world_model_summary",
 			"scene_object_census",
-			"route_object_census",
-			"resource_object_census",
-			"service_object_census",
-			"pathing_frontier",
-			"projection_audit",
-			"minimap_projection",
-			"view_quality_inputs",
-			"full_world_model_debug");
+			"actor_census",
+			"collision_window");
 	private static final Map<String, String> NEED_TO_PACKET_TYPE = createNeedMap();
 
 	private final PluginLiveCache liveCache;
@@ -88,14 +72,19 @@ public class PluginSnapshotEndpoint implements Closeable
 	private final int maxProjectionRefs;
 	private final int maxResponseBytes;
 	private final boolean allowNonLocalHost;
-	private final TelemetryPresetApplier presetApplier;
 	private final Supplier<Map<String, Object>> hoverMenuSupplier;
 	private final Supplier<Map<String, Object>> lastMenuOptionClickedSupplier;
 	private final ClientTickHotState clientTickHotState;
 	private final TileProjectionProvider tileProjectionProvider;
 	private final WorldModelQueryProvider worldModelQueryProvider;
+	private final Supplier<Instant> nowSupplier;
+	private volatile Runnable cameraInputLeaseRenewer;
+	private volatile Runnable cameraInputLeaseDisabler;
 	private HttpServer server;
-	private ExecutorService executor;
+	private volatile ThreadPoolExecutor executor;
+	private final AtomicBoolean snapshotRequestActive = new AtomicBoolean();
+	private final AtomicLong snapshotBusyRejectionCount = new AtomicLong();
+	private final AtomicLong endpointExecutionRejectionCount = new AtomicLong();
 	private int boundPort;
 
 	@FunctionalInterface
@@ -120,20 +109,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxResponseBytes,
 			boolean allowNonLocalHost)
 	{
-		this(liveCache, gson, host, port, authToken, maxProjectionRefs, maxResponseBytes, allowNonLocalHost, null);
-	}
-
-	public PluginSnapshotEndpoint(
-			PluginLiveCache liveCache,
-			Gson gson,
-			String host,
-			int port,
-			String authToken,
-			int maxProjectionRefs,
-			int maxResponseBytes,
-			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier)
-	{
 		this(
 				liveCache,
 				gson,
@@ -143,7 +118,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				null,
@@ -160,7 +134,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			Supplier<Map<String, Object>> hoverMenuSupplier,
 			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier)
 	{
@@ -173,7 +146,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				hoverMenuSupplier,
 				lastMenuOptionClickedSupplier,
 				null,
@@ -190,7 +162,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			ClientTickHotState clientTickHotState)
 	{
 		this(
@@ -202,7 +173,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				clientTickHotState,
@@ -219,7 +189,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			ClientTickHotState clientTickHotState,
 			TileProjectionProvider tileProjectionProvider)
 	{
@@ -232,7 +201,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				clientTickHotState,
@@ -249,7 +217,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			ClientTickHotState clientTickHotState,
 			TileProjectionProvider tileProjectionProvider,
 			WorldModelQueryProvider worldModelQueryProvider)
@@ -263,7 +230,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				clientTickHotState,
@@ -280,12 +246,44 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			Supplier<Map<String, Object>> hoverMenuSupplier,
 			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier,
 			ClientTickHotState clientTickHotState,
 			TileProjectionProvider tileProjectionProvider,
 			WorldModelQueryProvider worldModelQueryProvider)
+	{
+		this(
+				liveCache,
+				gson,
+				host,
+				port,
+				authToken,
+				maxProjectionRefs,
+				maxResponseBytes,
+				allowNonLocalHost,
+				hoverMenuSupplier,
+				lastMenuOptionClickedSupplier,
+				clientTickHotState,
+				tileProjectionProvider,
+				worldModelQueryProvider,
+				Instant::now);
+	}
+
+	PluginSnapshotEndpoint(
+			PluginLiveCache liveCache,
+			Gson gson,
+			String host,
+			int port,
+			String authToken,
+			int maxProjectionRefs,
+			int maxResponseBytes,
+			boolean allowNonLocalHost,
+			Supplier<Map<String, Object>> hoverMenuSupplier,
+			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier,
+			ClientTickHotState clientTickHotState,
+			TileProjectionProvider tileProjectionProvider,
+			WorldModelQueryProvider worldModelQueryProvider,
+			Supplier<Instant> nowSupplier)
 	{
 		this.liveCache = liveCache;
 		this.gson = gson;
@@ -295,12 +293,24 @@ public class PluginSnapshotEndpoint implements Closeable
 		this.maxProjectionRefs = Math.max(0, maxProjectionRefs);
 		this.maxResponseBytes = Math.max(8 * 1024, maxResponseBytes);
 		this.allowNonLocalHost = allowNonLocalHost;
-		this.presetApplier = presetApplier;
 		this.hoverMenuSupplier = hoverMenuSupplier;
 		this.lastMenuOptionClickedSupplier = lastMenuOptionClickedSupplier;
 		this.clientTickHotState = clientTickHotState;
 		this.tileProjectionProvider = tileProjectionProvider;
 		this.worldModelQueryProvider = worldModelQueryProvider;
+		this.nowSupplier = nowSupplier == null ? Instant::now : nowSupplier;
+	}
+
+	private Instant now()
+	{
+		Instant value = nowSupplier.get();
+		return value == null ? Instant.now() : value;
+	}
+
+	void setCameraInputCaptureLeaseControls(Runnable renewer, Runnable disabler)
+	{
+		cameraInputLeaseRenewer = renewer;
+		cameraInputLeaseDisabler = disabler;
 	}
 
 	public void start() throws IOException
@@ -308,19 +318,33 @@ public class PluginSnapshotEndpoint implements Closeable
 		InetAddress bindAddress = bindAddress();
 		server = HttpServer.create(new InetSocketAddress(bindAddress, port), 0);
 		boundPort = server.getAddress().getPort();
-		executor = Executors.newSingleThreadExecutor(runnable ->
-		{
-			Thread thread = new Thread(runnable, "telemetry-plugin-snapshot-endpoint");
-			thread.setDaemon(true);
-			return thread;
-		});
+		executor = new ThreadPoolExecutor(
+				ENDPOINT_WORKER_LIMIT,
+				ENDPOINT_WORKER_LIMIT,
+				0L,
+				TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(ENDPOINT_PENDING_CAPACITY),
+				runnable ->
+				{
+					Thread thread = new Thread(runnable, "telemetry-plugin-snapshot-endpoint");
+					thread.setDaemon(true);
+					return thread;
+				},
+				(runnable, pool) ->
+				{
+					endpointExecutionRejectionCount.incrementAndGet();
+					if (!pool.isShutdown())
+					{
+						// Apply direct backpressure on the single HttpServer dispatcher once
+						// the finite worker queue is full. Snapshot admission below still
+						// returns 503 before request parsing when another snapshot is active.
+						runnable.run();
+					}
+				});
 		server.setExecutor(executor);
 		server.createContext("/health", this::handleHealth);
 		server.createContext("/schema", this::handleSchema);
 		server.createContext("/snapshot", this::handleSnapshot);
-		server.createContext("/presets", this::handlePresets);
-		server.createContext("/preset/preview", this::handlePresetPreview);
-		server.createContext("/preset/apply", this::handlePresetApply);
 		server.start();
 		log.info("Plugin snapshot endpoint started on {}:{}", host, boundPort);
 	}
@@ -343,18 +367,36 @@ public class PluginSnapshotEndpoint implements Closeable
 	Map<String, Object> healthPayload()
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
-		Map<String, Object> cacheHealth = cacheHealth();
+		PluginLiveCache.FrameSnapshot publication = liveCache == null ? null : liveCache.snapshot();
+		SensorFrame frame = publication == null ? null : publication.getFrame();
+		Map<String, Object> cacheHealth = liveCache == null
+				? Map.of()
+				: liveCache.health(publication);
 		CacheFreshness cacheFreshness = cacheFreshness(cacheHealth);
 		List<String> warnings = endpointWarnings();
 		warnings.addAll(cacheFreshness.healthWarnings);
+		long frameAgeMillis = frame == null ? -1L : frame.ageMillis();
+		boolean frameFresh = frame != null
+				&& frameAgeMillis >= -2_000L
+				&& frameAgeMillis <= CACHE_FRESHNESS_THRESHOLD_MILLIS;
+		boolean frameHealthy = frame != null
+				&& frame.isCoherent()
+				&& frame.isComplete()
+				&& frameFresh;
+		if (!frameHealthy)
+		{
+			warnings.add("sensor_frame_incomplete_incoherent_or_stale");
+		}
 		payload.put("schema", HEALTH_SCHEMA);
 		payload.put("enabled", true);
-		payload.put("status", liveCache == null ? "FAIL" : (cacheFreshness.healthWarn ? "WARN" : "PASS"));
-		payload.put("latestTick", liveCache == null ? -1L : liveCache.getLatestTick());
-		payload.put("latestSequence", liveCache == null ? -1L : liveCache.getLatestSequence());
-		payload.put("cachedPacketTypes", liveCache == null ? List.of() : liveCache.packetTypes());
+		payload.put("status", liveCache == null ? "FAIL" : (frameHealthy ? "PASS" : "WARN"));
+		payload.put("latestTick", frame == null ? -1L : frame.getSourceTick());
+		payload.put("latestSequence", publication == null ? -1L : publication.getSequence());
+		payload.put("cachedPacketTypes", publication == null ? List.of() : publication.packetTypes());
 		payload.put("cacheAgeMillisByType", cacheHealth.get("liveCacheAgeMillisByType"));
 		payload.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
+		payload.put("sourceCaptureFresh", frameFresh);
+		payload.put("sensorFrame", sensorFrameMetadata(frame, now()));
 		payload.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
 		payload.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
 		payload.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
@@ -362,6 +404,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("stalePacketTypes", cacheFreshness.stalePacketTypes);
 		payload.put("staleReasons", cacheFreshness.staleReasons);
 		payload.put("cacheHealth", cacheHealth);
+		payload.put("endpointQueueDiagnostics", endpointQueueDiagnostics());
 		payload.put("endpointHost", host);
 		payload.put("endpointPort", boundPort == 0 ? port : boundPort);
 		payload.put("warnings", warnings);
@@ -372,79 +415,108 @@ public class PluginSnapshotEndpoint implements Closeable
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", "plugin_snapshot_schema.v1");
-		payload.put("supportedSchemas", List.of(HEALTH_SCHEMA, REQUEST_SCHEMA, RESPONSE_SCHEMA, PRESET_REQUEST_SCHEMA, PRESET_RESPONSE_SCHEMA));
+		payload.put("supportedSchemas", List.of(
+				HEALTH_SCHEMA,
+				REQUEST_SCHEMA,
+				RESPONSE_SCHEMA,
+				ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA,
+				ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA));
+		payload.put("sensorFrameSchema", SensorFrame.SCHEMA);
 		payload.put("supportedNeeds", SUPPORTED_NEEDS);
-		payload.put("presetEndpointAvailable", presetApplier != null);
-		payload.put("supportedPresets", TelemetryPresetApplier.PRESET_NAMES);
-		payload.put("presetEndpoints", List.of("GET /presets", "POST /preset/preview", "POST /preset/apply"));
-		payload.put("snapshotTiers", List.of("hot", "expanded", "audit"));
+		payload.put("endpoints", List.of("GET /health", "GET /schema", "POST /snapshot"));
+		payload.put("snapshotTiers", List.of("hot"));
 		payload.put("configLimits", Map.of(
 				"maxProjectionRefs", maxProjectionRefs,
 				"maxResponseBytes", maxResponseBytes,
 				"maxRequestBodyBytes", MAX_REQUEST_BODY_BYTES,
-				"maxTileProjectionRequests", MAX_TILE_PROJECTION_REQUESTS));
-		payload.put("projectionFieldModes", List.of("compact", "normal", "full"));
-		payload.put("hotSamples", List.of("clientTickHot", "hoverMenu", "lastMenuOptionClicked"));
+				"maxTileProjectionRequests", MAX_TILE_PROJECTION_REQUESTS,
+				"maxClientTickHotSamples", ClientTickHotState.DEFAULT_SAMPLE_CAP,
+				"maxMenuEntries", ClientTickHotState.MAX_MENU_ENTRY_LIMIT,
+				"cameraInputCaptureLeaseMillis", CameraInputCapture.CAPTURE_LEASE_MILLIS,
+				"endpointWorkerLimit", ENDPOINT_WORKER_LIMIT,
+				"endpointPendingCapacity", ENDPOINT_PENDING_CAPACITY));
+		payload.put("projectionFieldModes", List.of("compact"));
+		payload.put("hotSamples", List.of(
+				"clientTickHot",
+				"hoverMenu",
+				"lastMenuOptionClicked",
+				"cameraInputTail",
+				"clientTickTail"));
 		payload.put("clientTickHotSchema", ClientTickHotState.SCHEMA);
-		payload.put("requestControls", List.of("tileProjectionRequests"));
+		payload.put("clientThreadQueryDiagnosticsSchema", ClientThreadQueryScheduler.DIAGNOSTICS_SCHEMA);
+		payload.put("endpointQueueDiagnosticsSchema", ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA);
+		payload.put("requestControls", List.of(
+				"tileProjectionRequests",
+				"maxSourceAgeMillis",
+				"includeMenuEntries",
+				"menuEntryLimit",
+				"maxClientTickSamples",
+				"maxMenuSamples",
+				"maxClickedSamples",
+				"maxCameraInputSamples",
+				"disableCameraInputCapture"));
 		payload.put("tileProjectionSchema", "tile_projection_response.v1");
 		payload.put("worldModelSchema", WorldModelCache.SCHEMA);
 		payload.put("worldModelQueryControls", List.of(
 				"worldModel.maxObjects",
 				"worldModel.radiusTiles",
-				"worldModel.centerWorldLocation",
+				"worldModel.priorityObjectIds",
+				"worldModel.maxActors",
+				"worldModel.maxCollisionTiles",
 				"worldModel.includeProjection",
+				"worldModel.includeActors",
 				"worldModel.includeCollision"));
-		payload.put("readOnlyStatement", "Returns cached telemetry observations and can apply fixed whitelisted telemetry config presets. It has no game input, command, or game-state mutation endpoints.");
+		payload.put("readOnlyStatement", "Returns cached telemetry observations only. It has no configuration, game input, command, or game-state mutation endpoints.");
 		return payload;
-	}
-
-	Map<String, Object> presetsPayload()
-	{
-		return presetApplier == null ? presetUnavailablePayload() : presetApplier.presetsPayload();
-	}
-
-	Map<String, Object> presetPayload(JsonObject request, boolean preview)
-	{
-		if (presetApplier == null)
-		{
-			return presetUnavailablePayload();
-		}
-		return presetApplier.apply(stringValue(request, "preset", ""), preview);
 	}
 
 	Map<String, Object> snapshotPayload(JsonObject request)
 	{
 		long startNanos = System.nanoTime();
+		updateCameraInputCaptureLease(request);
+		Instant assemblyStartedAt = now();
 		String requestId = stringValue(request, "requestId", null);
 		int requestedProjectionRefs = intValue(request, "maxProjectionRefs", maxProjectionRefs);
 		int effectiveProjectionRefs = Math.max(0, Math.min(maxProjectionRefs, requestedProjectionRefs));
-		long maxAgeTicks = longValue(request, "maxAgeTicks", -1L);
+		long maxAgeTicks = longValue(request, "maxAgeTicks", 0L);
+		long requestedSourceAgeMillis = longValue(
+				request,
+				"maxSourceAgeMillis",
+				CACHE_FRESHNESS_THRESHOLD_MILLIS);
+		long maxSourceAgeMillis = Math.max(
+				0L,
+				Math.min(CACHE_FRESHNESS_THRESHOLD_MILLIS, requestedSourceAgeMillis));
 		boolean includeGeometry = booleanValue(request, "includeGeometry", false);
 		boolean includeCollisionWindow = booleanValue(request, "includeCollisionWindow", true);
 		boolean includeWatchValues = booleanValue(request, "includeWatchValues", false);
 		String responseMode = normalizeMode(stringValue(request, "responseMode", "compact"));
 		String projectionFieldMode = normalizeMode(stringValue(request, "projectionFieldMode", responseMode));
 		String snapshotTier = normalizeSnapshotTier(stringValue(request, "snapshotTier", "hot"));
-		SnapshotHints snapshotHints = snapshotHints(request);
 		List<String> needs = requestedNeeds(request, includeCollisionWindow, includeWatchValues);
 		List<String> hotNeeds = requestedHotNeeds(request);
 		List<String> worldModelNeeds = requestedWorldModelNeeds(request);
-		Map<String, Object> clientTickHot = clientTickHotSnapshot(request, false);
-		Map<String, Object> cacheHealth = cacheHealth();
-		CacheFreshness cacheFreshness = cacheFreshness(cacheHealth);
+		PluginLiveCache.FrameSnapshot publication = liveCache == null ? null : liveCache.snapshot();
+		SensorFrame frame = publication == null ? null : publication.getFrame();
+		Map<String, Object> clientTickHot = enrichClientTickHot(
+				clientTickHotSnapshot(request, false));
 		List<Map<String, Object>> tileProjectionRequests = tileProjectionRequests(request);
 		Map<String, Object> response = new LinkedHashMap<>();
 		Map<String, JsonElement> payloads = new LinkedHashMap<>();
 		Map<String, Object> freshness = new LinkedHashMap<>();
-		Map<String, Long> ageTicksByNeed = new LinkedHashMap<>();
-		Map<String, Long> ageMillisByNeed = new LinkedHashMap<>();
 		List<String> missingCapabilities = new ArrayList<>();
 		List<String> warnings = new ArrayList<>();
+		for (String unsupportedNeed : requestedUnsupportedNeeds(request))
+		{
+			missingCapabilities.add(unsupportedNeed);
+			warnings.add("unsupported need: " + unsupportedNeed);
+		}
 		Map<String, Object> responseSizing = new LinkedHashMap<>();
-		long latestTick = liveCache == null ? -1L : liveCache.getLatestTick();
+		long latestTick = frame == null ? -1L : frame.getSourceTick();
+		long sourceAgeMillis = -1L;
+		boolean sourceCaptureFresh = false;
+		boolean frameCoherent = frame != null && frame.isCoherent() && frame.isComplete();
 		boolean stale = false;
-		PriorityContext priorityContext = projectionPriorityContext(snapshotHints);
+		PriorityContext priorityContext = projectionPriorityContext(frame);
 
 		responseSizing.put("maxResponseBytes", maxResponseBytes);
 		responseSizing.put("requestedProjectionRefs", requestedProjectionRefs);
@@ -453,56 +525,37 @@ public class PluginSnapshotEndpoint implements Closeable
 		responseSizing.put("responseMode", responseMode);
 		responseSizing.put("includeGeometry", includeGeometry);
 		responseSizing.put("snapshotTier", snapshotTier);
-		responseSizing.put("snapshotHints", snapshotHints.toMap());
 		responseSizing.put("tileProjectionRequestCount", tileProjectionRequests.size());
 
-		if (liveCache == null)
+		if (frame == null)
 		{
-			warnings.add("plugin live cache unavailable");
+			warnings.add("sensor_frame_unavailable");
 		}
 		else
 		{
 			for (String need : needs)
 			{
-				String packetType = NEED_TO_PACKET_TYPE.get(need);
-				if (packetType == null)
+				if (!SensorFrame.isCoreFact(need))
 				{
 					missingCapabilities.add(need);
 					warnings.add("unsupported need: " + need);
 					continue;
 				}
-
-				PluginLiveCache.CachedPayload cached = liveCache.get(packetType);
-				if (cached == null)
+				SensorFrame.Fact fact = frame.getFact(need);
+				if (fact == null || !fact.isAvailable())
 				{
 					missingCapabilities.add(need);
-					warnings.add("missing cached payload: " + need + " (" + packetType + ")");
+					warnings.add("sensor_fact_unavailable:" + need);
 					continue;
 				}
-				if ("projection".equals(need))
-				{
-					responseSizing.put("cachedProjectionBytes", cached.sizeBytes);
-				}
-
-				long ageTicks = latestTick >= 0L ? Math.max(0L, latestTick - cached.tick) : -1L;
-				ageTicksByNeed.put(need, ageTicks);
-				if (maxAgeTicks >= 0L && ageTicks > maxAgeTicks)
+				if (fact.getSourceTick() != frame.getSourceTick())
 				{
 					stale = true;
-					warnings.add(need + " cache age exceeded maxAgeTicks");
+					missingCapabilities.add(need);
+					warnings.add("sensor_fact_tick_mismatch:" + need);
+					continue;
 				}
-				Long ageMillis = cacheFreshness.ageMillisByType.get(packetType);
-				if (ageMillis != null)
-				{
-					ageMillisByNeed.put(need, ageMillis);
-					if (ageMillis > CACHE_FRESHNESS_THRESHOLD_MILLIS)
-					{
-						stale = true;
-						warnings.add(need + " cache age exceeded maxAgeMillis");
-					}
-				}
-
-				JsonElement payload = parsePayload(cached.payloadJson);
+				JsonElement payload = parsePayload(fact.getPayloadJson());
 				payload = compactPayloadForResponse(
 						need,
 						payload,
@@ -515,19 +568,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				payloads.put(need, payload);
 			}
 		}
-		if (liveCache != null)
-		{
-			if (!cacheFreshness.hasPacketTypes)
-			{
-				stale = true;
-				warnings.add("plugin live cache has no payloads");
-			}
-			else if (cacheFreshness.allPacketsStale)
-			{
-				stale = true;
-				warnings.add(STALE_REASON_ALL_PACKETS);
-			}
-		}
+		boolean menuFresh = false;
 		if (hotNeeds.contains("interaction_hot"))
 		{
 			payloads.put("interaction_hot", gson.toJsonTree(clientTickHot));
@@ -536,41 +577,98 @@ public class PluginSnapshotEndpoint implements Closeable
 		{
 			payloads.put("client_tick_tail", gson.toJsonTree(clientTickHotSnapshot(request, true)));
 		}
-		Map<String, Object> tileProjections = tileProjectionPayload(tileProjectionRequests, warnings, missingCapabilities);
+		Map<String, Object> tileProjections = tileProjectionPayload(
+				tileProjectionRequests,
+				frame,
+				maxSourceAgeMillis,
+				warnings,
+				missingCapabilities,
+				responseSizing);
 		if (tileProjections != null)
 		{
 			payloads.put("tile_projection", gson.toJsonTree(tileProjections));
 		}
-		Map<String, Object> worldModel = worldModelPayload(worldModelNeeds, request, warnings, missingCapabilities, responseSizing);
+		Map<String, Object> worldModel = worldModelPayload(
+				worldModelNeeds,
+				request,
+				frame,
+				maxSourceAgeMillis,
+				warnings,
+				missingCapabilities,
+				responseSizing);
 		if (worldModel != null)
 		{
 			@SuppressWarnings("unchecked")
 			Map<String, Object> worldPayloads = worldModel.get("payloads") instanceof Map
 					? (Map<String, Object>) worldModel.get("payloads")
 					: Map.of();
+			@SuppressWarnings("unchecked")
+			Map<String, Object> worldMetadata = worldModel.get("metadata") instanceof Map
+					? (Map<String, Object>) worldModel.get("metadata")
+					: Map.of();
+			String dynamicCapturedAtUtc = String.valueOf(
+					worldMetadata.getOrDefault("capturedAtUtc", ""));
 			for (String need : worldModelNeeds)
 			{
 				Object value = worldPayloads.get(need);
 				if (value != null)
 				{
-					payloads.put(need, gson.toJsonTree(value));
+					JsonElement stamped = stampDynamicPayload(
+							value,
+							frame,
+							dynamicCapturedAtUtc);
+					payloads.put(need, stamped);
+				}
+				else
+				{
+					missingCapabilities.add(need);
+					warnings.add("world_model_payload_unavailable:" + need);
 				}
 			}
 		}
 
+		Instant assembledAt = now();
+		sourceAgeMillis = frame == null
+				? -1L
+				: Duration.between(Instant.parse(frame.getCapturedAtUtc()), assembledAt).toMillis();
+		sourceCaptureFresh = frame != null
+				&& sourceAgeMillis >= -2_000L
+				&& sourceAgeMillis <= maxSourceAgeMillis;
+		if (!frameCoherent)
+		{
+			stale = true;
+			warnings.add("sensor_frame_incomplete_or_incoherent");
+		}
+		if (!sourceCaptureFresh)
+		{
+			stale = true;
+			warnings.add(sourceAgeMillis < -2_000L
+					? "sensor_frame_timestamp_future"
+					: "sensor_frame_source_stale");
+		}
+		menuFresh = menuEvidenceMatchesFrame(
+				clientTickHot,
+				frame,
+				assembledAt,
+				maxSourceAgeMillis);
+		if (hotNeeds.contains("interaction_hot") && !menuFresh)
+		{
+			missingCapabilities.add("interaction_hot");
+			warnings.add("menu_evidence_provenance_mismatch_or_stale");
+		}
+
 		freshness.put("latestTick", latestTick);
 		freshness.put("maxAgeTicks", maxAgeTicks);
-		freshness.put("fresh", !stale);
-		freshness.put("ageTicksByNeed", ageTicksByNeed);
-		freshness.put("ageMillisByNeed", ageMillisByNeed);
-		freshness.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
-		freshness.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
-		freshness.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
-		freshness.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
-		freshness.put("staleReasons", cacheFreshness.staleReasons);
+		freshness.put("maxSourceAgeMillis", maxSourceAgeMillis);
+		freshness.put("sourceAgeMillis", sourceAgeMillis);
+		freshness.put("sourceCaptureFresh", sourceCaptureFresh);
+		freshness.put("cacheWallClockFresh", sourceCaptureFresh);
+		freshness.put("frameCoherent", frameCoherent);
+		freshness.put("menuFresh", menuFresh);
+		freshness.put("fresh", !stale && frameCoherent);
 
 		String status = "PASS";
-		if (liveCache == null || payloads.isEmpty())
+		if (frame == null || payloads.isEmpty())
 		{
 			status = "FAIL";
 		}
@@ -581,8 +679,17 @@ public class PluginSnapshotEndpoint implements Closeable
 
 		response.put("schema", RESPONSE_SCHEMA);
 		response.put("requestId", requestId);
-		response.put("generatedAtUtc", Instant.now().toString());
+		response.put("assembledAtUtc", assembledAt.toString());
+		response.put("assemblyStartedAtUtc", assemblyStartedAt.toString());
 		response.put("latestTick", latestTick);
+		response.put("sensorFrame", sensorFrameMetadata(frame, assembledAt));
+		Map<String, Object> publicationMetadata = new LinkedHashMap<>();
+		if (publication != null)
+		{
+			publicationMetadata.put("sequence", publication.getSequence());
+			publicationMetadata.put("publishedAtUtc", publication.getPublishedAtUtc());
+		}
+		response.put("publication", publicationMetadata);
 		response.put("snapshotTier", snapshotTier);
 		response.put("status", status);
 		response.put("freshness", freshness);
@@ -606,21 +713,25 @@ public class PluginSnapshotEndpoint implements Closeable
 		response.put("missingCapabilities", missingCapabilities);
 		response.put("warnings", warnings);
 		response.put("serviceTimingMillis", elapsedMillis(startNanos));
+		response.put("endpointQueueDiagnostics", endpointQueueDiagnostics());
 		response.put("responseSizing", responseSizing);
-		response.put("cacheHealth", cacheHealth);
 		return response;
 	}
 
 	private Map<String, Object> clientTickHotSnapshot(JsonObject request, boolean includeTail)
 	{
 		boolean includeMenuEntries = booleanValue(request, "includeMenuEntries", true);
-		int menuEntryLimit = intValue(request, "menuEntryLimit", 5);
+		int menuEntryLimit = intValue(
+				request,
+				"menuEntryLimit",
+				ClientTickHotState.DEFAULT_MENU_ENTRY_LIMIT);
 		if (clientTickHotState != null)
 		{
 			return clientTickHotState.snapshot(
 					includeTail ? intValue(request, "maxClientTickSamples", 0) : 0,
 					includeTail ? intValue(request, "maxMenuSamples", 0) : 0,
 					includeTail ? intValue(request, "maxClickedSamples", 0) : 0,
+					includeTail ? intValue(request, "maxCameraInputSamples", 0) : 0,
 					includeMenuEntries,
 					menuEntryLimit);
 		}
@@ -632,6 +743,8 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("wallTimeMillis", hoverMenu == null ? null : hoverMenu.get("wallTimeMillis"));
 		payload.put("gameTickAtSample", hoverMenu == null ? null : hoverMenu.get("gameTickAtSample"));
 		payload.put("gameState", hoverMenu == null ? null : hoverMenu.get("gameState"));
+		payload.put("sessionId", hoverMenu == null ? null : hoverMenu.get("sessionId"));
+		payload.put("clientProcessId", hoverMenu == null ? null : hoverMenu.get("clientProcessId"));
 		Map<String, Object> mouse = new LinkedHashMap<>();
 		mouse.put("canvasX", hoverMenu == null ? null : hoverMenu.get("mouseCanvasX"));
 		mouse.put("canvasY", hoverMenu == null ? null : hoverMenu.get("mouseCanvasY"));
@@ -642,6 +755,247 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("lastMenuOptionClicked", lastClicked);
 		payload.put("latency", Map.of("samplesBuffered", hoverMenu == null && lastClicked == null ? 0 : 1));
 		return payload;
+	}
+
+	private void updateCameraInputCaptureLease(JsonObject request)
+	{
+		if (strictBooleanTrue(request, "disableCameraInputCapture"))
+		{
+			Runnable disabler = cameraInputLeaseDisabler;
+			if (disabler != null)
+			{
+				disabler.run();
+			}
+			return;
+		}
+		if (!strictPositiveNumber(request, "maxCameraInputSamples"))
+		{
+			return;
+		}
+		Runnable renewer = cameraInputLeaseRenewer;
+		if (renewer != null)
+		{
+			renewer.run();
+		}
+	}
+
+	private boolean strictBooleanTrue(JsonObject request, String key)
+	{
+		JsonElement element = request == null ? null : request.get(key);
+		return element != null
+				&& element.isJsonPrimitive()
+				&& element.getAsJsonPrimitive().isBoolean()
+				&& element.getAsBoolean();
+	}
+
+	private boolean strictPositiveNumber(JsonObject request, String key)
+	{
+		JsonElement element = request == null ? null : request.get(key);
+		if (element == null
+				|| !element.isJsonPrimitive()
+				|| !element.getAsJsonPrimitive().isNumber())
+		{
+			return false;
+		}
+		try
+		{
+			return element.getAsLong() > 0L;
+		}
+		catch (RuntimeException ignored)
+		{
+			return false;
+		}
+	}
+
+	private Map<String, Object> enrichClientTickHot(Map<String, Object> source)
+	{
+		Map<String, Object> result = source == null
+				? new LinkedHashMap<>()
+				: new LinkedHashMap<>(source);
+		Map<?, ?> menu = result.get("postMenuSort") instanceof Map
+				? (Map<?, ?>) result.get("postMenuSort")
+				: Map.of();
+		// Action safety is bound to the actual post-menu-sort sample, not to a
+		// newer generic client-tick sample that happens to share this envelope.
+		Object sourceTick = menu.get("gameTickAtSample");
+		Object wallTimeMillis = menu.get("wallTimeMillis");
+		Object sessionId = menu.get("sessionId");
+		Object clientProcessId = menu.get("clientProcessId");
+		if (sourceTick instanceof Number)
+		{
+			result.put("sourceTick", ((Number) sourceTick).longValue());
+		}
+		if (wallTimeMillis instanceof Number)
+		{
+			result.put(
+					"capturedAtUtc",
+					Instant.ofEpochMilli(((Number) wallTimeMillis).longValue()).toString());
+		}
+		if (sessionId instanceof String && !((String) sessionId).isBlank())
+		{
+			result.put("sessionId", sessionId);
+		}
+		if (clientProcessId instanceof Number)
+		{
+			result.put("clientProcessId", ((Number) clientProcessId).longValue());
+		}
+		return result;
+	}
+
+	private boolean menuEvidenceMatchesFrame(
+			Map<String, Object> hot,
+			SensorFrame frame,
+			Instant assembledAt,
+			long maxSourceAgeMillis)
+	{
+		Object tick = hot == null ? null : hot.get("sourceTick");
+		Object processId = hot == null ? null : hot.get("clientProcessId");
+		if (frame == null
+				|| !(tick instanceof Number)
+				|| ((Number) tick).longValue() != frame.getSourceTick()
+				|| !java.util.Objects.equals(hot.get("sessionId"), frame.getSessionId())
+				|| !(processId instanceof Number)
+				|| frame.getClientProcessId() == null
+				|| ((Number) processId).longValue() != frame.getClientProcessId())
+		{
+			return false;
+		}
+		Object capturedAtUtc = hot.get("capturedAtUtc");
+		if (!(capturedAtUtc instanceof String))
+		{
+			return false;
+		}
+		try
+		{
+			long ageMillis = Duration.between(
+					Instant.parse((String) capturedAtUtc),
+					assembledAt).toMillis();
+			return ageMillis >= -2_000L && ageMillis <= maxSourceAgeMillis;
+		}
+		catch (RuntimeException e)
+		{
+			return false;
+		}
+	}
+
+	private boolean sourceIdentityMatches(
+			Map<?, ?> source,
+			SensorFrame frame,
+			Instant validationAt,
+			long maxSourceAgeMillis)
+	{
+		if (source == null || frame == null)
+		{
+			return false;
+		}
+		Object tick = source.get("sourceTick");
+		Object processId = source.get("clientProcessId");
+		Object capturedAtUtc = source.get("capturedAtUtc");
+		boolean captureFresh = false;
+		if (capturedAtUtc instanceof String)
+		{
+			try
+			{
+				Instant capturedAt = Instant.parse((String) capturedAtUtc);
+				long ageMillis = Duration.between(
+						capturedAt,
+						validationAt).toMillis();
+				captureFresh = ageMillis >= -2_000L
+						&& ageMillis <= maxSourceAgeMillis
+						&& !capturedAt.isBefore(Instant.parse(frame.getCompletedAtUtc()));
+			}
+			catch (RuntimeException ignored)
+			{
+				captureFresh = false;
+			}
+		}
+		return captureFresh
+				&& tick instanceof Number
+				&& ((Number) tick).longValue() == frame.getSourceTick()
+				&& java.util.Objects.equals(source.get("sessionId"), frame.getSessionId())
+				&& processId instanceof Number
+				&& frame.getClientProcessId() != null
+				&& ((Number) processId).longValue() == frame.getClientProcessId()
+				&& java.util.Objects.equals(source.get("geometryFrameId"), frame.getGeometryFrameId());
+	}
+
+	private void stampSourceIdentity(Map<String, Object> target, SensorFrame frame)
+	{
+		if (target == null || frame == null)
+		{
+			return;
+		}
+		target.put("sourceTick", frame.getSourceTick());
+		target.put("sessionId", frame.getSessionId());
+		target.put("clientProcessId", frame.getClientProcessId());
+		target.put("geometryFrameId", frame.getGeometryFrameId());
+	}
+
+	private JsonElement stampDynamicPayload(
+			Object value,
+			SensorFrame frame,
+			String capturedAtUtc)
+	{
+		JsonElement result = gson.toJsonTree(value);
+		if (result != null && result.isJsonObject() && frame != null)
+		{
+			JsonObject object = result.getAsJsonObject();
+			object.addProperty("sourceTick", frame.getSourceTick());
+			object.addProperty("sessionId", frame.getSessionId());
+			if (frame.getClientProcessId() != null)
+			{
+				object.addProperty("clientProcessId", frame.getClientProcessId());
+			}
+			object.addProperty("geometryFrameId", frame.getGeometryFrameId());
+			object.addProperty("capturedAtUtc", capturedAtUtc);
+		}
+		return result;
+	}
+
+	private Map<String, Object> sensorFrameMetadata(SensorFrame frame, Instant assembledAt)
+	{
+		Instant stamp = assembledAt == null ? now() : assembledAt;
+		Map<String, Object> metadata = frame == null
+				? new LinkedHashMap<>()
+				: new LinkedHashMap<>(frame.metadata());
+		metadata.putIfAbsent("schema", SensorFrame.SCHEMA);
+		metadata.putIfAbsent("frameId", "sensor-frame-unavailable");
+		metadata.putIfAbsent("sourceTick", -1L);
+		metadata.putIfAbsent("captureStartedMonotonicNanos", -1L);
+		metadata.putIfAbsent("capturedAtUtc", stamp.toString());
+		metadata.putIfAbsent("completedAtUtc", stamp.toString());
+		metadata.putIfAbsent("captureDurationMillis", 0L);
+		metadata.putIfAbsent("sessionId", null);
+		metadata.putIfAbsent("clientProcessId", null);
+		metadata.putIfAbsent("geometryFrameId", null);
+		metadata.putIfAbsent("coherent", false);
+		metadata.putIfAbsent("complete", false);
+		metadata.putIfAbsent("availableFacts", List.of());
+		metadata.putIfAbsent("unavailableFacts", SensorFrame.CORE_FACT_NAMES);
+		Map<String, Object> facts = new LinkedHashMap<>();
+		Object existingFacts = metadata.get("facts");
+		if (existingFacts instanceof Map)
+		{
+			for (Map.Entry<?, ?> entry : ((Map<?, ?>) existingFacts).entrySet())
+			{
+				facts.put(String.valueOf(entry.getKey()), entry.getValue());
+			}
+		}
+		long sourceTick = frame == null ? -1L : frame.getSourceTick();
+		String capturedAtUtc = frame == null ? stamp.toString() : frame.getCapturedAtUtc();
+		for (String factName : SensorFrame.CORE_FACT_NAMES)
+		{
+			facts.putIfAbsent(
+					factName,
+					Map.of(
+							"sourceTick", sourceTick,
+							"capturedAtUtc", capturedAtUtc,
+							"available", false,
+							"errors", List.of("not_captured"),
+							"sizeBytes", 0L));
+		}
+		metadata.put("facts", facts);
+		return metadata;
 	}
 
 	private List<Map<String, Object>> tileProjectionRequests(JsonObject request)
@@ -675,8 +1029,11 @@ public class PluginSnapshotEndpoint implements Closeable
 
 	private Map<String, Object> tileProjectionPayload(
 			List<Map<String, Object>> requests,
+			SensorFrame frame,
+			long maxSourceAgeMillis,
 			List<String> warnings,
-			List<String> missingCapabilities)
+			List<String> missingCapabilities,
+			Map<String, Object> responseSizing)
 	{
 		if (requests == null || requests.isEmpty())
 		{
@@ -706,10 +1063,22 @@ public class PluginSnapshotEndpoint implements Closeable
 						"tiles", List.of(),
 						"warnings", List.of("tile projection provider returned no payload"));
 			}
+			copyQueryDiagnostics(payload, responseSizing, "tileProjectionQueryDiagnostics");
 			Map<String, Object> normalized = new LinkedHashMap<>(payload);
 			normalized.putIfAbsent("schema", "tile_projection_response.v1");
 			normalized.putIfAbsent("status", "PASS");
 			normalized.putIfAbsent("tiles", List.of());
+			if (!sourceIdentityMatches(
+					normalized,
+					frame,
+					now(),
+					maxSourceAgeMillis))
+			{
+				missingCapabilities.add("tile_projection");
+				warnings.add("tile_projection_provenance_mismatch");
+				return null;
+			}
+			stampSourceIdentity(normalized, frame);
 			return normalized;
 		}
 		catch (RuntimeException e)
@@ -727,6 +1096,8 @@ public class PluginSnapshotEndpoint implements Closeable
 	private Map<String, Object> worldModelPayload(
 			List<String> needs,
 			JsonObject request,
+			SensorFrame frame,
+			long maxSourceAgeMillis,
 			List<String> warnings,
 			List<String> missingCapabilities,
 			Map<String, Object> responseSizing)
@@ -750,6 +1121,25 @@ public class PluginSnapshotEndpoint implements Closeable
 			{
 				missingCapabilities.add("world_model");
 				warnings.add("world model query returned no payload");
+				return null;
+			}
+			copyQueryDiagnostics(payload, responseSizing, "worldModelQueryDiagnostics");
+			Object metadata = payload.get("metadata");
+			if (!(metadata instanceof Map)
+					|| !sourceIdentityMatches(
+							(Map<?, ?>) metadata,
+							frame,
+							now(),
+							maxSourceAgeMillis))
+			{
+				for (String need : needs)
+				{
+					if (!missingCapabilities.contains(need))
+					{
+						missingCapabilities.add(need);
+					}
+				}
+				warnings.add("world_model_provenance_mismatch");
 				return null;
 			}
 			responseSizing.put("worldModelNeeds", List.copyOf(needs));
@@ -779,10 +1169,32 @@ public class PluginSnapshotEndpoint implements Closeable
 		}
 	}
 
+	private void copyQueryDiagnostics(
+			Map<String, Object> payload,
+			Map<String, Object> responseSizing,
+			String destinationKey)
+	{
+		Object diagnostics = payload == null ? null : payload.get("queryDiagnostics");
+		if (diagnostics instanceof Map && responseSizing != null)
+		{
+			responseSizing.put(destinationKey, diagnostics);
+		}
+	}
+
 	private Map<String, Object> compactWorldModelEnvelope(Map<String, Object> worldModel)
 	{
 		Map<String, Object> envelope = new LinkedHashMap<>();
-		for (String key : List.of("schema", "snapshotSchema", "generatedAtUtc", "status", "needs", "quality", "warnings", "sizing"))
+		for (String key : List.of(
+				"schema",
+				"snapshotSchema",
+				"generatedAtUtc",
+				"status",
+				"needs",
+				"quality",
+				"warnings",
+				"sizing",
+				"pipeline",
+				"queryDiagnostics"))
 		{
 			if (worldModel.containsKey(key))
 			{
@@ -863,93 +1275,45 @@ public class PluginSnapshotEndpoint implements Closeable
 		{
 			return;
 		}
+		if (!snapshotRequestActive.compareAndSet(false, true))
+		{
+			snapshotBusyRejectionCount.incrementAndGet();
+			Map<String, Object> busy = errorPayload(
+					"endpoint_busy",
+					"A snapshot request is already active; retry with backoff");
+			busy.put("retryable", true);
+			busy.put("endpointQueueDiagnostics", endpointQueueDiagnostics());
+			writeJson(exchange, 503, busy);
+			return;
+		}
 
-		JsonObject request;
 		try
 		{
-			String body = readBody(exchange);
-			request = body.isBlank() ? new JsonObject() : gson.fromJson(body, JsonObject.class);
-			if (request == null)
+			JsonObject request;
+			try
 			{
-				request = new JsonObject();
+				String body = readBody(exchange);
+				request = body.isBlank() ? new JsonObject() : gson.fromJson(body, JsonObject.class);
+				if (request == null)
+				{
+					request = new JsonObject();
+				}
 			}
-		}
-		catch (IllegalArgumentException e)
-		{
-			writeJson(exchange, 400, errorPayload("bad_request", e.getMessage()));
-			return;
-		}
-
-		Map<String, Object> response = boundedSnapshotPayload(request);
-		writeJson(exchange, httpStatusFor(response), response);
-	}
-
-	private void handlePresets(HttpExchange exchange) throws IOException
-	{
-		if (!requireMethod(exchange, "GET") || !checkAuth(exchange))
-		{
-			return;
-		}
-		if (presetApplier == null)
-		{
-			writeJson(exchange, 503, presetUnavailablePayload());
-			return;
-		}
-		writeJson(exchange, 200, presetsPayload());
-	}
-
-	private void handlePresetPreview(HttpExchange exchange) throws IOException
-	{
-		handlePresetRequest(exchange, true);
-	}
-
-	private void handlePresetApply(HttpExchange exchange) throws IOException
-	{
-		handlePresetRequest(exchange, false);
-	}
-
-	private void handlePresetRequest(HttpExchange exchange, boolean preview) throws IOException
-	{
-		if (!requireMethod(exchange, "POST") || !checkAuth(exchange))
-		{
-			return;
-		}
-		if (presetApplier == null)
-		{
-			writeJson(exchange, 503, presetUnavailablePayload());
-			return;
-		}
-
-		JsonObject request;
-		try
-		{
-			String body = readBody(exchange);
-			request = body.isBlank() ? new JsonObject() : gson.fromJson(body, JsonObject.class);
-			if (request == null)
+			catch (IllegalArgumentException | JsonParseException e)
 			{
-				request = new JsonObject();
+				writeJson(exchange, 400, errorPayload("bad_request", e.getMessage()));
+				return;
 			}
+
+			EncodedResponse response = encodedSnapshotResponse(request);
+			writeJsonBytes(exchange, response.httpStatus(), response.body());
 		}
-		catch (IllegalArgumentException e)
+		finally
 		{
-			writeJson(exchange, 400, errorPayload("bad_request", e.getMessage()));
-			return;
+			snapshotRequestActive.set(false);
 		}
-
-		Map<String, Object> response = presetPayload(request, preview);
-		writeJson(exchange, "FAIL".equals(response.get("status")) ? 400 : 200, response);
 	}
 
-	private Map<String, Object> presetUnavailablePayload()
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("schema", PRESET_RESPONSE_SCHEMA);
-		payload.put("status", "FAIL");
-		payload.put("errorCode", "preset_endpoint_unavailable");
-		payload.put("message", "preset endpoint is unavailable");
-		payload.put("readOnlyGameState", true);
-		return payload;
-	}
 
 	private JsonElement compactPayloadForResponse(
 			String need,
@@ -1067,13 +1431,9 @@ public class PluginSnapshotEndpoint implements Closeable
 			refs.add(element);
 		}
 		responseSizing.put("projectionPriorityApplied", true);
-		responseSizing.put("projectionPriorityReason", priorityContext != null && priorityContext.hints.hasHints()
-				? "request hints, onScreen scene objects with geometry, stable ids/locations, and player-near refs first"
-				: "onScreen scene objects with geometry and stable ids/locations first");
-		if (priorityContext != null)
-		{
-			responseSizing.put("projectionHintsApplied", priorityContext.hints.toMap());
-		}
+		responseSizing.put(
+				"projectionPriorityReason",
+				"onScreen scene objects with geometry, stable ids/locations, and player-near refs first");
 	}
 
 	private double projectionRefPriority(JsonElement element, PriorityContext priorityContext)
@@ -1085,10 +1445,6 @@ public class PluginSnapshotEndpoint implements Closeable
 
 		JsonObject ref = element.getAsJsonObject();
 		double priority = 0.0;
-		if (priorityContext != null)
-		{
-			priority += hintPriority(ref, priorityContext.hints);
-		}
 		if (!booleanValue(ref, "onScreen", false))
 		{
 			priority += 1_000_000_000.0;
@@ -1107,66 +1463,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		}
 		priority += playerDistancePriority(ref, priorityContext) * 1_000.0;
 		return priority;
-	}
-
-	private double hintPriority(JsonObject ref, SnapshotHints hints)
-	{
-		if (hints == null || !hints.hasHints())
-		{
-			return 0.0;
-		}
-		double priority = 0.0;
-		if (!hints.targetTypeHint.isBlank() && !hints.targetTypeHint.equalsIgnoreCase(stringValue(ref, "targetType", "")))
-		{
-			priority += 20_000_000.0;
-		}
-		if (hints.requireOnScreen && !booleanValue(ref, "onScreen", false))
-		{
-			priority += 10_000_000.0;
-		}
-		if (hints.requireGeometryAvailable && !booleanValue(ref, "geometryAvailable", false))
-		{
-			priority += 5_000_000.0;
-		}
-		if (!hints.desiredClasses.isEmpty() && !matchesAnyDesiredClass(ref, hints.desiredClasses))
-		{
-			priority += 2_500_000.0;
-		}
-		else if (!hints.classHint.isBlank() && !matchesClassHint(ref, hints.classHint))
-		{
-			priority += 2_500_000.0;
-		}
-		return priority;
-	}
-
-	private boolean matchesAnyDesiredClass(JsonObject ref, List<String> classes)
-	{
-		for (String className : classes)
-		{
-			if (matchesClassHint(ref, className))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private boolean matchesClassHint(JsonObject ref, String classHint)
-	{
-		String hint = classHint == null ? "" : classHint.trim().toLowerCase(Locale.ROOT);
-		if (hint.isBlank())
-		{
-			return false;
-		}
-		for (String key : List.of("name", "objectName", "targetName", "objectKey", "kind", "layer", "targetType"))
-		{
-			String value = stringValue(ref, key, "");
-			if (!value.isBlank() && value.toLowerCase(Locale.ROOT).contains(hint))
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private boolean hasStableIdentityAndLocation(JsonObject ref)
@@ -1268,11 +1564,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		copyIfPresent(projection, compactProjection, "sceneProjectionSummary");
 		copyIfPresent(projection, compactProjection, "projectionStateHash");
 		copyIfPresent(projection, compactProjection, "refreshMode");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjects");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectCount");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectCap");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectRadius");
-		copyIfPresent(projection, compactProjection, "serviceSceneObjectCapHit");
 
 		JsonArray compactRefs = new JsonArray();
 		JsonArray refs = projectionRefs(projection);
@@ -1356,16 +1647,36 @@ public class PluginSnapshotEndpoint implements Closeable
 
 	Map<String, Object> boundedSnapshotPayload(JsonObject request)
 	{
+		return encodedSnapshotResponse(request).payload();
+	}
+
+	EncodedResponse encodedSnapshotResponse(JsonObject request)
+	{
 		Map<String, Object> response = snapshotPayload(request);
-		int estimatedBytes = estimatedResponseBytes(response);
+		attachSerializationEvidence(response, 2, true);
+		attachResponseSize(response, 0);
+		byte[] sizingPass = encodeJson(response);
+		// estimatedResponseBytes occurs exactly twice (root and responseSizing).
+		// Solve that two-integer self-size fixed point before the final encoding.
+		int estimatedBytes = exactSelfSizedByteLength(sizingPass.length, 0);
 		attachResponseSize(response, estimatedBytes);
-		estimatedBytes = estimatedResponseBytes(response);
-		attachResponseSize(response, estimatedBytes);
-		if (estimatedBytes <= maxResponseBytes)
+		if (estimatedBytes > maxResponseBytes)
 		{
-			return response;
+			Map<String, Object> tooLarge = responseTooLargePayload(response, estimatedBytes);
+			attachSerializationEvidence(tooLarge, 2, true);
+			return new EncodedResponse(
+					tooLarge,
+					encodeJson(tooLarge),
+					httpStatusFor(tooLarge),
+					2);
 		}
-		return responseTooLargePayload(response, estimatedBytes);
+
+		byte[] body = encodeJson(response);
+		if (body.length != estimatedBytes)
+		{
+			throw new IllegalStateException("exact response byte sizing invariant failed");
+		}
+		return new EncodedResponse(response, body, httpStatusFor(response), 2);
 	}
 
 	private int httpStatusFor(Map<String, Object> response)
@@ -1386,9 +1697,54 @@ public class PluginSnapshotEndpoint implements Closeable
 		return 200;
 	}
 
-	private int estimatedResponseBytes(Map<String, Object> response)
+	private byte[] encodeJson(Object response)
 	{
-		return gson.toJson(response).getBytes(StandardCharsets.UTF_8).length;
+		return gson.toJson(response).getBytes(StandardCharsets.UTF_8);
+	}
+
+	private int exactSelfSizedByteLength(int encodedBytes, int encodedSizeValue)
+	{
+		int fixedPoint = encodedBytes;
+		int encodedDigits = decimalDigits(encodedSizeValue);
+		for (int attempt = 0; attempt < 8; attempt++)
+		{
+			int next = encodedBytes + 2 * (decimalDigits(fixedPoint) - encodedDigits);
+			if (next == fixedPoint)
+			{
+				return fixedPoint;
+			}
+			fixedPoint = next;
+		}
+		return fixedPoint;
+	}
+
+	private int decimalDigits(int value)
+	{
+		return String.valueOf(Math.max(0, value)).length();
+	}
+
+	Map<String, Object> endpointQueueDiagnostics()
+	{
+		ThreadPoolExecutor current = executor;
+		Map<String, Object> diagnostics = new LinkedHashMap<>();
+		diagnostics.put("schema", ENDPOINT_QUEUE_DIAGNOSTICS_SCHEMA);
+		diagnostics.put("workerLimit", ENDPOINT_WORKER_LIMIT);
+		diagnostics.put("pendingCapacity", ENDPOINT_PENDING_CAPACITY);
+		diagnostics.put("activeWorkerCount", current == null ? 0 : current.getActiveCount());
+		diagnostics.put("pendingRequestCount", current == null ? 0 : current.getQueue().size());
+		diagnostics.put(
+				"pendingRemainingCapacity",
+				current == null ? ENDPOINT_PENDING_CAPACITY : current.getQueue().remainingCapacity());
+		diagnostics.put("largestWorkerCount", current == null ? 0 : current.getLargestPoolSize());
+		diagnostics.put("completedRequestCount", current == null ? 0L : current.getCompletedTaskCount());
+		diagnostics.put("executionRejectionCount", endpointExecutionRejectionCount.get());
+		diagnostics.put("rejectionPolicy", "CALLER_RUNS_BACKPRESSURE");
+		diagnostics.put("snapshotRequestActive", snapshotRequestActive.get());
+		diagnostics.put("snapshotBusyRejectionCount", snapshotBusyRejectionCount.get());
+		diagnostics.put(
+				"executorState",
+				current == null ? "NOT_STARTED" : (current.isShutdown() ? "SHUTDOWN" : "RUNNING"));
+		return diagnostics;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1415,11 +1771,35 @@ public class PluginSnapshotEndpoint implements Closeable
 		response.put("maxResponseBytes", maxResponseBytes);
 	}
 
+	@SuppressWarnings("unchecked")
+	private void attachSerializationEvidence(
+			Map<String, Object> response,
+			int serializationPasses,
+			boolean serializedBytesReusedForWrite)
+	{
+		if (response == null)
+		{
+			return;
+		}
+		Object sizingValue = response.get("responseSizing");
+		Map<String, Object> sizing;
+		if (sizingValue instanceof Map)
+		{
+			sizing = (Map<String, Object>) sizingValue;
+		}
+		else
+		{
+			sizing = new LinkedHashMap<>();
+			response.put("responseSizing", sizing);
+		}
+		sizing.put("serializationPasses", serializationPasses);
+		sizing.put("serializedBytesReusedForWrite", serializedBytesReusedForWrite);
+	}
+
 	private Map<String, Object> responseTooLargePayload(Map<String, Object> response, int estimatedBytes)
 	{
 		Map<String, Object> tooLarge = errorPayload("response_too_large", "snapshot response exceeded pluginSnapshotMaxResponseBytes");
-		tooLarge.put("schema", RESPONSE_SCHEMA);
-		tooLarge.put("generatedAtUtc", Instant.now().toString());
+		tooLarge.put("assembledAtUtc", now().toString());
 		tooLarge.put("status", "FAIL");
 		tooLarge.put("warnings", List.of("responseTooLarge"));
 		tooLarge.put("maxResponseBytes", maxResponseBytes);
@@ -1434,6 +1814,7 @@ public class PluginSnapshotEndpoint implements Closeable
 			tooLarge.put("responseSizing", copiedSizing);
 		}
 		tooLarge.put("cacheHealth", cacheHealth());
+		tooLarge.put("endpointQueueDiagnostics", endpointQueueDiagnostics());
 		return tooLarge;
 	}
 
@@ -1461,11 +1842,10 @@ public class PluginSnapshotEndpoint implements Closeable
 		if (needs.isEmpty() && !explicitNeeds)
 		{
 			needs.add("baseline");
-			needs.add("projection");
 			needs.add("inventory");
 			needs.add("activity");
-			needs.add("navigation");
-			needs.add("writer_health");
+			needs.add("bank_ui");
+			needs.add("dialogue_state");
 		}
 
 		if (!includeCollisionWindow)
@@ -1491,7 +1871,8 @@ public class PluginSnapshotEndpoint implements Closeable
 				if (element.isJsonPrimitive())
 				{
 					String need = normalizeNeed(element.getAsString());
-					if (("interaction_hot".equals(need) || "client_tick_tail".equals(need)) && !needs.contains(need))
+					if (("interaction_hot".equals(need) || "client_tick_tail".equals(need))
+							&& !needs.contains(need))
 					{
 						needs.add(need);
 					}
@@ -1499,6 +1880,31 @@ public class PluginSnapshotEndpoint implements Closeable
 			}
 		}
 		return needs;
+	}
+
+	private List<String> requestedUnsupportedNeeds(JsonObject request)
+	{
+		JsonElement needsElement = request == null ? null : request.get("needs");
+		List<String> unsupported = new ArrayList<>();
+		if (needsElement == null || !needsElement.isJsonArray())
+		{
+			return unsupported;
+		}
+		for (JsonElement element : needsElement.getAsJsonArray())
+		{
+			if (!element.isJsonPrimitive())
+			{
+				continue;
+			}
+			String need = normalizeNeed(element.getAsString());
+			if (!need.isEmpty()
+					&& !SUPPORTED_NEEDS.contains(need)
+					&& !unsupported.contains(need))
+			{
+				unsupported.add(need);
+			}
+		}
+		return unsupported;
 	}
 
 	private List<String> requestedWorldModelNeeds(JsonObject request)
@@ -1538,13 +1944,10 @@ public class PluginSnapshotEndpoint implements Closeable
 				.replace("dialogueState", "dialogue_state")
 				.replace("worldModelSummary", "world_model_summary")
 				.replace("sceneObjectCensus", "scene_object_census")
-				.replace("routeObjectCensus", "route_object_census")
-				.replace("resourceObjectCensus", "resource_object_census")
-				.replace("serviceObjectCensus", "service_object_census")
+				.replace("actorCensus", "actor_census")
 				.replace("pathingFrontier", "pathing_frontier")
 				.replace("projectionAudit", "projection_audit")
 				.replace("minimapProjection", "minimap_projection")
-				.replace("viewQualityInputs", "view_quality_inputs")
 				.replace("fullWorldModelDebug", "full_world_model_debug")
 				.replace("interactionHot", "interaction_hot")
 				.replace("clientTickTail", "client_tick_tail")
@@ -1569,52 +1972,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		return "hot";
 	}
 
-	private SnapshotHints snapshotHints(JsonObject request)
-	{
-		if (request == null)
-		{
-			return SnapshotHints.EMPTY;
-		}
-		String profileHint = stringValue(request, "profileHint", "");
-		String taskHint = stringValue(request, "taskHint", "");
-		String classHint = stringValue(request, "classHint", "");
-		String targetTypeHint = stringValue(request, "targetTypeHint", "");
-		boolean requireOnScreen = booleanValue(request, "requireOnScreen", false);
-		boolean requireGeometryAvailable = booleanValue(request, "requireGeometryAvailable", false);
-		int maxCandidatesHint = intValue(request, "maxCandidatesHint", 0);
-		List<String> desiredClasses = stringListValue(request.get("desiredClasses"));
-		return new SnapshotHints(
-				profileHint,
-				taskHint,
-				classHint,
-				targetTypeHint,
-				requireOnScreen,
-				requireGeometryAvailable,
-				Math.max(0, maxCandidatesHint),
-				desiredClasses);
-	}
-
-	private List<String> stringListValue(JsonElement element)
-	{
-		List<String> values = new ArrayList<>();
-		if (element == null || !element.isJsonArray())
-		{
-			return values;
-		}
-		for (JsonElement child : element.getAsJsonArray())
-		{
-			if (child != null && child.isJsonPrimitive())
-			{
-				String value = child.getAsString();
-				if (value != null && !value.isBlank())
-				{
-					values.add(value.trim());
-				}
-			}
-		}
-		return values;
-	}
-
 	private JsonElement parsePayload(String payloadJson)
 	{
 		if (payloadJson == null || payloadJson.isBlank())
@@ -1625,23 +1982,23 @@ public class PluginSnapshotEndpoint implements Closeable
 		return parsed == null ? JsonNull.INSTANCE : parsed;
 	}
 
-	private PriorityContext projectionPriorityContext(SnapshotHints hints)
+	private PriorityContext projectionPriorityContext(SensorFrame frame)
 	{
-		if (liveCache == null)
+		if (frame == null)
 		{
-			return new PriorityContext(null, null, null, hints);
+			return new PriorityContext(null, null, null);
 		}
-		PluginLiveCache.CachedPayload cached = liveCache.get("live_baseline_packet.v1");
-		if (cached == null)
+		SensorFrame.Fact baselineFact = frame.getFact(SensorFrame.FACT_BASELINE);
+		if (baselineFact == null || !baselineFact.isAvailable())
 		{
-			return new PriorityContext(null, null, null, hints);
+			return new PriorityContext(null, null, null);
 		}
 		try
 		{
-			JsonElement parsed = parsePayload(cached.payloadJson);
+			JsonElement parsed = parsePayload(baselineFact.getPayloadJson());
 			if (!parsed.isJsonObject())
 			{
-				return new PriorityContext(null, null, null, hints);
+				return new PriorityContext(null, null, null);
 			}
 			JsonObject baseline = parsed.getAsJsonObject();
 			JsonObject player = baseline.has("player") && baseline.get("player").isJsonObject()
@@ -1649,16 +2006,16 @@ public class PluginSnapshotEndpoint implements Closeable
 					: null;
 			if (player == null)
 			{
-				return new PriorityContext(null, null, null, hints);
+				return new PriorityContext(null, null, null);
 			}
 			Double sceneX = doubleValue(player, "sceneX");
 			Double sceneY = doubleValue(player, "sceneY");
 			Integer plane = integerValue(player, "plane");
-			return new PriorityContext(sceneX, sceneY, plane, hints);
+			return new PriorityContext(sceneX, sceneY, plane);
 		}
 		catch (RuntimeException e)
 		{
-			return new PriorityContext(null, null, null, hints);
+			return new PriorityContext(null, null, null);
 		}
 	}
 
@@ -1891,7 +2248,11 @@ public class PluginSnapshotEndpoint implements Closeable
 
 	private void writeJson(HttpExchange exchange, int statusCode, Object payload) throws IOException
 	{
-		byte[] response = gson.toJson(payload).getBytes(StandardCharsets.UTF_8);
+		writeJsonBytes(exchange, statusCode, encodeJson(payload));
+	}
+
+	private void writeJsonBytes(HttpExchange exchange, int statusCode, byte[] response) throws IOException
+	{
 		exchange.getResponseHeaders().set("Content-Type", CONTENT_TYPE_JSON);
 		exchange.sendResponseHeaders(statusCode, response.length);
 		try (OutputStream output = exchange.getResponseBody())
@@ -1994,103 +2355,52 @@ public class PluginSnapshotEndpoint implements Closeable
 		private final Double sceneX;
 		private final Double sceneY;
 		private final Integer plane;
-		private final SnapshotHints hints;
 
-		private PriorityContext(Double sceneX, Double sceneY, Integer plane, SnapshotHints hints)
+		private PriorityContext(Double sceneX, Double sceneY, Integer plane)
 		{
 			this.sceneX = sceneX;
 			this.sceneY = sceneY;
 			this.plane = plane;
-			this.hints = hints == null ? SnapshotHints.EMPTY : hints;
 		}
 	}
 
-	private static final class SnapshotHints
+	static final class EncodedResponse
 	{
-		private static final SnapshotHints EMPTY = new SnapshotHints("", "", "", "", false, false, 0, List.of());
+		private final Map<String, Object> payload;
+		private final byte[] body;
+		private final int httpStatus;
+		private final int serializationPasses;
 
-		private final String profileHint;
-		private final String taskHint;
-		private final String classHint;
-		private final String targetTypeHint;
-		private final boolean requireOnScreen;
-		private final boolean requireGeometryAvailable;
-		private final int maxCandidatesHint;
-		private final List<String> desiredClasses;
-
-		private SnapshotHints(
-				String profileHint,
-				String taskHint,
-				String classHint,
-				String targetTypeHint,
-				boolean requireOnScreen,
-				boolean requireGeometryAvailable,
-				int maxCandidatesHint,
-				List<String> desiredClasses)
+		private EncodedResponse(
+				Map<String, Object> payload,
+				byte[] body,
+				int httpStatus,
+				int serializationPasses)
 		{
-			this.profileHint = normalize(profileHint);
-			this.taskHint = normalize(taskHint);
-			this.classHint = normalize(classHint);
-			this.targetTypeHint = normalize(targetTypeHint);
-			this.requireOnScreen = requireOnScreen;
-			this.requireGeometryAvailable = requireGeometryAvailable;
-			this.maxCandidatesHint = maxCandidatesHint;
-			this.desiredClasses = desiredClasses == null ? List.of() : List.copyOf(desiredClasses);
+			this.payload = payload;
+			this.body = body;
+			this.httpStatus = httpStatus;
+			this.serializationPasses = serializationPasses;
 		}
 
-		private boolean hasHints()
+		Map<String, Object> payload()
 		{
-			return !profileHint.isBlank()
-					|| !taskHint.isBlank()
-					|| !classHint.isBlank()
-					|| !targetTypeHint.isBlank()
-					|| requireOnScreen
-					|| requireGeometryAvailable
-					|| maxCandidatesHint > 0
-					|| !desiredClasses.isEmpty();
+			return payload;
 		}
 
-		private Map<String, Object> toMap()
+		byte[] body()
 		{
-			Map<String, Object> map = new LinkedHashMap<>();
-			if (!profileHint.isBlank())
-			{
-				map.put("profileHint", profileHint);
-			}
-			if (!taskHint.isBlank())
-			{
-				map.put("taskHint", taskHint);
-			}
-			if (!classHint.isBlank())
-			{
-				map.put("classHint", classHint);
-			}
-			if (!targetTypeHint.isBlank())
-			{
-				map.put("targetTypeHint", targetTypeHint);
-			}
-			if (!desiredClasses.isEmpty())
-			{
-				map.put("desiredClasses", desiredClasses);
-			}
-			if (requireOnScreen)
-			{
-				map.put("requireOnScreen", true);
-			}
-			if (requireGeometryAvailable)
-			{
-				map.put("requireGeometryAvailable", true);
-			}
-			if (maxCandidatesHint > 0)
-			{
-				map.put("maxCandidatesHint", maxCandidatesHint);
-			}
-			return map;
+			return body;
 		}
 
-		private static String normalize(String value)
+		int httpStatus()
 		{
-			return value == null ? "" : value.trim();
+			return httpStatus;
+		}
+
+		int serializationPasses()
+		{
+			return serializationPasses;
 		}
 	}
 
@@ -2098,17 +2408,10 @@ public class PluginSnapshotEndpoint implements Closeable
 	{
 		Map<String, String> map = new LinkedHashMap<>();
 		map.put("baseline", "live_baseline_packet.v1");
-		map.put("scene_delta", "live_scene_delta_packet.v1");
-		map.put("projection", "live_projection_packet.v1");
 		map.put("inventory", "live_inventory_packet.v1");
-		map.put("inventory_delta", "live_inventory_delta_packet.v1");
 		map.put("activity", "live_activity_packet.v1");
-		map.put("navigation", "live_navigation_packet.v1");
-		map.put("collision_window", "live_collision_window_packet.v1");
 		map.put("bank_ui", "live_bank_ui_packet.v1");
 		map.put("dialogue_state", "live_dialogue_state_packet.v1");
-		map.put("writer_health", "live_writer_health_packet.v1");
-		map.put("watch_values", "live_watch_values_packet.v1");
 		return map;
 	}
 
@@ -2124,6 +2427,12 @@ public class PluginSnapshotEndpoint implements Closeable
 		{
 			executor.shutdownNow();
 			executor = null;
+		}
+		snapshotRequestActive.set(false);
+		Runnable disabler = cameraInputLeaseDisabler;
+		if (disabler != null)
+		{
+			disabler.run();
 		}
 	}
 }
