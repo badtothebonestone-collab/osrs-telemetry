@@ -241,6 +241,7 @@ class _FakeOperatorServices:
         self,
         publisher,
         *,
+        show_rejected=False,
         presentation_provider=None,
         bound_run_id=None,
     ):
@@ -248,6 +249,7 @@ class _FakeOperatorServices:
             (
                 "enable_overlay",
                 publisher,
+                show_rejected,
                 presentation_provider,
                 bound_run_id,
             )
@@ -906,7 +908,7 @@ class EngineApplicationTests(unittest.TestCase):
             operator_services=services,
         )
 
-        waiting = application.set_overlay_enabled(True)
+        waiting = application.set_overlay_enabled(True, show_rejected=True)
         self.assertTrue(waiting.requested)
         self.assertIs(waiting.state, OverlayState.DISABLED)
         self.assertIsNone(waiting.bound_run_id)
@@ -919,6 +921,9 @@ class EngineApplicationTests(unittest.TestCase):
             factory.runtimes[0].frame_publisher,
             services.overlay_publishers[-1],
         )
+        self.assertTrue(
+            [call for call in services.calls if call[0] == "enable_overlay"][-1][2]
+        )
         application.request_safe_stop(first_id)
         application.wait(first_id, 2.0)
 
@@ -926,6 +931,9 @@ class EngineApplicationTests(unittest.TestCase):
         self.assertIs(
             factory.runtimes[1].frame_publisher,
             services.overlay_publishers[-1],
+        )
+        self.assertTrue(
+            [call for call in services.calls if call[0] == "enable_overlay"][-1][2]
         )
         self.assertIsNot(
             services.overlay_publishers[-2],
@@ -960,12 +968,14 @@ class EngineApplicationTests(unittest.TestCase):
                 self,
                 publisher,
                 *,
+                show_rejected=False,
                 presentation_provider=None,
                 bound_run_id=None,
             ):
                 self.presentation_provider = presentation_provider
                 return super().enable_overlay(
                     publisher,
+                    show_rejected=show_rejected,
                     presentation_provider=presentation_provider,
                     bound_run_id=bound_run_id,
                 )

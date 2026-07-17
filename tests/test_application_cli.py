@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from osrs_bot.application import LifecycleState
 from osrs_bot.application_cli import main
@@ -94,10 +94,65 @@ class ApplicationCliTests(unittest.TestCase):
         application.wait.assert_called_once_with("run-000001")
         self.assertEqual("stopped", json.loads(output.getvalue())["lifecycle"])
 
+    def test_overlay_rejected_detail_requires_overlay(self) -> None:
+        errors = StringIO()
+        with redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+            main(["run", "--overlay-show-rejected"])
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("requires --overlay", errors.getvalue())
+
+    def test_overlay_routes_through_facade_and_always_cleans_up(self) -> None:
+        final = SimpleNamespace(
+            lifecycle=LifecycleState.COMPLETE,
+            to_dict=lambda: {
+                "schema": "engine_application.v1",
+                "lifecycle": "complete",
+            },
+        )
+        application = SimpleNamespace(
+            start=Mock(return_value=SimpleNamespace(run_id="run-000001")),
+            wait=Mock(return_value=final),
+            set_overlay_enabled=Mock(
+                side_effect=[
+                    SimpleNamespace(error=None),
+                    SimpleNamespace(error=None),
+                ]
+            ),
+            overlay_snapshot=Mock(
+                return_value=SimpleNamespace(error="passive styles unavailable")
+            ),
+        )
+        output = StringIO()
+        errors = StringIO()
+        with (
+            patch(
+                "osrs_bot.application_cli.EngineApplication",
+                return_value=application,
+            ),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            result = main(["run", "--overlay", "--overlay-show-rejected"])
+
+        self.assertEqual(0, result)
+        self.assertEqual("complete", json.loads(output.getvalue())["lifecycle"])
+        self.assertIn("Diagnostic overlay unavailable", errors.getvalue())
+        self.assertEqual(
+            [call(True, show_rejected=True), call(False)],
+            application.set_overlay_enabled.call_args_list,
+        )
+        application.overlay_snapshot.assert_called_once_with()
+
     def test_batch_entrypoint_exposes_application_facade(self) -> None:
         source = (ROOT / "run.cmd").read_text(encoding="utf-8").lower()
         self.assertIn('if /i "%mode%"=="app" goto app', source)
-        self.assertIn("python -m osrs_bot.application_cli", source)
+        self.assertIn("python -m osrs_bot.application_cli run %~2 %~3", source)
+        self.assertIn(
+            'python -m osrs_bot.application_cli run --execute --arduino-port "%~2"',
+            source,
+        )
+        self.assertNotIn("python -m osrs_bot task", source)
 
     def test_cli_has_no_task_safety_or_input_authority(self) -> None:
         source = (ROOT / "osrs_bot" / "application_cli.py").read_text(

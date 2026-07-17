@@ -263,6 +263,7 @@ class _OperatorServicesProtocol(Protocol):
         self,
         publisher: EngineFramePublisher,
         *,
+        show_rejected: bool = False,
         presentation_provider: Callable[[], object] | None = None,
         bound_run_id: str | None = None,
     ) -> OverlaySnapshot: ...
@@ -359,6 +360,7 @@ class EngineApplication:
         self._last_operation: str | None = None
         self._operator_operation: str | None = None
         self._overlay_requested = False
+        self._overlay_show_rejected = False
         self._overlay_bound_run_id: str | None = None
         self._overlay_error: str | None = None
         self._connection_snapshot: ConnectionSnapshot | None = None
@@ -463,18 +465,27 @@ class EngineApplication:
         return self._operator_services.arduino_readiness(arduino_port)
 
     def set_overlay_enabled(
-        self, enabled: bool
+        self, enabled: bool, *, show_rejected: bool = False
     ) -> ApplicationOverlaySnapshot:
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be bool")
+        if not isinstance(show_rejected, bool):
+            raise TypeError("show_rejected must be bool")
+        if show_rejected and not enabled:
+            raise ValueError("show_rejected requires enabled overlay")
         with self._lock:
             self._overlay_requested = enabled
+            self._overlay_show_rejected = show_rejected if enabled else False
             runtime = self._runtime if self._last_operation == "run" else None
             run_id = self._run_id
         if not enabled:
             self._disable_overlay()
         elif runtime is not None:
-            self._enable_overlay(runtime.frame_publisher, run_id)
+            self._enable_overlay(
+                runtime.frame_publisher,
+                run_id,
+                show_rejected=show_rejected,
+            )
         with self._lock:
             return self._overlay_snapshot_unlocked()
 
@@ -637,10 +648,15 @@ class EngineApplication:
             )
             self._run_thread = worker
             overlay_requested = self._overlay_requested
+            overlay_show_rejected = self._overlay_show_rejected
             worker.start()
             snapshot = self._snapshot_unlocked()
         if overlay_requested:
-            self._enable_overlay(runtime.frame_publisher, run_id)
+            self._enable_overlay(
+                runtime.frame_publisher,
+                run_id,
+                show_rejected=overlay_show_rejected,
+            )
         else:
             self._disable_overlay()
         return snapshot
@@ -956,12 +972,15 @@ class EngineApplication:
         self,
         publisher: EngineFramePublisher,
         run_id: str | None,
+        *,
+        show_rejected: bool,
     ) -> None:
         with self._overlay_lock:
             self._overlay_bound_run_id = run_id
             try:
                 snapshot = self._operator_services.enable_overlay(
                     publisher,
+                    show_rejected=show_rejected,
                     presentation_provider=self.frontend_presentation,
                     bound_run_id=run_id,
                 )

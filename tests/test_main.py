@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
+import ast
+from contextlib import redirect_stderr
 from io import StringIO
 import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from osrs_bot.__main__ import _observation_summary, _parser, main
+from osrs_bot.__main__ import _observation_summary, main
 from osrs_bot.configuration import MAX_ACTIONS
-from osrs_bot.engine_frame import EngineFramePublisher
 from osrs_bot.observation import parse_observation
 
 
@@ -34,62 +34,50 @@ class MainContractTests(unittest.TestCase):
     def test_cli_runtime_values_cannot_exceed_engine_caps(self) -> None:
         errors = StringIO()
 
-        with redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
-            main(["task", "--max-actions", str(MAX_ACTIONS + 1)])
+        with redirect_stderr(errors):
+            result = main(["task", "--max-actions", str(MAX_ACTIONS + 1)])
 
-        self.assertEqual(2, raised.exception.code)
+        self.assertEqual(2, result)
         self.assertIn("max_actions", errors.getvalue())
 
-    def test_overlay_is_explicitly_opt_in_and_rejected_detail_requires_it(self) -> None:
-        parser = _parser()
+    def test_task_alias_forwards_all_arguments_to_application_cli(self) -> None:
+        arguments = [
+            "--execute",
+            "--arduino-port",
+            "COM6",
+            "--overlay",
+            "--overlay-show-rejected",
+            "--max-actions",
+            "7",
+        ]
+        with patch("osrs_bot.application_cli.main", return_value=7) as forwarded:
+            result = main(["task", *arguments])
 
-        disabled = parser.parse_args(["task"])
-        enabled = parser.parse_args(["task", "--overlay", "--overlay-show-rejected"])
+        self.assertEqual(7, result)
+        forwarded.assert_called_once_with(["run", *arguments])
 
-        self.assertFalse(disabled.overlay)
-        self.assertFalse(disabled.overlay_show_rejected)
-        self.assertTrue(enabled.overlay)
-        self.assertTrue(enabled.overlay_show_rejected)
+    def test_task_alias_has_no_engine_composition_authority(self) -> None:
+        source = (Path(__file__).parents[1] / "osrs_bot" / "__main__.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+        imports = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
 
-        errors = StringIO()
-        with redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
-            main(["task", "--overlay-show-rejected"])
-        self.assertEqual(2, raised.exception.code)
-        self.assertIn("requires --overlay", errors.getvalue())
-
-    def test_overlay_startup_failure_does_not_change_engine_result(self) -> None:
-        class Runtime:
-            frame_publisher = EngineFramePublisher()
-
-            @staticmethod
-            def run(*, execute: bool = False):
-                class Result:
-                    successful = True
-
-                    @staticmethod
-                    def to_dict():
-                        return {"status": "DRY_RUN", "execute": execute}
-
-                return Result()
-
-        stdout = StringIO()
-        stderr = StringIO()
-        with (
-            patch("osrs_bot.__main__.ObservationClient"),
-            patch("osrs_bot.__main__.WoodcutBankTask"),
-            patch("osrs_bot.__main__.TaskRuntime", return_value=Runtime()),
-            patch("osrs_bot.debug_overlay.DebugOverlay") as overlay_type,
-            redirect_stdout(stdout),
-            redirect_stderr(stderr),
+        self.assertIn("from .application_cli import main as application_main", source)
+        for forbidden in (
+            "BehaviorPolicy",
+            "TaskRuntime",
+            "build_live_runtime",
+            "WoodcutBankTask",
+            "Verifier",
         ):
-            overlay_type.return_value.start.side_effect = RuntimeError(
-                "passive styles unavailable"
-            )
-            exit_code = main(["task", "--overlay"])
-
-        self.assertEqual(0, exit_code)
-        self.assertEqual("DRY_RUN", json.loads(stdout.getvalue())["status"])
-        self.assertIn("Diagnostic overlay unavailable", stderr.getvalue())
+            self.assertNotIn(forbidden, imports)
+            self.assertNotIn(f"{forbidden}(", source)
 
 
 if __name__ == "__main__":

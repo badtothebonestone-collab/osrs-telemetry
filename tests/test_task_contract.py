@@ -234,6 +234,25 @@ class TaskContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ObservationRequest(priority_object_ids=invalid)  # type: ignore[arg-type]
 
+    def test_observation_request_limits_match_the_snapshot_adapter(self) -> None:
+        request = ObservationRequest(
+            radius_tiles=96,
+            max_objects=64,
+            max_projection_objects=64,
+        )
+
+        self.assertEqual(96, request.radius_tiles)
+        self.assertEqual(64, request.max_objects)
+        self.assertEqual(64, request.max_projection_objects)
+        for values in (
+            {"radius_tiles": 97},
+            {"max_objects": 65},
+            {"max_projection_objects": 65},
+        ):
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    ObservationRequest(**values)
+
     def test_observation_request_rejects_invalid_structure_and_values(self) -> None:
         invalid_requests = (
             [("target", WorldPoint(3200, 3201, 0))],

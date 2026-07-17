@@ -55,7 +55,7 @@ python -m osrs_bot observe
 exit /b %ERRORLEVEL%
 
 :task
-python -m osrs_bot task %~2 %~3
+python -m osrs_bot.application_cli run %~2 %~3
 exit /b %ERRORLEVEL%
 
 :login
@@ -71,7 +71,7 @@ if "%~2"=="" (
     echo Live execution requires an Arduino port, for example: run.cmd execute COM6 1>&2
     exit /b 2
 )
-python -m osrs_bot task --execute --arduino-port "%~2" %~3 %~4
+python -m osrs_bot.application_cli run --execute --arduino-port "%~2" %~3 %~4
 exit /b %ERRORLEVEL%
 
 :record_demo

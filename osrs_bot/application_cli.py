@@ -28,6 +28,16 @@ def _parser() -> argparse.ArgumentParser:
         child.add_argument("--definition-id", default=DEFAULT_PROFILE.definition_id)
         child.add_argument("--cycle-goal", type=int, default=DEFAULT_PROFILE.cycle_goal)
     run.add_argument("--execute", action="store_true")
+    run.add_argument(
+        "--overlay",
+        action="store_true",
+        help="show the passive read-only EngineFrame diagnostic overlay",
+    )
+    run.add_argument(
+        "--overlay-show-rejected",
+        action="store_true",
+        help="also outline rejected candidates (requires --overlay)",
+    )
     run.add_argument("--endpoint", default=DEFAULT_RUNTIME_CONFIG.endpoint)
     run.add_argument(
         "--auth-token",
@@ -61,9 +71,93 @@ def _profile_values(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _report_overlay_status(application: EngineApplication) -> None:
+    try:
+        overlay = application.overlay_snapshot()
+    except Exception as error:  # diagnostics never alter engine control
+        print(
+            f"Diagnostic overlay status warning: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return
+    if overlay.error:
+        print(f"Diagnostic overlay unavailable: {overlay.error}", file=sys.stderr)
+
+
+def _run_application(
+    args: argparse.Namespace,
+    application: EngineApplication,
+) -> int:
+    overlay_requested = bool(args.overlay)
+    try:
+        if overlay_requested:
+            application.set_overlay_enabled(
+                True,
+                show_rejected=bool(args.overlay_show_rejected),
+            )
+        if args.execute:
+            print(
+                "Live mode: focus the telemetry-owning RuneLite window within 15 seconds.",
+                file=sys.stderr,
+            )
+        try:
+            started = application.start(
+                profile_values=_profile_values(args), execute=args.execute
+            )
+            if overlay_requested:
+                _report_overlay_status(application)
+            run_id = started.run_id
+            assert run_id is not None
+            finished = application.wait(run_id)
+        except KeyboardInterrupt:
+            interrupted = application.snapshot()
+            active_run_id = interrupted.active_run_id
+            if active_run_id is None:
+                if interrupted.run_id is None:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "INTERRUPTED",
+                                "reason": "run was interrupted before a worker started",
+                            },
+                            indent=2,
+                        ),
+                        file=sys.stderr,
+                    )
+                    return 130
+                finished = interrupted
+            else:
+                application.request_safe_stop(active_run_id)
+                finished = application.wait(active_run_id)
+        print(json.dumps(finished.to_dict(), indent=2, sort_keys=True))
+        return (
+            0
+            if finished.lifecycle in {LifecycleState.COMPLETE, LifecycleState.STOPPED}
+            else 2
+        )
+    finally:
+        if overlay_requested:
+            try:
+                cleanup = application.set_overlay_enabled(False)
+            except Exception as error:  # diagnostics never alter engine control
+                print(
+                    "Diagnostic overlay cleanup warning: "
+                    f"{type(error).__name__}: {error}",
+                    file=sys.stderr,
+                )
+            else:
+                if cleanup.error:
+                    print(
+                        f"Diagnostic overlay cleanup warning: {cleanup.error}",
+                        file=sys.stderr,
+                    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "run" and args.overlay_show_rejected and not args.overlay:
+        parser.error("--overlay-show-rejected requires --overlay")
     try:
         if args.command == "catalog":
             print(json.dumps(EngineApplication.catalog(), indent=2, sort_keys=True))
@@ -106,40 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         application = EngineApplication(configuration=configuration)
-        run_id: str | None = None
-        try:
-            started = application.start(
-                profile_values=_profile_values(args), execute=args.execute
-            )
-            run_id = started.run_id
-            assert run_id is not None
-            finished = application.wait(run_id)
-        except KeyboardInterrupt:
-            interrupted = application.snapshot()
-            active_run_id = interrupted.active_run_id
-            if active_run_id is None:
-                if interrupted.run_id is None:
-                    print(
-                        json.dumps(
-                            {
-                                "status": "INTERRUPTED",
-                                "reason": "run was interrupted before a worker started",
-                            },
-                            indent=2,
-                        ),
-                        file=sys.stderr,
-                    )
-                    return 130
-                finished = interrupted
-            else:
-                application.request_safe_stop(active_run_id)
-                finished = application.wait(active_run_id)
-        print(json.dumps(finished.to_dict(), indent=2, sort_keys=True))
-        return (
-            0
-            if finished.lifecycle in {LifecycleState.COMPLETE, LifecycleState.STOPPED}
-            else 2
-        )
+        return _run_application(args, application)
     except (TypeError, ValueError, RuntimeError) as error:
         print(
             json.dumps(
