@@ -2,7 +2,91 @@
 
 ## Current milestone
 
-### Telemetry pipeline production-soak continuation
+### Task-agnostic gathering platform
+
+**The task-platform implementation and deterministic final gate pass. Current-
+build loaded-scene and gameplay proof remains unavailable, so this is not a
+live mining-route or current woodcut-cycle claim.**
+
+The application now exposes one `gather_bank` task with two immutable built-in
+definitions: the proven `lumbridge_west_trees_v1` regression baseline and
+`lumbridge_swamp_copper_v1`. Both construct the same `GatherBankTask` and pass
+through the existing `EngineApplication -> TaskRuntime -> SafetyGate ->
+InputCoordinator -> Arduino -> Verifier -> EngineFrame` spine. The legacy
+`WoodcutBankTask` name is compatibility-only; no mining-specific runtime,
+safety gate, input owner, verifier, or observation path was added.
+
+Definitions now declare task type and exact required capabilities plus typed
+resource/area/bank/inventory/equipment/target/lifecycle/recovery/navigation
+policy. Binding rejects a definition when those requirements exceed the one
+runtime. The current gathering runtime supports game-object interaction, fixed
+routes and object transitions, deposit-all, target continuity, camera
+acquisition, equipment observation, scheduled start, composable stop
+conditions, and restart reconciliation. Fallback banks, withdrawal/resupply,
+automatic equipment management, and production NPC interaction geometry remain
+explicitly unsupported.
+
+Equipment is captured in the existing tick-aligned inventory sensor fact and
+published as immutable `EquipmentObservation`. The copper definition requires
+known evidence containing an allowed pickaxe. Unknown equipment waits; known
+missing equipment blocks; the task neither equips nor withdraws a pickaxe.
+Legacy fixtures that omit equipment remain readable as unknown and cannot
+authorize mining.
+
+Profiles now support a scheduled UTC start and OR-composed cycle, gathered-item,
+inventories-banked, inventory-full, duration, and absolute-time stops. At least
+one stop condition is required. A profile can request a lower action cap and
+fresh restart reconciliation but cannot exceed definition/runtime ceilings or
+weaken safety. Typed item outcomes carry quantity deltas; task snapshots expose
+bounded lifecycle, metrics, and reconciliation evidence. Resource no-yield,
+bank-unavailable, and target-continuity recovery budgets are task-owned.
+
+The three adjacent hardening improvements are explicit:
+
+- `Task.apply_verification()` returns typed `VerificationDisposition`, so the
+  runtime no longer selects recovery from gathering semantics or verifier
+  failure kinds;
+- current verifier item outcomes carry exact positive quantity deltas into task
+  counters and EngineFrame metrics instead of normal-path `+1` assumptions; and
+- missing exact bank targets receive a bounded definition-owned wait whose
+  counter resets on exact bank recovery/open state and blocks when exhausted,
+  with no fallback guess.
+
+Final focused/adversarial results and measured deltas are recorded in the
+Validation section.
+
+The strict `osrs_bot.task_definition.v1` authoring boundary provides `validate`,
+`inspect`, `explain`, and deliberately non-runnable `scaffold` commands. The two
+runnable examples mirror the built-ins. The deliberate NPC-fishing example
+proves that naming unsupported `npc_interaction_geometry` does not make it
+runnable. `--definition-file` can bind an explicitly supplied runnable
+gathering definition to profile-schema, profile-validation, dry-run, or opt-in
+execute through the same `GatherBankTask`. It is not installed or advertised in
+the built-in GUI/catalog; validation alone sends no input, and execute retains
+all normal Arduino/safety/verification/cleanup gates.
+
+The copper object IDs `10943`/`11161`, ore `436`, supported pickaxe IDs, and
+Lumbridge Swamp East anchor `(3226,3146,0)` are pinned to upstream RuneLite
+source hashes in definition provenance. The authored swamp surface route reuses
+the established castle transitions but has **not** been live-replayed in this
+checkout.
+
+The clean consolidation base was independently revalidated before this work:
+984/984 Python tests, 127/127 forced-fresh Java tests, replay 7/7, compilation
+79/79, firmware protocol 8/8, focused input gates, and bounded synthetic soak
+passed. Those are baseline results, not the new platform's final gate.
+
+At milestone start no RuneLite/Java/Python client and no `8890`/`8893` listener
+was present. A bounded read-only observation failed with connection refused
+before any input. Arduino Leonardo ports enumerated but were not opened. No
+current mining route, woodcut cycle, Arduino gameplay action, firmware upload,
+or flash is claimed. The final validation section must be updated only from
+actual retained outputs.
+
+See [`TASK_PLATFORM.md`](TASK_PLATFORM.md) and
+[`DEFINITIONS_AND_PROFILES.md`](DEFINITIONS_AND_PROFILES.md).
+
+### Previous telemetry pipeline production-soak continuation
 
 **The pressure-path reliability hardening and repeatable soak harness are
 integrated on the repository-consolidation branch. A current-build live
@@ -183,7 +267,11 @@ Regression command:
 .\run.cmd replay
 ```
 
-## Proven now
+## Proven baseline and current-build implementation
+
+Historical proof statements below retain their original evidence boundary.
+Task-platform bullets describe current code until the new final gate is recorded;
+they are not live mining or current-cycle claims.
 
 - RuneLite publishes the single snapshot consumed as one immutable
   `Observation`.
@@ -214,13 +302,21 @@ Regression command:
   request, opaque decision, typed verification application, safely-unsent
   proposal discard, and immutable status snapshot. It has no woodcut import,
   phase comparison, or progress access.
-- `WoodcutBankTask` explicitly models the one supported ordinary-tree cycle.
-- The FSM is bound to exactly one immutable `LUMBRIDGE_WEST_TREES_V1`
-  definition and one validated one-cycle default profile. All Lumbridge IDs,
-  coordinates, route facts, deadlines, predicates, and provenance live there.
+- `GatherBankTask` is the one implemented gather/bank/return FSM. Woodcut and
+  copper mining select different immutable definitions through the same task
+  contract and runtime.
+- The built-in registry contains `LUMBRIDGE_WEST_TREES_V1` and
+  `LUMBRIDGE_SWAMP_COPPER_V1`. Exact IDs, coordinates, route facts, deadlines,
+  predicates, capabilities, equipment rules, and provenance live in the
+  selected definition.
+- The copper definition requires authoritative equipment evidence containing
+  one permitted pickaxe. Equipment is a core fact on the same Observation; no
+  auto-equip, withdrawal, resupply, or inventory fallback is implemented.
 - Endpoint/Arduino/polling and runtime limits live separately in immutable,
   finite, engine-capped `RuntimeConfig`. The supported default is 100 actions
-  under an unchanged hard maximum of 500; the profile cannot change either.
+  under an unchanged hard maximum of 500. Definitions and profiles can lower
+  the effective action/runtime budget but cannot enlarge operator ceilings;
+  the observation cap remains operator-owned.
 - The shared model has no log ID or woodcut phase. Task-specific item,
   interface, plane, and dialogue requirements are immutable action/spec
   constraints, while SafetyGate invariants remain non-overridable.
@@ -230,6 +326,9 @@ Regression command:
 - Exact Tree `1276`, fixed outbound/return route steps, both upward stairs,
   exact bank booth, deposit-all-logs, verified Escape close, and terminal
   `COMPLETE` are represented in the committed golden replay.
+- Copper Rocks `10943`/`11161`, ore `436`, the upstream mine anchor, equipment
+  gate, and authored route are represented in the new definition and synthetic
+  task-platform coverage. The swamp surface route has no live proof yet.
 - Live component traces physically reached all of those milestones on
   2026-07-10 and ended at `COMPLETE` with acknowledged `STOP_ALL`/`DISARM`.
 - A separate 2026-07-11 pre-audit process completed the default
@@ -494,9 +593,10 @@ Regression command:
   automatic, and invalid evidence emits no suggestions.
 - Demonstration and screenshot modules import no runtime, task, safety, login,
   input coordinator, Arduino, or software input authority.
-- `EngineApplication` now exposes the exact one-task/one-definition catalog,
-  fresh profile schema, authoritative profile validation, and fresh
-  task/runtime/control construction for each start.
+- `EngineApplication` exposes one gathering task with the woodcut and copper
+  definitions, a definition-aware expanded profile schema, authoritative
+  profile/capability validation, and fresh task/runtime/control construction for
+  each start.
 - Monotonic run and capture IDs reject delayed commands. Automation and manual
   demonstration workers are serialized and mutually exclusive, including
   concurrent start races.
@@ -521,9 +621,9 @@ Regression command:
 ## Governing direction
 
 - The product is a small OSRS-specific engine, not a general agent framework.
-- The proven Lumbridge cycle is the regression baseline; future flexibility
-  comes from validated profiles and immutable task/site definitions feeding
-  explicit task-specific FSMs.
+- The proven Lumbridge woodcut cycle is the regression baseline. Current
+  flexibility comes from capability-validated profiles and immutable woodcut/
+  copper task-site definitions feeding one explicit gathering FSM.
 - Profiles and definitions can never weaken engine invariants.
 - RuneLite API facts remain authoritative. Vision may supplement or veto but
   cannot replace semantic API truth. No model dependency is active.
@@ -532,6 +632,10 @@ Regression command:
 - A future LLM may read offline evidence but has no runtime control authority.
 - Static definitions, active FSM state, run history, and demonstration evidence
   remain separate; unsafe ephemeral state is never restored after restart.
+- Fishing remains unsupported until production NPC interaction geometry exists.
+  Combat and quest task types require their enumerated observation, safety,
+  policy, verification, and recovery capabilities before implementation;
+  QuestHelper/Wiki knowledge may be pinned read-only provenance only.
 
 ## Evidence boundary
 
@@ -727,6 +831,41 @@ the geometry condition and recovery behavior rather than source attribution.
 
 ## Validation
 
+- Task-platform milestone deterministic/offline gate: **PASS**. Full Python
+  discovery passed 1,033/1,033; the explicit application/frontend/GUI set passed
+  117/117; retained replay passed 7/7; and all 84 current Python files compiled.
+  The final public `run.cmd test` exited zero with 1,033 Python tests and a
+  129/129 Java run across 12 suites with 4/4 tasks executed. The independent
+  forced-fresh Java rerun likewise passed 129/129 across 12 suites with
+  4/4 tasks executed; Java snapshot-fixture tests passed 2/2; firmware protocol
+  passed 8/8; capability/transport passed 78/78; and InputCoordinator/static-
+  boundary tests passed 139/139.
+- Authoring validation accepted both runnable examples, rejected the unsupported
+  NPC-fishing example and deliberately non-runnable scaffold, and validated
+  built-in plus external-definition profiles. Publication hygiene found no
+  strong secret-pattern hit, changed file over 1 MiB, or generated artifact in
+  the branch; architecture inspection, documentation audit, and
+  `git diff --check` passed.
+- The final synthetic soak passed 5,000 serial samples plus 500 calls at each of
+  1/2/4/8 pollers, retained one result signature per level, and returned to one
+  thread. Warm-parse p50/p95/p99/max was
+  0.1427/0.2572/0.3476/0.7779 ms; decode-plus-parse was
+  0.1738/0.3020/0.4245/2.1205 ms; EngineFrame publication was
+  0.0031/0.0033/0.0060/0.1186 ms; and the 1,001-row woodcut target decision was
+  0.0651/0.1135/0.1547/0.9402 ms with 33 identity evaluations. Copper and
+  woodcut per-definition target p95 were 0.1270 and 0.1215 ms. Eight-poller
+  p50/p95/p99/max was 0.1463/0.2942/0.5665/49.1670 ms.
+- Against the same 5,000-sample baseline, warm-parse p95 changed -5.93%,
+  decode-plus-parse p95 -2.27%, EngineFrame p95 -42.11%, 1,001-row target p95
+  -33.00%, and RSS growth -35.01%. The comparison also records
+  decode-plus-parse p99 +9.32% and target maximum +5.60%; maxima are scheduler-
+  sensitive, so no blanket latency improvement is claimed.
+- Current loaded-scene/live gameplay remains unavailable. Final read-only
+  enumeration found no RuneLite/Python client and no `8890`/`8893` listener;
+  the only Java process was a Gradle daemon. Leonardo COM6/COM7 enumerated but
+  no port was opened, no input was sent, and no firmware was flashed. Therefore
+  no current hardware-cleanup receipt, live mining route, or woodcut cycle is
+  implied by the deterministic gate.
 - Production-soak continuation: **PASS** in the integrated checkout. Full Python
   984/984 with the documented test-only sandbox ACL harness; forced-fresh Java
   127/127 across 12 suites with 4/4 Gradle tasks executed; retained replay 7/7;
@@ -926,8 +1065,11 @@ the geometry condition and recovery behavior rather than source attribution.
 - Current `input_transaction_receipt.v1` JSON includes additive
   `cursorFeedback` and movement-only `cursorReacquisition`; older v1 proof
   artifacts may omit either field.
-- There is intentionally no external profile loader, second definition, or
-  generic navigation/transition framework.
+- There are two built-in definitions and a strict external definition boundary.
+  An explicitly supplied runnable gathering file may execute through the same
+  foreground facade/runtime, but is not installed or advertised in the built-in
+  GUI/catalog. Fallback banks, withdrawal/resupply, auto-equip, production NPC
+  interaction, and generic navigation/transition planning remain absent.
 - The passive overlay renders the same latest EngineFrame and presentation
   facts as the GUI. Historical and terminal text may remain visible, but stale,
   disconnected, identity-mismatched, and terminal target geometry is always
@@ -1095,8 +1237,8 @@ movement path, controller, or parallel recovery owner was added.
 
 ## Target-locked coarse-to-fine camera status
 
-The implementation and offline acceptance are **PASS**. The existing
-`WoodcutBankTask` owns one `CameraAcquisitionEpisode`; `InputCoordinator` remains
+The implementation and offline acceptance are **PASS**. The gathering FSM now
+named `GatherBankTask` owns one `CameraAcquisitionEpisode`; `InputCoordinator` remains
 the only production input owner and the Arduino typed camera key intent remains
 the only production camera actuation path. The episode locks one exact object,
 tile, or route target together with source session/PID and exact client/canvas/

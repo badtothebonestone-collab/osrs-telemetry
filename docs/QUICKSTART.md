@@ -66,9 +66,9 @@ bank PIN. Handle those sensitive surfaces yourself, then refresh status.
 
 ## Current profile
 
-The only supported profile is shown exactly as the catalog reports it:
+The GUI currently shows the catalog's default profile:
 
-- task: `woodcut_bank`;
+- task: `gather_bank`;
 - definition: `lumbridge_west_trees_v1`;
 - resource: ordinary Tree (`1276`);
 - site: Lumbridge west Trees to Lumbridge Castle bank and return;
@@ -76,9 +76,25 @@ The only supported profile is shown exactly as the catalog reports it:
 - goal: one complete bank cycle;
 - profile: `default_lumbridge_west_trees_v1`.
 
-Resource, area, bank, and goal are display-only because no other validated
-choice exists. The authoritative profile validator runs again before every
-start.
+Resource, area, bank, and goal remain display-only in this GUI. The application
+catalog also contains `lumbridge_swamp_copper_v1`, and the foreground facade can
+select it with `--definition-id`; the GUI has not yet added a definition/profile
+editor. The authoritative definition-aware profile/capability validator runs
+again before every start.
+
+Advanced facade profiles can request a scheduled UTC start and OR-composed
+cycle, item-quantity, inventories-banked, inventory-full, duration, or absolute-
+time stop. They may also set a lower action cap or disable fresh restart
+reconciliation. See
+[`DEFINITIONS_AND_PROFILES.md`](DEFINITIONS_AND_PROFILES.md). These choices never
+weaken the GUI's loaded-scene, PID/session, Arduino, safety, verification, or
+cleanup gates.
+
+The foreground facade can also receive a strict runnable gathering definition
+with `run.cmd app run --definition-file PATH`. This is an explicit per-process
+input, not GUI/catalog installation. Inspect and validate the file first; live
+input still requires the additional `--execute --arduino-port COMx` flags and
+all ordinary safety gates.
 
 ## Observe Only
 
@@ -219,6 +235,9 @@ Folder** on Live Status when support evidence is needed.
 - **Another process owns the Arduino lease:** safely stop that owner first.
 - **Bank PIN or ambiguous interface detected:** resolve it manually; the engine
   will not enter a PIN.
+- **Required equipment is unknown or missing:** refresh the loaded scene and
+  inspect equipment truth. The copper definition requires one supported
+  equipped pickaxe; the engine will not equip or withdraw one.
 - **Cursor could not be safely reacquired:** leave RuneLite foreground and
   retry only after current geometry is stable.
 - **Safe Stop is still finishing:** wait for transaction, verification, and

@@ -7,13 +7,18 @@ The engine is an OSRS-specific contract pipeline:
 ```text
 Profile
   -> validated Task/Site Definition
-  -> explicit task-specific FSM
+  -> capability binding
 
 RuneLite API facts
   -> immutable atomic SensorFrame
   -> immutable Observation
 
-Observation + task decision
+Observation
+  -> EngineApplication
+  -> TaskRuntime
+  -> one selected explicit Task FSM
+
+Task decision
   -> ActionIntent + VerificationSpec
   -> SafetyGate
   -> InputCoordinator
@@ -34,15 +39,17 @@ There is one observation truth, one runtime orchestrator, one active explicit
 task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
-The bounded architecture migration and first operator GUI are implemented. The
-current column is implemented; the target column now names preservation rules.
+The bounded architecture migration, first operator GUI, and one generic
+gather/bank task family are implemented in the current build. The task-platform
+milestone intentionally supersedes the older one-task/one-definition limit; it
+does not supersede any safety or single-owner rule.
 
 | Layer | Current baseline | Governing target |
 |---|---|---|
 | Sensor | atomic game-tick `SensorFrame` plus separately stamped client/menu evidence | preserve the same single source contract while adding no second endpoint |
 | Observation | immutable source-coherent `Observation` | preserve the same single truth for task-neutral seams |
-| Definition/profile | one immutable `LUMBRIDGE_WEST_TREES_V1` plus one validated one-cycle default profile | preserve typed validation; add no dynamic loader during this mission |
-| Task | minimal `Task` protocol plus definition-bound concrete `WoodcutBankTask` FSM | preserve the protocol and explicit task-specific transitions |
+| Definition/profile | immutable built-in woodcut/copper definitions, strict capability binding, expanded bounded lifecycle profile, and strict external authoring validation | add facts only through exact schemas; unsupported capabilities fail before a run |
+| Task | minimal `Task` protocol plus one definition-bound `GatherBankTask` FSM | preserve one explicit FSM for the gathering family; do not create per-definition runtimes |
 | Decision | opaque state/action plus immutable selected/eligible/rejected evidence from the actual task path | preserve this task-neutral evidence contract for frontends |
 | Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
 | Runtime configuration | immutable endpoint/Arduino/poll/bound values plus one bounded behavior policy and run seed | same contract consumed by every frontend |
@@ -64,9 +71,13 @@ blob:
 | Runtime configuration | endpoint, Arduino port, poll rate, hard limits, behavior bounds and seed | task meaning or weaker safety rules |
 | Engine invariants | freshness, binding, focus, geometry, menu proof, PIN refusal, verification, cleanup | user-overridable options |
 
-The first implementation contains exactly one built-in Lumbridge definition and
-one default profile. Adding a definition does not create a generic planner: it
-provides validated facts to a still-explicit task FSM.
+The built-in registry contains a proven Lumbridge west woodcut definition and a
+Lumbridge Swamp East copper definition. Adding a definition does not create a
+generic planner: it provides validated facts and bounded policy to a still-
+explicit task-family FSM. The external authoring schema validates immutable
+definitions. An explicitly supplied runnable gathering file may bind to the same
+foreground facade/runtime without being installed or advertised in the built-in
+GUI/catalog.
 
 `BehaviorConfig` and one run-scoped `BehaviorPolicy` own bounded route, camera,
 aim, pointer, and timing choices. A run seed plus stable decision IDs make those
@@ -120,13 +131,17 @@ surface.
 and produces one immutable `Observation`:
 
 ```text
-player, location, plane, inventory, nearby_objects, menus, widgets,
+player, location, plane, inventory, equipment, nearby_objects, menus, widgets,
 game_state, camera yaw/pitch, source timestamp, assembly timestamp,
 frame identity, tick, canvas bounds, optional client-window bounds
 ```
 
 Source coherence, freshness, canvas bounds, warnings, and missing capabilities
 travel with the same object because they determine whether any action is safe.
+Equipment is captured beside inventory in the same tick-aligned core sensor
+fact and becomes immutable `EquipmentObservation`. Missing legacy equipment is
+explicitly unknown; it cannot satisfy a definition's tool requirement. This is
+an additive core fact, not a second endpoint or task cache.
 Object census rows are deduplicated by stable object key. Canvas coordinates are converted to
 screen coordinates once, at this boundary. Menu samples preserve the explicit
 top/default entry, scene parameters, client-tick sequence, and sampled pointer.
@@ -234,26 +249,48 @@ to runtime. Runtime does not import the concrete task, compare its phases, or
 inspect its mutable progress. An executable action without a verification
 specification is rejected before an input boundary is called.
 
-`WoodcutBankTask` is an explicit state machine:
+`GatherBankTask` is the one implemented explicit gathering state machine. The
+legacy diagnostic phase strings remain readable, but canonical ownership is
+resource-oriented:
 
 ```text
-FIND_TREE -> CHOP -> VERIFY_LOGS
-    ^                    |
-    |                    v (inventory full)
-    +------------- NAVIGATE_TO_BANK -> OPEN_BANK
-                                           |
-                                           v
-NAVIGATE_TO_TREES <- CLOSE_BANK <- VERIFY_DEPOSIT <- DEPOSIT_LOGS
-        |
-        v
-     COMPLETE
+FIND_RESOURCE -> INTERACT_RESOURCE -> VERIFY_YIELD
+       ^                                |
+       |                                v (inventory full)
+       +---------------------- NAVIGATE_TO_BANK -> OPEN_BANK
+                                                      |
+                                                      v
+NAVIGATE_TO_RESOURCE <- CLOSE_BANK <- VERIFY_DEPOSIT <- DEPOSIT_ITEMS
+          |
+          v
+       COMPLETE
 ```
 
-The task accepts one validated `BoundProfile`. The sole built-in definition
-owns all resource/bank selectors, areas, route steps and transitions, inventory
-predicates, tick expectations, and evidence provenance. The profile owns only
-the selected definition and one-cycle goal. Neither owns mutable FSM state or
-engine safety controls.
+The task accepts one validated `BoundProfile`. The selected definition owns
+resource/bank selectors, areas, route steps and transitions, inventory and
+equipment predicates, target/lifecycle/recovery/navigation policy, tick
+expectations, required capabilities, and provenance. The profile owns only the
+selected definition and bounded lifecycle choices. Neither owns mutable FSM
+state or engine safety controls.
+
+The immutable registry currently binds `lumbridge_west_trees_v1` and
+`lumbridge_swamp_copper_v1` to this same class and runtime. Copper requires known
+equipment containing one allowed pickaxe. Unknown equipment waits, known
+missing equipment blocks, and the task never equips or withdraws a tool. The
+swamp surface route is authored but has not been live-replayed in this checkout.
+
+Definitions negotiate capabilities before task construction. The current
+runtime supports object gathering, fixed routes/transitions, deposit-all,
+target continuity, camera acquisition, equipment observation, schedules,
+composable stop conditions, and restart reconciliation. Fallback banks,
+withdrawal/resupply, equipment management, and NPC interaction geometry are
+typed but rejected.
+
+Profiles compose stop conditions with OR semantics: cycle, item quantity,
+inventories banked, inventory full, elapsed duration, or absolute UTC stop. A
+UTC start and lower action cap are also supported within definition/runtime
+ceilings. Completion is evaluated at a no-new-input boundary; an open bank is
+closed through the normal verified path before terminal completion.
 
 The two definition routes remain exact tuples of classified guidance, mandatory
 turn/transition, and arrival evidence. The task projects a bounded lookahead and
@@ -279,7 +316,7 @@ controlled leading-edge allowance for supported long targets, while interaction
 framing remains stricter about clickbox clearance. World player-to-target bearing
 provides wrap-safe desired yaw even while the target is off-screen; current
 projection supplies yaw/pitch screen correction. An exact definition-owned Tree,
-bank booth, or route-transition may therefore enter acquisition before it is
+Rock, bank booth, or route-transition may therefore enter acquisition before it is
 actionable, but activation still requires fresh authoritative final geometry and
 exact hover/menu proof.
 
@@ -324,11 +361,25 @@ The task emits an `Action` and a generic `VerificationSpec`. It never sends the
 action and never evaluates its own verification. It consumes only typed
 outcomes from the shared verifier.
 
+`Task.apply_verification()` returns a typed task-owned
+`VerificationDisposition`. Runtime accepts a failed verification as recoverable
+only when that value is `RECOVERED` and the post-transition task snapshot remains
+running; otherwise the task must be blocked. Runtime no longer compares
+gathering phases or verifier failure kinds to invent semantic recovery.
+
+Verified item outcomes carry the exact positive `item_quantity_delta`, allowing
+the task and EngineFrame metrics to count multi-item gains without reading raw
+payloads or duplicating verification. Resource no-yield retry, incomplete target
+retention, and bank-unavailable waits are bounded by the selected definition's
+`RecoveryPolicy`. The bank-unavailable counter resets when an exact bank returns
+or is open; exhaustion blocks and never guesses a fallback bank.
+
 The same concrete selection/classification path also emits immutable
 `DecisionEvidence`: exact selected target, eligible candidates, and rejected
 candidates with stable codes. `TaskSnapshot` publishes the bound definition and
-profile plus route/cycle progress. Runtime reads only these task-contract values
-and never inspects mutable FSM progress.
+profile plus route/cycle/item/banked metrics and lifecycle/reconciliation status.
+Runtime reads only these task-contract values and never inspects mutable FSM
+progress.
 
 ### Safety and action
 
@@ -526,9 +577,12 @@ bound so a frozen client cannot wait forever.
 
 `RuntimeConfig` separately validates endpoint/token/Arduino/polling and hard
 observation/action/runtime/verification limits. Its finite engine-owned caps
-cannot be changed by a profile or task definition. The default action budget is
-100, above the frozen 64-action ideal and observed 82-action complete cycle,
-under the unchanged hard maximum of 500.
+cannot be enlarged by a profile or task definition. Effective action and
+runtime limits are the minimum of those operator caps, definition lifecycle
+limits, and any profile action limit; the observation cap remains entirely
+operator-owned. The default action budget is 100, above the frozen 64-action
+ideal and observed 82-action complete cycle, under the unchanged hard maximum
+of 500.
 
 Walk verification passes after authoritative movement closer or arrival. Route
 movement owns a 20-tick definition deadline, distinct from the eight-tick
@@ -633,11 +687,18 @@ derivation of older finalized summaries and timelines.
 
 ## Application facade and frontend
 
-`EngineApplication` is the implemented composition root. It lists the exact one
-task/definition, returns the frontend-safe profile schema, reuses authoritative
-profile validation, creates a fresh task/runtime/control for each start, returns
-the exact latest EngineFrame and runtime-owned statistics, reports exact
-blockers, and owns mutually exclusive run/demonstration worker lifecycles.
+`EngineApplication` is the implemented composition root. It lists one
+`gather_bank` task with the built-in woodcut and copper definitions, returns a
+definition-aware frontend profile schema, reuses authoritative profile/
+capability validation, creates a fresh `GatherBankTask`/runtime/control for each
+start, returns the exact latest EngineFrame and runtime-owned statistics,
+reports exact blockers, and owns mutually exclusive run/demonstration worker
+lifecycles.
+
+Scheduled starts remain inside this lifecycle owner. Waiting for the requested
+UTC time does not fetch gameplay input or create another worker/control path;
+pause and safe stop remain cooperative. The selected profile may narrow action
+and lifecycle limits but cannot exceed the definition or engine caps.
 
 Run and capture commands carry monotonic local IDs, so delayed UI commands
 cannot affect a later operation. Pause is acknowledged only at a no-input
@@ -654,7 +715,8 @@ test/replay paths. They add no endpoint, daemon, IPC, web server, or alternate
 input path. Harmless settings are revalidated on startup; active run/capture,
 verification, target, cursor, PID/session, and input state are never restored.
 
-The facade imports the concrete task only to compose the sole supported engine.
+The facade imports the concrete gathering task only to compose the sole engine
+spine; definition selection never chooses a different runtime implementation.
 It has no target selection, SafetyGate, Verifier, InputCoordinator, Arduino, or
 raw-input calls. `run.cmd task`, `run.cmd execute`, and the compatibility
 `python -m osrs_bot task` alias all route through this composition root and emit
@@ -662,6 +724,31 @@ the `engine_application.v1` status contract. `run.cmd gui` launches the operator
 frontend. `run.cmd app` retains catalog/profile and foreground run commands as
 diagnostics; Ctrl+C becomes cooperative safe stop. There is no daemon or IPC
 layer. See `docs/FRONTEND_CONTRACT.md`.
+
+## Definition authoring boundary
+
+`osrs_bot.task_authoring` is a strict decode/validate/inspect/scaffold surface
+for `osrs_bot.task_definition.v1`. It produces the same immutable
+`TaskSiteDefinition` type used by built-ins. Exact object fields, array shapes,
+global task-owned identifiers, anchors, routes, planes, inventory/equipment
+relationships, capabilities, provenance, and constructor invariants are checked
+before a value exists.
+
+A scaffold is deliberately complete-shape but `runnable:false` with invalid
+placeholders. Validation rejects it until explicitly completed and armed.
+Unsupported capabilities and non-gathering task types fail clearly. The two
+runnable examples mirror the built-in woodcut and copper definitions; the NPC-
+fishing example deliberately demonstrates rejection.
+
+`application_cli --definition-file` passes the decoded immutable definition
+explicitly into `EngineApplication.profile_contract`, `validate_profile`, or
+`start`. The file ID is authoritative and must match any repeated
+`--definition-id`. The explicit profile schema advertises only that ID. Start
+binds it directly to `GatherBankTask`; it does not mutate the registry or GUI
+catalog. Schema/validation/dry-run send no production input, while `--execute`
+retains the ordinary Arduino-only safety, verification, bound, PIN, and cleanup
+path. See
+`docs/DEFINITIONS_AND_PROFILES.md`.
 
 ## Vision and LLM boundaries
 
@@ -679,6 +766,15 @@ immutable definitions, demonstration artifacts, run history, and diagnostic
 evidence. It may not emit executable input, mutate an active profile, or bypass
 the FSM, `SafetyGate`, `InputCoordinator`, or `Verifier`.
 
+Combat and quest task types are future capability boundaries, not current
+implementations. Combat requires authoritative combat-state observation plus
+health, food, prayer, equipment, targeting, loot, escape, and resupply policies.
+Quest work requires an authoritative quest-state provider, versioned step
+preconditions, item handling, dialogue/travel orchestration, and bounded
+recovery. QuestHelper may later provide pinned read-only step metadata and the
+OSRS Wiki may provide pinned, versioned knowledge/provenance; neither may become
+activation authority or bypass live RuneLite facts and the one control spine.
+
 ## Memory and restart
 
 Static definition knowledge is immutable and version controlled. Current task
@@ -686,9 +782,11 @@ state belongs only to the active FSM. Run history and demonstration evidence are
 separate append-only records and cannot authorize behavior.
 
 After restart, never restore pending verification, source/client ticks, menu
-samples, old screen coordinates/clickboxes, session-bound targets, or armed
-input state. Reobserve the game, validate a fresh profile/definition binding,
-and reconcile the FSM before any new action.
+samples, old screen coordinates/clickboxes, session-bound targets, lifecycle
+counters, or armed input state. Reobserve the game, validate a fresh profile/
+definition/capability binding, and reconcile the FSM before any new action.
+`reconcileOnStart=false` permits only a definition-clean starting state; it does
+not authorize an unknown or partially completed state.
 
 The narrow reconciliations derive new state from current evidence rather than
 restoring it. A full inventory may resume only the furthest matching
@@ -709,8 +807,9 @@ restart-reconciliation shortcut; ordinary FSM and safety checks then apply
 without historical cycle credit. Because the open-bank branch can only close,
 bank contents need not be readable; an open PIN blocks before input, and exact
 widget or keyboard-close support is still required.
-Completing any historical return grants no cycle credit; the active process
-must perform a new full cycle.
+Completing any historical return grants no cycle, item, or inventory-banked
+credit; the active process must earn progress from typed outcomes in the new
+run.
 
 ## Bounded phase and wait observability
 

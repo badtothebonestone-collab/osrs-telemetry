@@ -13,18 +13,22 @@ the active development phase.
 
 ## Product boundary
 
-Build a small, modular, OSRS-specific automation engine. The only implemented
-task/site remains Lumbridge west ordinary Trees -> Lumbridge Castle bank ->
-return. New flexibility comes from validated profiles and immutable task/site
-definitions, while every task retains its own explicit FSM.
+Build a small, modular, OSRS-specific automation engine. The active task-platform
+milestone supports one generic, explicit gather/bank/return FSM with validated
+woodcutting and mining definitions. This goal deliberately supersedes the prior
+mission's one-task/one-definition prohibition. The proven Lumbridge west Trees
+cycle remains the regression baseline; extending the catalog never relaxes its
+safety proof.
 
 Never introduce a generic or high-level game-agent framework, generic planner,
 task language, task DSL, behavior-tree framework, knowledge fabric, learned
 control policy, automatic learning, MCP surface, compatibility layer for
-deleted architecture, or second telemetry endpoint. Bounded algorithms local
-to one owning boundary, such as route selection and pointer trajectories, are
-allowed and may not bypass the explicit task FSM. Do not add another task or
-site during the active mission.
+deleted architecture, or second telemetry endpoint. The strict external task-
+definition format is an authoring/validation boundary for immutable typed facts,
+not an executable task language. Bounded algorithms local to one owning
+boundary, such as route selection and pointer trajectories, are allowed and may
+not bypass the explicit task FSM. Every new definition must negotiate only
+runtime-supported capabilities and fail closed otherwise.
 
 Controlled behavioral variation is an intentional engine capability. It must
 be bounded, geometry-aware, context-aware, observable, reproducible when a
@@ -45,7 +49,7 @@ Keep one source of truth for each layer:
 
 - one RuneLite snapshot endpoint and coherent tick sensor frame;
 - one immutable `Observation` downstream of the adapter;
-- one active task-specific FSM behind the shared task contract;
+- one selected explicit FSM behind the shared task contract;
 - one `SafetyGate` with non-overridable engine invariants;
 - one Arduino session owner and automated input path;
 - one typed verification/outcome path;
@@ -172,6 +176,19 @@ PIN, minimized-window, or unsupported-prompt handling, request manual attention.
 - Generic runtime orchestration may use task contracts but must not know
   concrete task phases, item IDs, route facts, or mutable progress internals;
   the explicit task FSM necessarily owns those task-specific facts.
+- `GatherBankTask` is the one implemented gathering FSM. Woodcutting and mining
+  are immutable definitions selected through the same `EngineApplication` and
+  `TaskRuntime`; do not create a task-specific runtime, safety gate, input owner,
+  verifier, or observation path beside it.
+- An explicitly supplied strict external gathering definition may bind to that
+  same foreground facade/runtime after exact decode and capability/profile
+  validation. It is not installed in the built-in GUI/catalog, and explicit
+  execute mode still uses every normal safety, verification, Arduino, bound,
+  PIN, and cleanup gate.
+- Definition/profile capability checks occur before execution. Typed fallback-
+  bank, withdrawal/resupply, automatic-equipment, NPC-interaction, combat, and
+  quest capabilities must remain rejected until their observation, safety,
+  verification, and recovery owners are implemented and tested.
 - Demonstrations and historical runs are append-only evidence. They may suggest
   reviewed definition/fixture changes but never authorize input or raw replay.
 - Frontend lifecycle commands must carry the current run/capture ID. Pause and
