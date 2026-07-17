@@ -13,6 +13,7 @@ if /I "%MODE%"=="execute" goto execute
 if /I "%MODE%"=="record-demo" goto record_demo
 if /I "%MODE%"=="inspect-demo" goto inspect_demo
 if /I "%MODE%"=="app" goto app
+if /I "%MODE%"=="definition" goto definition
 if /I "%MODE%"=="gui" goto gui
 if /I "%MODE%"=="telemetry-soak" goto telemetry_soak
 if /I "%MODE%"=="replay" goto replay
@@ -36,6 +37,8 @@ echo   run.cmd login COMx             Recover a saved authenticated session
 echo   run.cmd record-demo NAME [options]
 echo   run.cmd inspect-demo PATH
 echo   run.cmd app COMMAND [options]  Use the diagnostic application CLI
+echo   run.cmd definition COMMAND [options]
+echo                                  Validate, inspect, explain, or scaffold tasks
 echo   run.cmd telemetry-soak [options]
 echo                                  Run bounded synthetic pipeline pressure proof
 echo   run.cmd replay                 Run golden cycle and retained camera replays
@@ -51,11 +54,11 @@ call gradlew.bat run --console=plain --no-daemon
 exit /b %ERRORLEVEL%
 
 :observe
-python -m osrs_bot observe
+python -m osrs_bot %*
 exit /b %ERRORLEVEL%
 
 :task
-python -m osrs_bot.application_cli run %~2 %~3
+python -m osrs_bot %*
 exit /b %ERRORLEVEL%
 
 :login
@@ -71,7 +74,7 @@ if "%~2"=="" (
     echo Live execution requires an Arduino port, for example: run.cmd execute COM6 1>&2
     exit /b 2
 )
-python -m osrs_bot.application_cli run --execute --arduino-port "%~2" %~3 %~4
+python -c "import sys; from osrs_bot.application_cli import main; raise SystemExit(main(['run', '--execute', '--arduino-port', sys.argv[2], *sys.argv[3:]]))" %*
 exit /b %ERRORLEVEL%
 
 :record_demo
@@ -79,7 +82,7 @@ if "%~2"=="" (
     echo Demonstration capture requires a safe name, for example: run.cmd record-demo castle-stairs 1>&2
     exit /b 2
 )
-python -m osrs_bot.demonstration record "%~2" %3 %4 %5 %6 %7 %8 %9
+python -c "import sys; from osrs_bot.demonstration import main; raise SystemExit(main(['record', *sys.argv[2:]]))" %*
 exit /b %ERRORLEVEL%
 
 :inspect_demo
@@ -87,7 +90,7 @@ if "%~2"=="" (
     echo Demonstration inspection requires an artifact path. 1>&2
     exit /b 2
 )
-python -m osrs_bot.demonstration inspect "%~2"
+python -c "import sys; from osrs_bot.demonstration import main; raise SystemExit(main(['inspect', *sys.argv[2:]]))" %*
 exit /b %ERRORLEVEL%
 
 :app
@@ -95,7 +98,15 @@ if "%~2"=="" (
     echo Application facade requires a command: catalog, profile-schema, validate-profile, or run. 1>&2
     exit /b 2
 )
-python -m osrs_bot.application_cli %2 %3 %4 %5 %6 %7 %8 %9
+python -c "import sys; from osrs_bot.application_cli import main; raise SystemExit(main(sys.argv[2:]))" %*
+exit /b %ERRORLEVEL%
+
+:definition
+if "%~2"=="" (
+    echo Task authoring requires a command: validate, inspect, explain, or scaffold. 1>&2
+    exit /b 2
+)
+python -c "import sys; from osrs_bot.task_authoring import main; raise SystemExit(main(sys.argv[2:]))" %*
 exit /b %ERRORLEVEL%
 
 :gui
@@ -103,7 +114,7 @@ python -m osrs_bot.gui
 exit /b %ERRORLEVEL%
 
 :telemetry_soak
-python -m osrs_bot.telemetry_soak %2 %3 %4 %5 %6 %7 %8 %9
+python -c "import sys; from osrs_bot.telemetry_soak import main; raise SystemExit(main(sys.argv[2:]))" %*
 exit /b %ERRORLEVEL%
 
 :replay

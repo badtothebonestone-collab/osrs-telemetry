@@ -1,13 +1,16 @@
-# Engine Stabilization Plan
+# Engine Stabilization and Task-Platform Plan
 
 ## Mission
 
 Turn the proven Lumbridge west ordinary-tree -> Lumbridge Castle bank -> return
-slice into a small OSRS-specific engine. Preserve one sensor truth, one task
-FSM, one safety gate, one Arduino action path, typed verification, bounded
-cleanup, and a thin runtime. Do not grow a generic planner, task language,
-behavior tree, knowledge system, learned policy, anti-detection system, or GUI
-runtime logic.
+slice into a small OSRS-specific task platform. Preserve one sensor truth, one
+`EngineApplication`, one task-agnostic runtime, one active explicit FSM, one
+safety gate, one Arduino action path, typed verification, bounded cleanup, and
+one immutable diagnostic frame. The current milestone intentionally supersedes
+the earlier one-task/one-definition prohibition: woodcutting and copper mining
+are immutable definitions for one `GatherBankTask`, not parallel runtimes. Do
+not grow a generic planner, executable task language, behavior tree, knowledge
+system, learned policy, anti-detection system, or GUI runtime logic.
 
 ## Decisions
 
@@ -27,9 +30,10 @@ runtime logic.
 - **D005 — Product governance:** `docs/PRODUCT_VISION.md` defines the product;
   `docs/ARCHITECTURE.md` separates current implementation from target contracts;
   the rescue contract remains only the frozen regression baseline.
-- **D006 — Extension boundary:** flexibility comes from one validated profile
-  and one immutable built-in task/site definition feeding an explicit task FSM.
-  Neither may weaken engine invariants.
+- **D006 — Historical extension boundary:** the first migration deliberately
+  limited flexibility to one validated profile and one immutable definition.
+  Phase 12 supersedes the numeric limit while retaining typed binding and the
+  rule that neither profiles nor definitions may weaken engine invariants.
 - **D007 — Authority boundary:** RuneLite owns semantic truth. Vision and an LLM
   may consume or supplement read-only evidence at defined offline seams but
   never replace API facts or participate in runtime control.
@@ -45,11 +49,11 @@ runtime logic.
   typed `Outcome`, and task-specific interface/dialogue/inventory requirements
   travel as immutable constraints that can narrow but never weaken engine
   safety invariants.
-- **D010 — Definition binding:** all proven Lumbridge facts live in exactly one
-  immutable built-in definition. One minimal validated profile selects it; one
-  separate bounded runtime configuration owns machine/session limits. The
-  definition supplies facts to the explicit FSM and never interprets its
-  transitions.
+- **D010 — Definition binding:** versioned OSRS facts live in immutable
+  task/site definitions selected by a strict validated profile; one separate
+  bounded runtime configuration owns machine/session limits. Definitions supply
+  facts and bounded task policy to an explicit FSM and never interpret their
+  own transitions.
 - **D011 — Input ownership and proof:** gameplay and login retain different
   fresh validators but submit typed intents to one `InputCoordinator`. The
   Arduino transport is private; a receipt is successful only with ordered
@@ -288,8 +292,9 @@ runtime logic.
   changed-geometry evidence proves overshoot and may not repeat an unchanged-
   pose pitch limit. Materially unsatisfied zoom that cannot be framed safely is
   typed `zoom_required_but_unavailable` and sends no compensating key. The
-  current protocol adapter injects a 250 ms maximum; current firmware `CAPS`
-  reports hold-key support but does not numerically advertise that maximum.
+  protocol adapter at that historical v1 milestone injected a 250 ms maximum;
+  the then-installed firmware `CAPS` reported hold-key support but did not
+  numerically advertise that maximum.
 - **D041 - Bounded scene queries are explicitly anchored facts:** every scene
   census uses either a validated task-neutral world anchor or the authoritative
   player anchor. Radius and row/projection budgets bound work; they do not
@@ -331,6 +336,32 @@ runtime logic.
   `ENDPOINT_BACKPRESSURE` retry lane. Live evidence writes through one bounded
   asynchronous queue and reports high-water, drops, errors, and writer shutdown
   instead of stalling EngineFrame publication.
+- **D047 - One capability-negotiated gathering platform:** the active catalog
+  selects woodcutting or copper mining through the same `GatherBankTask`,
+  `TaskRuntime`, `SafetyGate`, `InputCoordinator`, Arduino, `Verifier`, and
+  `EngineFrame`. Definitions declare typed capabilities and are rejected when
+  the one runtime cannot satisfy them. Equipment is a core same-frame fact;
+  scheduled starts, OR-composed stop goals, lower run caps, fresh restart
+  reconciliation, and task-owned recovery are explicit contracts. Fallback
+  banks, withdrawal/resupply, automatic equipment management, production NPC
+  interaction, combat, and quest orchestration remain unsupported rather than
+  partially implemented.
+- **D048 - Dynamic provenance handoff is retry evidence, never task input:** an
+  admitted snapshot can straddle the immutable SensorFrame and request-time
+  query lanes. Only a planned fetch can type the exact fresh/coherent `WARN`
+  envelope: the census is absent with `world_model_provenance_mismatch`; the
+  duplicated interaction envelope and `menuFresh` flag agree; and requested
+  tile projections are either complete, mirrored, and request-bound or absent
+  with the exact `tile_projection_provenance_mismatch` companion pair. The
+  optional interaction handoff likewise requires its exact missing/warning
+  pair and `menuFresh=false`. This lane is separate from HTTP admission
+  backpressure, spends no observation or additional action attempt, never
+  repeats a sent action, and permits at most eight lane events before the next
+  accepted planned Observation; the ninth terminates, subject to the existing
+  deadlines.
+  Diagnostic `fetch()` retains the non-loaded `WARN`. Any partial census,
+  extra warning/capability, stale core, contradictory or unrequested dynamic
+  envelope, or malformed shape remains terminal.
 
 ## Phases and acceptance
 
@@ -348,6 +379,7 @@ runtime logic.
 | 9. Operator GUI | Base GUI complete; lifecycle truth implemented, production recheck blocked (this checkpoint) | `run.cmd gui`; real catalog/profile; Observe/Live/Pause/Resume/Safe Stop; current/historical/terminal EngineFrame presentation; stale/disconnected Start Live gate; identity-bound reconnect; passive overlay geometry clearing; demonstration and diagnostics. |
 | 10. Movement and targeting quality | In progress; pointer containment deterministic and bounded Arduino-only live gates **PASS** | Polyline route lookahead, classified mandatory points, proactive yaw/pitch framing, authoritative polygon aim candidates, seeded pointer/timing variation, padded pointer containment, one bounded recovery/fresh retry, EngineFrame/overlay diagnostics, focused tests, live route/Tree/cycle proof, full gate, commit, and clean worktree. The pointer submilestone is complete; broader route/Tree/cycle and clean-worktree acceptance remain. |
 | 11. Telemetry, observation, and decision-pipeline reliability | Integrated deterministic/full and production-soak gates **PASS**; current-build live timing remains a documented gap | Explicit anchors and per-request budgets; 10,000-row raw census versus 64-row return/enrichment ceiling; cache budget enforcement; request/response provenance binding; bounded typed backpressure; truthful priority absence; asynchronous bounded live recorder; repeatable soak command. The production `8893` endpoint was unavailable, so no synthetic-to-live after comparison is claimed. |
+| 12. Task-agnostic gathering platform | Complete on the feature branch; deterministic/full gates and bounded current-build component proof **PASS** | One capability-negotiated `GatherBankTask`; woodcut and copper definitions; equipment truth; schedules, OR-composed stop conditions and lower run caps; fresh restart reconciliation and task-owned recovery; strict authoring CLI/examples; adversarial tests and measurements; exact planned-handoff retries; one verified Arduino camera hold with complete cleanup; truthful no-cycle/no-mining limitation; checkpoint commits and stacked draft PR. |
 | Final regression | Complete (`000a886`) | Displaced login/gameplay recovery, direct delayed-MOVE settlement, a complete current-checkpoint bank-and-return cycle, manual-cursor resampling, a user-performed `Walk here` demo, public artifact inspection, and post-demo cleanup are **PASS** at the retained layout. |
 
 ## Phase 0 completed work
@@ -888,11 +920,18 @@ runtime logic.
   listeners 8893/8890, OSRS Python workers, repository Java processes, and the
   Arduino lease were all then confirmed absent.
 
-## Prohibited during this mission
+## Current task-platform prohibitions
 
-- A second gameplay task or site, multiple woodcut areas, a generic navigation
-  framework, planner, behavior tree, task DSL, knowledge fabric, automatic
+- A task-specific parallel runtime, safety gate, input owner, verifier,
+  observation adapter, or diagnostic frame; a generic navigation framework,
+  planner, behavior tree, executable task DSL, knowledge fabric, automatic
   learning, or raw demonstration replay.
+- Treating fallback banks, bank withdrawal/resupply, automatic equipment
+  management, or NPC interaction geometry as supported; adding fishing until
+  production NPC observation/geometry/safety exists.
+- Claiming the authored Lumbridge Swamp surface route is live-proven before a
+  current loaded-scene rehearsal, or treating historical woodcut evidence as
+  current mining proof.
 - YOLO/model dependencies, runtime LLM control, MCP, a second telemetry
   endpoint, GUI-owned runtime/domain logic, dynamic plugin/profile frameworks,
   compatibility layers for deleted architecture, or broad unrelated plugin
@@ -920,8 +959,11 @@ runtime logic.
 - The later RuneLite GPU errors and Gradle-wrapper PID `500` native-memory
   failure are launch-stack stability limitations, not engine/input cleanup
   failures. Their error and replay logs remain in the ignored proof directory.
-- There is intentionally no external/profile file loader or second definition;
-  the one validated in-code default is the only supported choice.
+- The application catalog now has two built-in gathering definitions. The
+  strict external JSON boundary validates and inspects immutable definitions. A
+  runnable gathering file may be supplied explicitly to the foreground facade
+  for dry-run or opt-in execution through the same runtime, but it is not
+  installed or advertised in the built-in GUI/catalog.
 - The demonstration path intentionally cannot observe global raw mouse-button
   or keyboard transitions; it records RuneLite semantic click evidence and
   declares those coverage gaps in every manifest.
@@ -1001,15 +1043,12 @@ waits for a fresh authoritative final geometry after the episode reaches ready.
 One coarse correction plus at most one fine correction is the default and hard
 configured camera budget for this milestone. Hold duration scales with wrap-safe
 world-bearing and fresh screen error using a bounded response model retained from
-verified camera receipts. The injected `CameraKeyCapabilities` maximum clamps
-every request to the current protocol's 250 ms. This is deliberately not
-documented as a numeric firmware negotiation: current `CAPS` text advertises
-`holdKeys=1` but contains no maximum-hold value. Fresh capability negotiation can
-replace that adapter-provided value later without changing controller ownership.
-The controller itself therefore needs no redesign, but the present
-`CameraConstraint`, typed key intent, and Arduino transport still fail closed at
-250 ms; a later firmware/protocol milestone must raise those downstream bounds
-atomically with the newly negotiated capability.
+verified camera receipts. The injected `CameraKeyCapabilities` maximum clamped
+every request in that historical v1 milestone to 250 ms. This was deliberately
+not documented as a numeric firmware negotiation: the v1 `CAPS` text advertised
+`holdKeys=1` but contained no maximum-hold value. The later v2 milestone replaced
+that adapter-provided limit with exact capability negotiation without changing
+controller ownership; installed v2 now advertises the camera-only 600 ms maximum.
 
 The retained 79-camera-action trace is now a deterministic replay fixture. It
 reproduces camera bursts of `2,2,10,12,2,27,2,1,21`, 36 yaw reversals of which 31
@@ -1058,11 +1097,12 @@ in `environment_cleanup.json`. The disconnect split the camera episode and
 interaction across two `EngineApplication` runs, so the required one
 uninterrupted loaded-scene run is not claimed.
 
-The live 250 ms maximum moved 1,109 yaw units but left 5,035 world-bearing units;
-the 80 ms fine hold moved 479 units and reached safe usable framing. Together
-with the retained replay, this shows the current cap materially constrains large
-otherwise-correct coarse turns even though a safe fine-framed interaction was
-reached here. No firmware, `InputCoordinator`, wheel, middle-drag, chord, raw
+The historical v1 live 250 ms maximum moved 1,109 yaw units but left 5,035
+world-bearing units; the 80 ms fine hold moved 479 units and reached safe usable
+framing. Together with the retained replay, this showed that then-current cap
+materially constrained large otherwise-correct coarse turns even though a safe
+fine-framed interaction was reached here. No firmware, `InputCoordinator`,
+wheel, middle-drag, chord, raw
 key-down/up, software-input, or alternate input path changed.
 
 ## Phase 11 telemetry, observation, and decision-pipeline reliability
@@ -1132,3 +1172,59 @@ Python tests with the documented test-only sandbox ACL harness, 127/127 forced-
 fresh Java tests, replay 7/7, compilation 79/79, firmware protocol 8/8, focused
 input regressions 201/201, and a fresh bounded soak PASS. This adds no live or
 hardware evidence; the production `8893` timing gap remains.
+
+## Phase 12 task-agnostic gathering platform
+
+This completed feature-branch milestone establishes:
+
+- one `gather_bank` catalog task and one `GatherBankTask` implementation used by
+  both built-in definitions;
+- the preserved `lumbridge_west_trees_v1` regression definition and new
+  `lumbridge_swamp_copper_v1` definition;
+- typed task/capability, area/resource/bank, inventory/equipment, target,
+  lifecycle, recovery, and navigation policies with fail-closed capability
+  binding;
+- equipment as a same-frame core Observation fact, with unknown legacy evidence
+  unable to authorize a tool requirement;
+- scheduled UTC start, OR-composed cycle/item/inventory/duration/absolute-time
+  stops, a lower profile action cap, lifecycle diagnostics, and fresh restart
+  reconciliation;
+- definition-owned bounded no-yield, bank-unavailable, and target-continuity
+  recovery rather than runtime string matching;
+- typed task-owned verification recovery disposition, exact verifier item
+  deltas feeding task/EngineFrame counters, and bounded reset-or-block bank-
+  unavailable recovery as the three adjacent hardening improvements;
+  and
+- strict `osrs_bot.task_definition.v1` validation, explanation, inspection,
+  non-runnable scaffolding, two runnable built-in examples, one deliberately
+  unsupported NPC-fishing example, and explicit `--definition-file` binding to
+  schema/validation/dry-run/execute without catalog installation.
+
+The retained final gate passes the full Python suite, explicit application/GUI
+compatibility, both replay families, current-source compilation, forced-fresh
+Java, firmware protocol, capability/transport, InputCoordinator/static input
+boundary, and Java fixture checks. The exact public `run.cmd test` gate also
+exits zero. Authoring examples, synthetic measurements, publication hygiene,
+architecture/docs audit, and `git diff --check` pass; generated proof remains
+outside Git. Logical checkpoint commits, the pushed branch, and stacked draft
+PR carry this completed milestone. Exact counts and measured tails are retained
+in `docs/ENGINE_STATUS.md` and the external proof bundle.
+
+The copper object/item/equipment IDs and Lumbridge Swamp East anchor are pinned
+to upstream RuneLite source hashes in the definition. The swamp surface route
+is authored, not live-proven. At phase start no RuneLite/Java/Python client or
+telemetry listener was present and the read-only observe attempt failed before
+input. The follow-up current-build continuation later proved a loaded, fresh,
+coherent woodcut scene; 500 exact planned route fetches produced 469 ordinary
+observations, 25 typed world-only handoffs, 6 typed requested-tile-plus-world
+handoffs, and no schema failure. One production `CAMERA_HOLD left 327` action
+was acknowledged and verified from yaw `10757 -> 9213`; the configured one-
+action cap stopped the proposed walk before a second activation. Final
+`STOP_ALL`, `DISARM`, and `STATUS` were acknowledged, firmware was disarmed with
+zero held input, all command-error counts were zero, the ledger/backend closed,
+and COM6 was released. Firmware v2 was already installed; no flash occurred in
+this continuation. This is a component proof, not a copper-route, ordinary
+interaction, bank, or complete woodcut-cycle claim.
+
+See `docs/TASK_PLATFORM.md` and `docs/DEFINITIONS_AND_PROFILES.md` for the
+governing contract.

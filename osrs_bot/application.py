@@ -11,7 +11,12 @@ from typing import Any, Protocol
 
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .behavior import BehaviorPolicy
-from .definition import LUMBRIDGE_WEST_TREES_V1
+from .definition import (
+    BUILTIN_DEFINITIONS,
+    LUMBRIDGE_WEST_TREES_V1,
+    TaskSiteDefinition,
+    get_builtin_definition,
+)
 from .demonstration import InspectionResult, inspect_demonstration, record_live
 from .demonstration_review import build_demonstration_review
 from .engine_frame import EngineFrame, EngineFramePublisher
@@ -31,7 +36,7 @@ from .operator_services import (
 from .profile import (
     DEFAULT_PROFILE,
     BoundProfile,
-    profile_contract,
+    profile_contract as build_profile_contract,
     validate_profile_values,
 )
 from .runtime import (
@@ -43,15 +48,16 @@ from .runtime import (
     build_runtime,
 )
 from .task import (
-    WOODCUT_BANK_TASK_DISPLAY_NAME,
-    WOODCUT_BANK_TASK_ID,
-    WoodcutBankTask,
+    GATHER_BANK_TASK_DISPLAY_NAME,
+    GATHER_BANK_TASK_ID,
+    GatherBankTask,
 )
 
 
-APPLICATION_SCHEMA = "engine_application.v1"
-CATALOG_SCHEMA = "engine_catalog.v1"
-SUPPORTED_TASK_ID = WOODCUT_BANK_TASK_ID
+APPLICATION_SCHEMA = "engine_application.v2"
+CATALOG_SCHEMA = "engine_catalog.v2"
+SUPPORTED_TASK_ID = GATHER_BANK_TASK_ID
+LEGACY_TASK_IDS = frozenset({"woodcut_bank"})
 
 
 class ApplicationError(RuntimeError):
@@ -95,6 +101,9 @@ class DefinitionDescriptor:
     resource_name: str
     resource_ids: tuple[int, ...]
     bank_name: str
+    capabilities: tuple[str, ...] = ()
+    unsupported_capabilities: tuple[str, ...] = ()
+    required_equipment_item_ids: tuple[int, ...] = ()
     profile_selectable_resource: bool = False
     profile_selectable_bank: bool = False
 
@@ -112,6 +121,9 @@ class DefinitionDescriptor:
                 "name": self.bank_name,
                 "profileSelectable": self.profile_selectable_bank,
             },
+            "capabilities": list(self.capabilities),
+            "unsupportedCapabilities": list(self.unsupported_capabilities),
+            "requiredEquipmentItemIds": list(self.required_equipment_item_ids),
         }
 
 
@@ -153,17 +165,34 @@ class ApplicationOverlaySnapshot:
 
 TASK_DESCRIPTOR = TaskDescriptor(
     SUPPORTED_TASK_ID,
-    WOODCUT_BANK_TASK_DISPLAY_NAME,
-    (LUMBRIDGE_WEST_TREES_V1.definition_id,),
+    GATHER_BANK_TASK_DISPLAY_NAME,
+    tuple(definition.definition_id for definition in BUILTIN_DEFINITIONS),
 )
-DEFINITION_DESCRIPTOR = DefinitionDescriptor(
-    LUMBRIDGE_WEST_TREES_V1.definition_id,
-    LUMBRIDGE_WEST_TREES_V1.display_name,
-    LUMBRIDGE_WEST_TREES_V1.version,
-    LUMBRIDGE_WEST_TREES_V1.resource.selector.name,
-    tuple(sorted(LUMBRIDGE_WEST_TREES_V1.resource.selector.object_ids)),
-    LUMBRIDGE_WEST_TREES_V1.bank.selector.name,
+
+
+def _definition_descriptor(definition: TaskSiteDefinition) -> DefinitionDescriptor:
+    return DefinitionDescriptor(
+        definition.definition_id,
+        definition.display_name,
+        definition.version,
+        definition.resource.selector.name,
+        tuple(sorted(definition.resource.selector.object_ids)),
+        definition.bank.selector.name,
+        capabilities=tuple(sorted(item.value for item in definition.capabilities)),
+        unsupported_capabilities=tuple(
+            sorted(item.value for item in definition.unsupported_capabilities)
+        ),
+        required_equipment_item_ids=tuple(
+            sorted(definition.equipment.required_any_of_item_ids)
+        ),
+    )
+
+
+DEFINITION_DESCRIPTORS = tuple(
+    _definition_descriptor(definition) for definition in BUILTIN_DEFINITIONS
 )
+# Retained name for callers that display the default definition directly.
+DEFINITION_DESCRIPTOR = DEFINITION_DESCRIPTORS[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +212,7 @@ class ApplicationSnapshot:
     started_at: datetime | None
     finished_at: datetime | None
     live_evidence_path: Path | None = None
+    scheduled_start_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -221,6 +251,11 @@ class ApplicationSnapshot:
             "finishedAtUtc": (
                 self.finished_at.isoformat()
                 if self.finished_at is not None
+                else None
+            ),
+            "scheduledStartAtUtc": (
+                self.scheduled_start_at.isoformat()
+                if self.scheduled_start_at is not None
                 else None
             ),
             "liveEvidencePath": (
@@ -286,7 +321,7 @@ def _default_runtime_factory(
     execute: bool,
     control: RuntimeControl,
 ) -> TaskRuntime:
-    task = WoodcutBankTask(
+    task = GatherBankTask(
         binding,
         behavior=BehaviorPolicy(
             configuration.behavior,
@@ -300,6 +335,61 @@ def _default_runtime_factory(
         execute=execute,
         control=control,
     )
+
+
+def _configuration_for_binding(
+    configuration: RuntimeConfig,
+    binding: BoundProfile,
+    *,
+    now: datetime,
+) -> RuntimeConfig:
+    """Derive bounded runtime ceilings from validated lifecycle choices."""
+
+    profile = binding.profile
+    lifecycle = binding.definition.lifecycle
+    scheduled_start = profile.start_at_utc or now
+    schedule_delay = max(0.0, (scheduled_start - now).total_seconds())
+    if schedule_delay > lifecycle.maximum_duration_seconds:
+        raise ApplicationError(
+            "scheduled start exceeds the definition's bounded scheduling horizon"
+        )
+
+    if profile.stop_at_utc is not None:
+        stop_span = max(
+            0.0,
+            (profile.stop_at_utc - max(now, scheduled_start)).total_seconds(),
+        )
+        if stop_span > lifecycle.maximum_duration_seconds:
+            raise ApplicationError(
+                "absolute stop exceeds the definition's bounded run horizon"
+            )
+
+    # Definition and profile limits may only narrow operator/runtime ceilings.
+    # A longer duration goal can be preempted by a stricter runtime cap; it must
+    # never silently enlarge machine/session safety limits.
+    derived_runtime_seconds = min(
+        configuration.max_runtime_seconds,
+        float(lifecycle.maximum_duration_seconds),
+    )
+    derived_verification_seconds = min(
+        configuration.verification_timeout_seconds,
+        derived_runtime_seconds,
+    )
+    action_limits = [configuration.max_actions, lifecycle.maximum_actions]
+    if profile.max_actions is not None:
+        action_limits.append(profile.max_actions)
+    derived_actions = min(action_limits)
+    try:
+        return replace(
+            configuration,
+            max_runtime_seconds=derived_runtime_seconds,
+            max_actions=derived_actions,
+            verification_timeout_seconds=derived_verification_seconds,
+        )
+    except ValueError as error:
+        raise ApplicationError(
+            f"profile lifecycle exceeds runtime hard limits: {error}"
+        ) from error
 
 
 class EngineApplication:
@@ -351,6 +441,7 @@ class EngineApplication:
         self._execute_requested = False
         self._started_at: datetime | None = None
         self._finished_at: datetime | None = None
+        self._scheduled_start_at: datetime | None = None
         self._capture_id: str | None = None
         self._demo_thread: threading.Thread | None = None
         self._demo_stop: threading.Event | None = None
@@ -374,24 +465,56 @@ class EngineApplication:
 
     @staticmethod
     def list_definitions(task_id: str = SUPPORTED_TASK_ID) -> tuple[DefinitionDescriptor, ...]:
-        if task_id != SUPPORTED_TASK_ID:
+        if task_id != SUPPORTED_TASK_ID and task_id not in LEGACY_TASK_IDS:
             raise ApplicationError(f"unsupported task_id: {task_id!r}")
-        return (DEFINITION_DESCRIPTOR,)
+        return DEFINITION_DESCRIPTORS
 
     @staticmethod
     def profile_contract(
         task_id: str = SUPPORTED_TASK_ID,
-        definition_id: str = LUMBRIDGE_WEST_TREES_V1.definition_id,
+        definition_id: str | None = None,
+        *,
+        definition: TaskSiteDefinition | None = None,
     ) -> dict[str, Any]:
-        if task_id != SUPPORTED_TASK_ID:
+        if task_id != SUPPORTED_TASK_ID and task_id not in LEGACY_TASK_IDS:
             raise ApplicationError(f"unsupported task_id: {task_id!r}")
-        if definition_id != LUMBRIDGE_WEST_TREES_V1.definition_id:
-            raise ApplicationError(f"unsupported definition_id: {definition_id!r}")
-        return profile_contract()
+        if definition is not None and not isinstance(definition, TaskSiteDefinition):
+            raise TypeError("definition must be a TaskSiteDefinition or None")
+        if definition is not None:
+            if (
+                definition_id is not None
+                and definition_id != definition.definition_id
+            ):
+                raise ApplicationError(
+                    "definition_id does not match the explicit definition: "
+                    f"{definition_id!r} != {definition.definition_id!r}"
+                )
+            selected_definition = definition
+        else:
+            selected_id = (
+                LUMBRIDGE_WEST_TREES_V1.definition_id
+                if definition_id is None
+                else definition_id
+            )
+            try:
+                selected_definition = get_builtin_definition(selected_id)
+            except (TypeError, ValueError) as error:
+                raise ApplicationError(
+                    f"unsupported definition_id: {selected_id!r}"
+                ) from error
+        return build_profile_contract(
+            selected_definition,
+            allowed_definition_ids=(selected_definition.definition_id,)
+            if definition is not None
+            else None,
+        )
 
     @staticmethod
-    def validate_profile(values: Mapping[str, object]) -> BoundProfile:
-        return validate_profile_values(values)
+    def validate_profile(
+        values: Mapping[str, object],
+        definition: TaskSiteDefinition | None = None,
+    ) -> BoundProfile:
+        return validate_profile_values(values, definition)
 
     @staticmethod
     def catalog() -> dict[str, Any]:
@@ -496,11 +619,32 @@ class EngineApplication:
     def inspect_demonstration(self, path: Path | str) -> InspectionResult:
         return self._demonstration_inspector(path)
 
-    def review_demonstration(self, path: Path | str) -> Mapping[str, object]:
-        """Inspect an artifact and add current-definition review data ephemerally."""
+    def review_demonstration(
+        self,
+        path: Path | str,
+        *,
+        definition_id: str | None = None,
+        definition: TaskSiteDefinition | None = None,
+    ) -> Mapping[str, object]:
+        """Inspect an artifact against one explicit immutable definition."""
+
+        if definition is not None and not isinstance(definition, TaskSiteDefinition):
+            raise TypeError("definition must be TaskSiteDefinition or None")
+        if definition is None:
+            selected_id = definition_id or LUMBRIDGE_WEST_TREES_V1.definition_id
+            try:
+                definition = get_builtin_definition(selected_id)
+            except (TypeError, ValueError) as error:
+                raise ApplicationError(
+                    f"unsupported definition_id: {selected_id!r}"
+                ) from error
+        elif definition_id is not None and definition_id != definition.definition_id:
+            raise ApplicationError(
+                "definition_id does not match the explicit demonstration definition"
+            )
 
         inspection = self.inspect_demonstration(path)
-        return build_demonstration_review(inspection, LUMBRIDGE_WEST_TREES_V1)
+        return build_demonstration_review(inspection, definition)
 
     def diagnostics(self) -> OperatorDiagnostics:
         return self._operator_services.collect_diagnostics()
@@ -550,13 +694,16 @@ class EngineApplication:
         *,
         task_id: str = SUPPORTED_TASK_ID,
         profile_values: Mapping[str, object] | None = None,
+        definition: TaskSiteDefinition | None = None,
         execute: bool = False,
         live_evidence_root: Path | None = None,
     ) -> ApplicationSnapshot:
-        if task_id != SUPPORTED_TASK_ID:
+        if task_id != SUPPORTED_TASK_ID and task_id not in LEGACY_TASK_IDS:
             raise ApplicationError(f"unsupported task_id: {task_id!r}")
         if not isinstance(execute, bool):
             raise TypeError("execute must be bool")
+        if definition is not None and not isinstance(definition, TaskSiteDefinition):
+            raise TypeError("definition must be a TaskSiteDefinition or None")
         if live_evidence_root is not None and not isinstance(live_evidence_root, Path):
             raise TypeError("live_evidence_root must be Path or None")
         if live_evidence_root is not None and not execute:
@@ -564,17 +711,26 @@ class EngineApplication:
         values = (
             {
                 "profileId": DEFAULT_PROFILE.profile_id,
-                "definitionId": DEFAULT_PROFILE.definition_id,
+                "definitionId": (
+                    DEFAULT_PROFILE.definition_id
+                    if definition is None
+                    else definition.definition_id
+                ),
                 "cycleGoal": DEFAULT_PROFILE.cycle_goal,
             }
             if profile_values is None
             else profile_values
         )
-        binding = validate_profile_values(values)
+        binding = validate_profile_values(values, definition)
+        requested_at = datetime.now(timezone.utc)
         self._configuration.validated_for_mode(execute=execute)
         with self._lock:
             self._require_idle_unlocked()
-            run_configuration = self._configuration
+            run_configuration = _configuration_for_binding(
+                self._configuration,
+                binding,
+                now=requested_at,
+            )
             if run_configuration.behavior.seed is None:
                 run_configuration = replace(
                     run_configuration,
@@ -607,6 +763,7 @@ class EngineApplication:
             self._last_operation = "run"
             self._started_at = datetime.now(timezone.utc)
             self._finished_at = None
+            self._scheduled_start_at = binding.profile.start_at_utc
             connection = self._connection_snapshot
             self._run_process_id = (
                 connection.process_id
@@ -642,6 +799,8 @@ class EngineApplication:
                     self._run_process_id,
                     self._run_session_id,
                     recorder,
+                    control,
+                    binding.profile.start_at_utc,
                 ),
                 name=f"osrs-engine-{run_id}",
                 daemon=False,
@@ -870,10 +1029,30 @@ class EngineApplication:
         expected_process_id: int | None,
         expected_session_id: str | None,
         recorder: LiveRunEvidenceRecorder | None,
+        control: RuntimeControl,
+        scheduled_start_at: datetime | None,
     ) -> None:
         result: RuntimeResult | None = None
         error: str | None = None
         try:
+            while (
+                scheduled_start_at is not None
+                and datetime.now(timezone.utc) < scheduled_start_at
+            ):
+                state = control.snapshot().state
+                if state is RuntimeControlState.SAFE_STOP_REQUESTED:
+                    break
+                if state is RuntimeControlState.PAUSE_REQUESTED:
+                    boundary = control.wait_at_boundary(timeout_seconds=None)
+                    if boundary.safe_stop_requested:
+                        break
+                    continue
+                remaining = (
+                    scheduled_start_at - datetime.now(timezone.utc)
+                ).total_seconds()
+                if remaining <= 0:
+                    break
+                threading.Event().wait(min(0.25, remaining))
             if expected_process_id is not None and expected_session_id is not None:
                 result = runtime.run(
                     execute=execute,
@@ -1094,6 +1273,7 @@ class EngineApplication:
                 if self._live_evidence is not None
                 else None
             ),
+            scheduled_start_at=self._scheduled_start_at,
         )
 
     def _lifecycle_unlocked(
@@ -1114,6 +1294,12 @@ class EngineApplication:
                 return LifecycleState.PAUSE_REQUESTED
             if control_state is RuntimeControlState.SAFE_STOP_REQUESTED:
                 return LifecycleState.SAFE_STOP_REQUESTED
+            if (
+                self._scheduled_start_at is not None
+                and datetime.now(timezone.utc) < self._scheduled_start_at
+                and frame is None
+            ):
+                return LifecycleState.STARTING
             if self._runtime is not None and frame is None:
                 return LifecycleState.STARTING
             return LifecycleState.RUNNING

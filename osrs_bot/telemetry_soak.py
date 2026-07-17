@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Callable
 
 from .configuration import DEFAULT_RUNTIME_CONFIG
+from .definition import (
+    LUMBRIDGE_SWAMP_COPPER_V1,
+    LUMBRIDGE_WEST_TREES_V1,
+    TaskSiteDefinition,
+)
 from .engine_frame import EngineFramePublisher, EngineStage
 from .model import Action, ActionKind, Observation
 from .observability import TimingPhase
@@ -28,7 +33,8 @@ from .observation import (
     parse_observation,
 )
 from .runtime import TaskRuntime
-from .task import WoodcutBankTask
+from .profile import BoundProfile, Profile
+from .task import GatherBankTask
 from .task_contract import Decision, ObservationRequest, TaskSnapshot, TaskStatus
 
 
@@ -293,32 +299,36 @@ def _frame_publication_probe(samples: int) -> dict[str, float | int]:
 def _target_decision_probe(
     observation: Observation,
     samples: int,
+    definition: TaskSiteDefinition = LUMBRIDGE_WEST_TREES_V1,
 ) -> dict[str, object]:
-    task = WoodcutBankTask()
-    supported_ids = task.definition.resource.selector.object_ids
-    target = next(
-        (
-            item
-            for item in observation.nearby_objects
-            if item.object_id in supported_ids
-            and item.name == task.definition.resource.selector.name
-            and item.supports(task.definition.resource.selector.action)
-        ),
-        None,
+    task = GatherBankTask(
+        BoundProfile(
+            Profile(
+                profile_id=f"soak_{definition.definition_id}",
+                definition_id=definition.definition_id,
+                cycle_goal=1,
+            ),
+            definition,
+        )
     )
+    supported_ids = task.definition.resource.selector.object_ids
+    target_source = next(iter(observation.nearby_objects), None)
     irrelevant_source = next(
         (
             item
             for item in observation.nearby_objects
-            if target is not None and item.key != target.key
+            if target_source is not None and item.key != target_source.key
         ),
         None,
     )
-    if target is None or irrelevant_source is None:
+    if target_source is None or irrelevant_source is None:
         raise RuntimeError("fixture must contain one resource and one irrelevant row")
     target = replace(
-        target,
-        key="soak-target:1276:3196:3244:0",
+        target_source,
+        key=f"soak-target:{definition.definition_id}",
+        object_id=min(supported_ids),
+        name=task.definition.resource.selector.name,
+        actions=(task.definition.resource.selector.action,),
         location=task.definition.resource.work_area.anchor,
         distance=1,
         scene_x=49,
@@ -341,7 +351,7 @@ def _target_decision_probe(
     )
     latency = _measure(
         samples,
-        lambda: task._classify_trees(dense_observation),
+        lambda: task._classify_resources(dense_observation),
     )
     metrics = task.last_resource_selection_metrics
     if metrics["scene_objects"] != 1_001:
@@ -349,6 +359,7 @@ def _target_decision_probe(
     if metrics["identity_evaluations"] > 33:
         raise RuntimeError("target decision identity evaluations exceeded the bound")
     return {
+        "definitionId": definition.definition_id,
         "sceneObjects": 1_001,
         "latency": latency,
         "operationCounts": metrics,
@@ -411,7 +422,22 @@ def run_soak(
         "decodeAndParse": decode_and_parse,
         "oversizedRejection": oversized_rejection,
         "engineFramePublication": _frame_publication_probe(samples),
-        "targetDecision1001Rows": _target_decision_probe(observation, samples),
+        "targetDecision1001Rows": _target_decision_probe(
+            observation,
+            samples,
+            LUMBRIDGE_WEST_TREES_V1,
+        ),
+        "targetDecisionByDefinition": {
+            definition.definition_id: _target_decision_probe(
+                observation,
+                samples,
+                definition,
+            )
+            for definition in (
+                LUMBRIDGE_WEST_TREES_V1,
+                LUMBRIDGE_SWAMP_COPPER_V1,
+            )
+        },
         "memory": {
             "rssBytesBefore": rss_before,
             "rssBytesAfter": _rss_bytes(),

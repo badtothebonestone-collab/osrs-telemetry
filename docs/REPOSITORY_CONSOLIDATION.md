@@ -59,11 +59,11 @@ No software mouse or keyboard fallback exists.
 
 | Area | Deterministic or synthetic evidence | Live or hardware evidence | Current state |
 |---|---|---|---|
-| Telemetry and observation | Full Python/Java regression, strict-schema fixtures, replay, adversarial selection, and bounded soak | No current-build loaded-scene timing; endpoint `8893` was absent during consolidation | Production code integrated; live timing gap remains |
-| Task and runtime | Golden full-cycle replay and complete regression | Historical bounded live cycle exists; current broader route/Tree/cycle quality recheck is incomplete | Single supported task is coherent and fail-closed |
-| Target continuity | Capped/incomplete-frame retention and terminal-storm tests | No new consolidation live run | Deterministic gate passes |
-| Input boundary | Architecture scan and Arduino/InputCoordinator regressions | Retained bounded Arduino pointer proof includes acknowledged cleanup | Arduino-only production path; no consolidation input sent |
-| Camera firmware | Source and deterministic protocol tests | Camera-input v2 source has not been flashed; prior camera proof has a disconnect gap | Not production-proven end to end |
+| Telemetry and observation | Full Python/Java regression, strict-schema fixtures, replay, adversarial selection, and bounded soak | Follow-up loaded-scene diagnostic: 500 planned requests, 469 ordinary observations, 31 exact typed handoffs, zero schema failures; no timing distribution | Production code and exact handoff lane live-integrated; distribution gap remains |
+| Task and runtime | Golden full-cycle replay and complete regression | One follow-up camera action verified; broader route/Tree/cycle quality recheck remains incomplete | One gathering runtime is coherent and fail-closed; component proof only |
+| Target continuity | Capped/incomplete-frame retention and terminal-storm tests | Exact world-only and requested-tile-plus-world handoffs observed; no ordinary target activation | Deterministic and handoff gates pass |
+| Input boundary | Architecture scan and Arduino/InputCoordinator regressions | One `CAMERA_HOLD left 327` receipt has changed-pose verification and acknowledged zero-held cleanup | Arduino-only production path live-proven for one camera component |
+| Camera firmware | Source and deterministic protocol tests | Already-installed v2.0.0 negotiated from hardware; one camera hold passed; no flash in the follow-up and wheel remains unproved | Hold capability component-proven, not end-to-end acquisition/interaction |
 | GUI | Facade/controller/presentation/EngineFrame regression | Base GUI has retained live proof; current production-action lifecycle recheck is not complete | Thin operator frontend, no input authority |
 
 Fresh consolidation validation passed 984/984 Python tests, 127/127 forced-
@@ -80,6 +80,13 @@ RuneLite service latency or hardware behavior. Historical live artifacts remain
 useful but do not turn this consolidation into a new live proof. Hardware claims
 require acknowledged Arduino receipts and final safe cleanup, not merely a
 successful software call.
+
+A later task-platform continuation supplies that bounded component receipt: one
+camera hold was acknowledged and verified, all 13 wire commands passed, final
+firmware status was disarmed with zero held input, the ledger/backend closed,
+and COM6 was released. It does not retroactively create a live timing
+distribution or prove the copper route, ordinary interaction, banking, wheel
+polarity, or a complete gathering cycle.
 
 ## Launch, test, and diagnose
 
@@ -117,14 +124,20 @@ remaining phase acceptance work.
   cache-hit, payload, and target-churn timing without sending gameplay input.
 - Complete the broader movement/Tree/bank-cycle quality gate at the retained
   layout; the pointer submilestone alone does not close that phase.
-- Flash and validate camera-input firmware v2 only under a separately approved
-  hardware milestone, then prove acquisition and interaction in one run.
+- Do not reflash the already-installed camera-input v2 firmware without a
+  separately approved hardware milestone. Prove wheel polarity only if a fresh
+  task decision requires it, then prove acquisition and ordinary interaction in
+  one bounded run.
+- Correct the saved-session login pointer correction overshoot before repeating
+  that production login step; operator-only post-auth setup is not gameplay
+  proof.
 - Recheck the GUI production-action lifecycle with exact identity binding and
   acknowledged cleanup.
 - Keep the legacy checkout read-only unless a specific missing behavior is
   demonstrated; do not merge it wholesale into this engine.
 
-The best next milestone is a bounded, query-first current-build live readiness
-run: prove endpoint `8893`, loaded-scene coherence, and diagnostic timing first;
-then, only if those gates pass, execute one Arduino-only cycle with complete
-cleanup evidence.
+The best next milestone is a bounded current-build route interaction run: retain
+the now-proven endpoint/coherence gates, fix the login-pointer weakness first,
+then permit one ordinary Arduino target activation and verification with the
+same complete cleanup evidence. A full cycle remains a later, separately
+bounded claim.

@@ -1,0 +1,766 @@
+{
+  "definition": {
+    "bank": {
+      "anchor": {
+        "plane": 2,
+        "x": 3208,
+        "y": 3221
+      },
+      "bank_id": "lumbridge_castle_bank",
+      "interaction_radius": 6,
+      "priority": 0,
+      "selector": {
+        "action": "Bank",
+        "name": "Bank booth",
+        "object_ids": [
+          18491
+        ]
+      }
+    },
+    "capabilities": [
+      "bank_deposit_all",
+      "camera_acquisition",
+      "composable_stop_conditions",
+      "fixed_route_navigation",
+      "game_object_interaction",
+      "npc_interaction_geometry",
+      "object_route_transitions",
+      "restart_reconciliation",
+      "scheduled_start",
+      "target_continuity"
+    ],
+    "definition_id": "unsupported_npc_fishing_v1",
+    "display_name": "Unsupported boundary: future NPC fishing actor geometry",
+    "equipment": {
+      "allow_inventory_fallback": false,
+      "auto_equip": false,
+      "permitted_item_ids": [],
+      "required_any_of_item_ids": []
+    },
+    "fallback_banks": [],
+    "inventory": {
+      "allowed_item_ids": [
+        1511
+      ],
+      "deposit_item_ids": [
+        1511
+      ],
+      "minimum_free_slots": 1,
+      "require_nonempty_deposit": true,
+      "require_only_allowed_items": true,
+      "require_produced_item_when_full": true,
+      "retain_item_ids": [],
+      "withdrawal_rules": []
+    },
+    "lifecycle": {
+      "maximum_actions": 500,
+      "maximum_cycles": 100,
+      "maximum_duration_seconds": 86400.0,
+      "maximum_item_quantity": 100000,
+      "supported_stop_conditions": [
+        "absolute_time",
+        "cycles",
+        "duration",
+        "inventories_banked",
+        "inventory_full",
+        "item_quantity"
+      ]
+    },
+    "navigation": {
+      "allow_polyline_reconciliation": true,
+      "intent": "fixed_route",
+      "require_mandatory_transitions": true
+    },
+    "provenance": {
+      "baseline_parent": "a843915c68b1c8ab2bcc0661ad467ec7bfa231b1",
+      "description": "A deliberate validation-negative example showing that NPC fishing cannot be authored as a runnable task before production actor geometry exists.",
+      "evidence": [
+        {
+          "path": "_run_proofs/vertical_slice/20260710_152906/trace.jsonl",
+          "proves": "final log gain to a 28-log inventory and bank-route selection",
+          "sha256": "8f9ee6680b1c1b7ff0e27068b252f8ceea2a041bfcba4449fbf2c4250c99d32f"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_161528/trace.jsonl",
+          "proves": "ground-floor staircase transition to plane 1",
+          "sha256": "059a5d6de13619a0f4bc3151f4539f89b5bf56a81dd0cf564cf787148a50f33b"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_163433/trace.jsonl",
+          "proves": "first-floor staircase transition to plane 2",
+          "sha256": "5c3c824c2d80e423bd65dabefcafcd76a857dc66aaf97cc36d291c9fe14d6dd2"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_163648/trace.jsonl",
+          "proves": "exact bank open and verified 28-to-0 log deposit",
+          "sha256": "6268071f25971427cad9be9f319bf6f89e96a7012fa83a698b20ff4105fe6707"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_165547/trace.jsonl",
+          "proves": "verified Escape bank close and return-route start",
+          "sha256": "560dc54a66b0c72f39447e2c76d42eb9bdbcadc69bea636edcd5a3f8745c55c7"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_170631/trace.jsonl",
+          "proves": "bounded return-route continuation",
+          "sha256": "acfa9336e5e278ed0828a076e047efd6acb6445fa2825fd603dfe9362167ebf0"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_170659/trace.jsonl",
+          "proves": "bounded return-route continuation",
+          "sha256": "5b9a32e6f0734eb7e9042137c92fbfa03dec69068be03aaba12a68dea1839906"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_170818/trace.jsonl",
+          "proves": "arrival at the final tree-lane waypoint",
+          "sha256": "acaccd0ced677d42f0f3a1a098b9c28a6b2b569e753152d29886f7b42c681530"
+        },
+        {
+          "path": "_run_proofs/vertical_slice/20260710_170849/trace.jsonl",
+          "proves": "terminal COMPLETE state and acknowledged STOP_ALL/DISARM cleanup",
+          "sha256": "86df453ec2470cb8acf744ea87b7c9f7cabb99309e4846d4397e7177bd7a7f9a"
+        },
+        {
+          "path": "_run_proofs/movement_targeting_quality/20260713T055558.877889Z/run_receipt.json",
+          "proves": "full inventory north of the historical tree anchor, missing route reentry, and acknowledged safe-stop cleanup",
+          "sha256": "4f04d7b784321d51d43c8dc913e3cf48bc4990f5faeab0d155a201f465c0326f"
+        }
+      ],
+      "evidence_date": "2026-07-13",
+      "evidence_kind": "capability-boundary example with a structurally valid game-object donor definition",
+      "fixture_id": "unsupported-npc-fishing-capability-boundary",
+      "fixture_schema": "osrs_bot.golden_cycle.v1",
+      "limitations": "This is not a fishing task and must never run. The ordinary-tree resource and proven route are retained solely so the only validation failure is the explicitly unsupported npc_interaction_geometry capability; no NPC IDs, projections, or interaction safety are invented.",
+      "proof_root": "_run_proofs"
+    },
+    "recovery": {
+      "max_bank_unavailable_frames": 2,
+      "max_resource_no_yield_retries": 1,
+      "max_target_incomplete_frames": 2,
+      "reconcile_on_restart": true
+    },
+    "resource": {
+      "interaction_kind": "game_object",
+      "produced_item_ids": [
+        1511
+      ],
+      "resource_id": "ordinary_tree",
+      "selector": {
+        "action": "Chop down",
+        "name": "Tree",
+        "object_ids": [
+          1276
+        ]
+      },
+      "work_area": {
+        "allowed_planes": [
+          0
+        ],
+        "anchor": {
+          "plane": 0,
+          "x": 3196,
+          "y": 3244
+        },
+        "area_id": "lumbridge_west_tree_area",
+        "radius": 16
+      }
+    },
+    "route_to_bank": {
+      "destination_anchor": {
+        "plane": 2,
+        "x": 3208,
+        "y": 3221
+      },
+      "route_id": "lumbridge_west_trees_to_castle_bank",
+      "start_anchor": {
+        "plane": 0,
+        "x": 3196,
+        "y": 3244
+      },
+      "steps": [
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3244
+          },
+          "step_id": "tree_lane_exit"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3200,
+            "y": 3238
+          },
+          "step_id": "west_approach_bridge"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3237
+          },
+          "step_id": "west_corridor_north"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3234
+          },
+          "step_id": "west_wall_corner"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3231
+          },
+          "step_id": "west_wall_descent_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3198,
+            "y": 3228
+          },
+          "step_id": "west_wall_descent_2"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3225
+          },
+          "step_id": "west_wall_descent_3"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3222
+          },
+          "step_id": "west_wall_descent_4"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3221
+          },
+          "step_id": "west_corridor_south"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3199,
+            "y": 3218
+          },
+          "step_id": "south_corridor_entry"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3202,
+            "y": 3215
+          },
+          "step_id": "south_corridor_west"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3205,
+            "y": 3214
+          },
+          "step_id": "south_corridor_bridge"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3208,
+            "y": 3212
+          },
+          "step_id": "south_corridor_safe"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3205,
+            "y": 3209
+          },
+          "step_id": "south_stairs_approach"
+        },
+        {
+          "action": "Climb-up",
+          "alternate_actions": [
+            "Climb"
+          ],
+          "arrival_radius": 4,
+          "classification": "mandatory_transition",
+          "expected_plane": 1,
+          "kind": "object",
+          "location": {
+            "plane": 0,
+            "x": 3204,
+            "y": 3207
+          },
+          "object_id": 56230,
+          "object_name": "Staircase",
+          "step_id": "ground_floor_stairs_up"
+        },
+        {
+          "action": "Climb-up",
+          "alternate_actions": [
+            "Climb"
+          ],
+          "arrival_radius": 4,
+          "classification": "mandatory_transition",
+          "expected_plane": 2,
+          "kind": "object",
+          "location": {
+            "plane": 1,
+            "x": 3204,
+            "y": 3207
+          },
+          "object_id": 16672,
+          "object_name": "Staircase",
+          "step_id": "first_floor_stairs_up"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3205,
+            "y": 3211
+          },
+          "step_id": "bank_floor_south_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3205,
+            "y": 3215
+          },
+          "step_id": "bank_floor_south_2"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3207,
+            "y": 3218
+          },
+          "step_id": "bank_floor_north"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "arrival_point",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3208,
+            "y": 3221
+          },
+          "step_id": "bank_booth_approach"
+        }
+      ]
+    },
+    "route_to_resource": {
+      "destination_anchor": {
+        "plane": 0,
+        "x": 3196,
+        "y": 3244
+      },
+      "route_id": "lumbridge_castle_bank_to_west_trees",
+      "start_anchor": {
+        "plane": 2,
+        "x": 3208,
+        "y": 3221
+      },
+      "steps": [
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3206,
+            "y": 3222
+          },
+          "step_id": "bank_booth_exit_turn"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3206,
+            "y": 3226
+          },
+          "step_id": "bank_floor_return_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 2,
+            "x": 3206,
+            "y": 3228
+          },
+          "step_id": "bank_floor_return_2"
+        },
+        {
+          "action": "Bottom-floor",
+          "alternate_actions": [
+            "Climb"
+          ],
+          "arrival_radius": 3,
+          "classification": "mandatory_transition",
+          "expected_plane": 0,
+          "kind": "object",
+          "location": {
+            "plane": 2,
+            "x": 3205,
+            "y": 3229
+          },
+          "object_id": 56231,
+          "object_name": "Staircase",
+          "step_id": "bank_floor_bottom"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3210,
+            "y": 3228
+          },
+          "step_id": "ground_corridor_east_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3213,
+            "y": 3228
+          },
+          "step_id": "ground_corridor_east_mid"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3215,
+            "y": 3228
+          },
+          "step_id": "ground_corridor_east_2"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3215,
+            "y": 3225
+          },
+          "step_id": "ground_corridor_south_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3215,
+            "y": 3222
+          },
+          "step_id": "ground_corridor_south_2"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3215,
+            "y": 3219
+          },
+          "step_id": "ground_corridor_south_3"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3213,
+            "y": 3219
+          },
+          "step_id": "ground_corridor_west_mid"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3211,
+            "y": 3219
+          },
+          "step_id": "ground_corridor_west"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3210,
+            "y": 3216
+          },
+          "step_id": "ground_corridor_west_turn"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3207,
+            "y": 3214
+          },
+          "step_id": "ground_corridor_west_2"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3203,
+            "y": 3214
+          },
+          "step_id": "south_corridor_return"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3199,
+            "y": 3218
+          },
+          "step_id": "south_corridor_entry_return"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3221
+          },
+          "step_id": "west_corridor_return_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3225
+          },
+          "step_id": "west_wall_ascent_1"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3198,
+            "y": 3228
+          },
+          "step_id": "west_wall_ascent_2"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3197,
+            "y": 3231
+          },
+          "step_id": "west_wall_ascent_3"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 1,
+          "classification": "mandatory_turn",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3234
+          },
+          "step_id": "west_wall_corner_return"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3237
+          },
+          "step_id": "west_corridor_north_return"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "normal_guidance",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3240
+          },
+          "step_id": "tree_lane_return"
+        },
+        {
+          "action": "Walk here",
+          "arrival_radius": 2,
+          "classification": "arrival_point",
+          "kind": "walk",
+          "location": {
+            "plane": 0,
+            "x": 3196,
+            "y": 3244
+          },
+          "step_id": "west_trees"
+        }
+      ]
+    },
+    "target_policy": {
+      "incomplete_omission_wait_frames": 2,
+      "max_candidates": 64,
+      "max_rejection_evidence": 32,
+      "query_radius_tiles": 4,
+      "selection_mode": "geometry_then_distance"
+    },
+    "task_type": "gathering",
+    "verification": {
+      "action_deadline_ticks": 8,
+      "deposit_expected_quantity": 0,
+      "movement_deadline_ticks": 20,
+      "resource_deadline_ticks": 100,
+      "route_stable_ticks": 4,
+      "transition_dialogue_prompt_contains": "climb",
+      "transition_down_option_contains": "climb down",
+      "transition_up_option_contains": "climb up"
+    },
+    "version": 1
+  },
+  "runnable": true,
+  "schema_version": "osrs_bot.task_definition.v1"
+}

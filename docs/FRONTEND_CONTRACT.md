@@ -12,16 +12,26 @@ daemon.
 
 ## Catalog and profile contract
 
-The catalog contains exactly one task and one definition:
+The built-in catalog contains one task family and two definitions:
 
-- task: `woodcut_bank`;
-- definition: `lumbridge_west_trees_v1`.
+- task: `gather_bank`;
+- definitions: `lumbridge_west_trees_v1` and
+  `lumbridge_swamp_copper_v1`.
 
-The profile schema exposes only:
+The definition-aware profile schema exposes:
 
 - `profileId`: validated lowercase identifier;
-- `definitionId`: exactly `lumbridge_west_trees_v1`;
-- `cycleGoal`: exactly `1`.
+- `definitionId`: a built-in or explicitly supplied validated definition;
+- nullable cycle, item-quantity, inventories-banked, duration, and absolute-
+  time goals;
+- inventory-full completion;
+- optional UTC scheduled start;
+- optional lower action cap; and
+- fresh restart reconciliation choice.
+
+At least one stop condition is required, and multiple conditions use OR
+semantics. Definition lifecycle caps and engine runtime hard caps remain
+authoritative.
 
 `profileMayOverrideEngineInvariants` is always false. Endpoint, auth token,
 Arduino port, polling, and hard runtime bounds remain `RuntimeConfig`, not
@@ -32,13 +42,29 @@ The in-process contract is:
 
 ```python
 app.list_tasks()
-app.list_definitions("woodcut_bank")
-app.profile_contract("woodcut_bank", "lumbridge_west_trees_v1")
+app.list_definitions("gather_bank")
+app.profile_contract("gather_bank", "lumbridge_west_trees_v1")
 app.validate_profile(values)
 ```
 
-There is no discovery, dynamic loader, external profile file, second task, or
-generic task schema.
+There is no discovery service, plugin loader, external profile file, second
+runtime, or generic task language. The strict external definition boundary is
+described below; it always constructs the same immutable model and gathering
+runtime.
+
+The foreground facade may receive one explicit already-decoded definition:
+
+```python
+app.profile_contract("gather_bank", definition.definition_id, definition=definition)
+app.validate_profile(values, definition)
+app.start(profile_values=values, definition=definition, execute=False)
+```
+
+The CLI obtains that value only through the strict authoring loader. The profile
+definition ID must match exactly, `TaskType.GATHERING` and runtime-supported
+capabilities are mandatory, and lifecycle limits are rechecked. The value is
+bound directly for that process and does not mutate `catalog()` or
+`list_definitions()`; the current GUI remains built-in-catalog-only.
 
 ## Run lifecycle
 
@@ -109,10 +135,10 @@ pending or acknowledged; EngineFrame remains engine diagnostic truth.
 
 The additive EngineFrame presentation values now retain exact same-Observation
 game state, loaded-scene/focus/freshness/coherence, player location/plane, and
-immutable inventory. Task-owned evidence additionally retains current route
-step, simultaneous route/cycle progress, and selected target world
-location/distance. The GUI formats these values; it never queries or
-reconstructs them independently.
+immutable inventory/equipment. Task-owned evidence additionally retains current
+route step, simultaneous route/cycle/item/banked metrics, lifecycle and restart-
+reconciliation status, and selected target world location/distance. The GUI
+formats these values; it never queries or reconstructs them independently.
 
 ## Presentation lifecycle
 
@@ -224,12 +250,23 @@ processes can pause one another:
 .\run.cmd app profile-schema
 .\run.cmd app validate-profile
 .\run.cmd app run
+.\run.cmd app run --definition-id lumbridge_swamp_copper_v1 --no-cycle-goal --item-quantity-goal 10
+.\run.cmd app profile-schema --definition-file .\my_task.json
+.\run.cmd app validate-profile --definition-file .\my_task.json
+.\run.cmd app run --definition-file .\my_task.json
 .\run.cmd app run --execute --arduino-port COM6
+.\run.cmd app run --definition-file .\my_task.json --execute --arduino-port COM6
 ```
 
 `app run` stays in the foreground. `Ctrl+C` requests safe stop and waits for the
-runtime to acknowledge it; it does not kill an Arduino transaction. In-process
-pause/resume is proven by the facade API and reserved for the future GUI.
+runtime to acknowledge it; it does not kill an Arduino transaction. The
+implemented GUI consumes the facade's in-process pause/resume API with current
+run IDs and requested-versus-acknowledged state; the foreground CLI exposes
+safe stop rather than a separate pause command.
+With `--definition-file`, the file ID is authoritative; an explicitly repeated
+`--definition-id` must match. Schema/validation/dry-run send no production
+input. Explicit `--execute` retains the normal Arduino-only safety and cleanup
+path and does not install the file in the catalog.
 
 The existing read-only demonstration commands remain:
 
@@ -242,12 +279,15 @@ The existing read-only demonstration commands remain:
 
 The screen consumes these exact contracts:
 
-- **Task dropdown:** values from `list_tasks()`.
-- **Task/site definition dropdown:** definitions filtered by selected task.
-- **Resource/tree and bank/location:** display the selected definition; keep
-  disabled because the current profile schema exposes no choices.
-- **Goals:** show cycle goal `1`; hide or disable duration, target level, item
-  count, and other unsupported goals until a validated profile field exists.
+- **Task/profile summary:** the current GUI displays the default `gather_bank` /
+  `lumbridge_west_trees_v1` binding from the catalog. It does not yet expose a
+  definition or profile editor.
+- **Resource and bank/location:** display the default selected definition.
+  Copper and advanced lifecycle profiles are available through the foreground
+  facade, not a hidden GUI-owned override.
+- **Goals:** the current GUI shows the default one-cycle goal. Expanded
+  schedule/stop/action-cap fields are validated facade contracts but do not
+  become editable widgets until a frontend change explicitly implements them.
 - **Arduino port:** runtime configuration shown only for execute mode.
 - **Start:** revalidate profile and runtime configuration, focus the exact
   RuneLite binding for live mode, require a fresh coherent loaded Observation,

@@ -34,7 +34,11 @@ from .model import (
     VerificationKind,
     VerificationSpec,
 )
-from .observation import ObservationBackpressureError, ObservationClient
+from .observation import (
+    ObservationBackpressureError,
+    ObservationClient,
+    ObservationWorldModelHandoffError,
+)
 from .observability import (
     ObservabilityEvidence,
     TimingEvidence,
@@ -42,7 +46,14 @@ from .observability import (
     WaitState,
     safe_elapsed_millis,
 )
-from .task_contract import Decision, ObservationRequest, Task, TaskSnapshot, TaskStatus
+from .task_contract import (
+    Decision,
+    ObservationRequest,
+    Task,
+    TaskSnapshot,
+    TaskStatus,
+    VerificationDisposition,
+)
 from .verification import (
     VerificationFailureKind,
     VerificationResult,
@@ -54,6 +65,7 @@ from .verification import (
 LIVE_FOCUS_HANDOFF_SECONDS = 60.0
 MAX_CONSECUTIVE_UNSENT_REPLANS = 1
 MAX_CONSECUTIVE_ENDPOINT_BACKPRESSURE = 8
+MAX_CONSECUTIVE_WORLD_MODEL_HANDOFFS = 8
 _PREACTIVATION_COMMANDS = frozenset(
     {"STOP_ALL", "PING", "IDENTIFY", "CAPS", "STATUS", "ARM", "MOVE", "DISARM"}
 )
@@ -593,6 +605,7 @@ class TaskRuntime:
         self._frame_decision: Decision | None = None
         self._frame_execution: ExecutionResult | None = None
         self._frame_verification: VerificationResult | None = None
+        self._frame_verification_disposition: VerificationDisposition | None = None
         self._frame_pending: VerificationSpec | None = None
         self._frame_publish_error: str | None = None
         self._frame_stage = EngineStage.STARTING
@@ -664,6 +677,7 @@ class TaskRuntime:
         last_decision: Decision | None = None
         consecutive_unsent_replans = 0
         consecutive_endpoint_backpressure = 0
+        consecutive_world_model_handoffs = 0
         cursor_recovery_used = False
         cursor_retry_pending = False
         run_identity: tuple[int, str] | None = (
@@ -742,6 +756,28 @@ class TaskRuntime:
                 )
             try:
                 observation = self._fetch()
+            except ObservationWorldModelHandoffError:
+                consecutive_world_model_handoffs += 1
+                if (
+                    consecutive_world_model_handoffs
+                    > MAX_CONSECUTIVE_WORLD_MODEL_HANDOFFS
+                ):
+                    return self._result(
+                        "ERROR",
+                        "planned observation remained in a world-model "
+                        "provenance handoff beyond the bounded "
+                        f"{MAX_CONSECUTIVE_WORLD_MODEL_HANDOFFS}-retry budget",
+                        observations,
+                        actions,
+                        last_tick,
+                        last_decision,
+                    )
+                self._set_wait_state(
+                    WaitState.WAITING_FOR_SOURCE_COHERENCE,
+                    timing_phase=TimingPhase.SOURCE_COHERENCE_FRESHNESS_WAIT,
+                )
+                self._sleep(self._poll_seconds)
+                continue
             except ObservationBackpressureError:
                 consecutive_endpoint_backpressure += 1
                 if (
@@ -773,6 +809,7 @@ class TaskRuntime:
                     last_decision,
                 )
             consecutive_endpoint_backpressure = 0
+            consecutive_world_model_handoffs = 0
             self._set_wait_state(None, publish=False)
             observations += 1
             last_tick = observation.tick
@@ -1283,6 +1320,40 @@ class TaskRuntime:
                 self._sleep(self._poll_seconds)
                 try:
                     candidate = self._fetch()
+                except ObservationWorldModelHandoffError:
+                    consecutive_world_model_handoffs += 1
+                    if (
+                        consecutive_world_model_handoffs
+                        <= MAX_CONSECUTIVE_WORLD_MODEL_HANDOFFS
+                    ):
+                        self._set_wait_state(
+                            WaitState.WAITING_FOR_SOURCE_COHERENCE,
+                            timing_phase=(
+                                TimingPhase.POST_ACTION_FRESH_OBSERVATION_WAIT
+                            ),
+                        )
+                        continue
+                    failure_reason = (
+                        "verification observation remained in a world-model "
+                        "provenance handoff beyond the bounded "
+                        f"{MAX_CONSECUTIVE_WORLD_MODEL_HANDOFFS}-retry budget"
+                    )
+                    transition_error = self._apply_failure(failure_reason)
+                    reason = failure_reason
+                    if transition_error is not None:
+                        reason += (
+                            "; task failure transition failed: "
+                            f"{transition_error}"
+                        )
+                    return self._result(
+                        "BLOCKED",
+                        reason,
+                        observations,
+                        actions,
+                        last_tick,
+                        decision,
+                        execution,
+                    )
                 except ObservationBackpressureError:
                     consecutive_endpoint_backpressure += 1
                     if (
@@ -1335,6 +1406,7 @@ class TaskRuntime:
                         execution,
                     )
                 consecutive_endpoint_backpressure = 0
+                consecutive_world_model_handoffs = 0
                 observations += 1
                 last_tick = candidate.tick
                 self._update_statistics(
@@ -1428,7 +1500,8 @@ class TaskRuntime:
                     )
 
                 try:
-                    self._task.apply_verification(result)
+                    disposition = self._task.apply_verification(result)
+                    self._frame_verification_disposition = disposition
                 except Exception as error:
                     return self._result(
                         "ERROR",
@@ -1475,19 +1548,8 @@ class TaskRuntime:
                             execution,
                             task_snapshot=post_verification_snapshot,
                         )
-                    recoverable_failure = (
-                        result.failure_kind
-                        is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
-                        or (
-                            result.failure_kind
-                            is VerificationFailureKind.CONDITION_UNMET_AT_DEADLINE
-                            and verification.kind
-                            is VerificationKind.CAMERA_POSE_CHANGED
-                            and verification.camera_key in {"up", "down"}
-                        )
-                    )
                     if (
-                        recoverable_failure
+                        disposition is VerificationDisposition.RECOVERED
                         and post_verification_snapshot.status
                         is TaskStatus.RUNNING
                     ):
@@ -1574,6 +1636,7 @@ class TaskRuntime:
         self._frame_decision = None
         self._frame_execution = None
         self._frame_verification = None
+        self._frame_verification_disposition = None
         self._frame_pending = None
         self._frame_publish_error = None
         self._frame_stage = EngineStage.STARTING
@@ -1621,6 +1684,7 @@ class TaskRuntime:
                 safety_checks=checks,
                 pending_verification=self._frame_pending,
                 last_verification=self._frame_verification,
+                verification_disposition=self._frame_verification_disposition,
                 last_execution_status=(
                     execution.status if execution is not None else None
                 ),
@@ -1743,7 +1807,7 @@ class TaskRuntime:
             failure_kind=VerificationFailureKind.RUNTIME_FAILURE,
         )
         try:
-            self._task.apply_verification(result)
+            self._frame_verification_disposition = self._task.apply_verification(result)
         except Exception as error:
             return f"{type(error).__name__}: {error}"
         self._frame_verification = result

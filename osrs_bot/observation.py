@@ -12,20 +12,21 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-from .model import CAMERA_YAW_UNITS, DialogueOption, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
+from .contract_limits import MAX_PRIORITY_OBJECT_IDS
+from .model import CAMERA_YAW_UNITS, DialogueOption, EquipmentObservation, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
 from .model import ObservationPipelineEvidence, PlayerObservation, SceneCensusEvidence, SceneIndex, ScreenBounds, ScreenPoint, TargetGeometry, WidgetObservation, WidgetTarget, WorldPoint
 
 RESPONSE_SCHEMA = "plugin_snapshot_response.v2"
 SENSOR_FRAME_SCHEMA = "sensor_frame.v1"
 MAX_SOURCE_AGE_MILLIS = 2_000
 MAX_TILE_PROJECTIONS = 16
-MAX_PRIORITY_OBJECT_IDS = 32
 MAX_PRIORITY_OBJECT_KEY_LENGTH = 256
 MAX_SNAPSHOT_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_ERROR_RESPONSE_BYTES = 64 * 1024
 MAX_SCENE_OBJECT_ROWS = 64
 MAX_MENU_ENTRY_ROWS = 16
 MAX_INVENTORY_ITEM_ROWS = 28
+MAX_EQUIPMENT_ITEM_ROWS = 32
 MAX_DIALOGUE_OPTION_ROWS = 16
 CORE_FACT_NEEDS = ("baseline", "inventory", "activity", "bank_ui", "dialogue_state")
 CANONICAL_NEEDS = ("baseline", "inventory", "activity", "interaction_hot",
@@ -57,6 +58,19 @@ class ObservationBackpressureError(ObservationTransportError):
 
 class ObservationDecodeError(ObservationError): pass
 class ObservationSchemaError(ObservationError): pass
+
+
+class ObservationWorldModelHandoffError(ObservationError):
+    """A bounded retry signal for one exact dynamic-provenance handoff."""
+
+    error_code = "world_model_provenance_mismatch"
+    retryable = True
+
+    def __init__(self, missing_capabilities: tuple[str, ...]) -> None:
+        self.missing_capabilities = missing_capabilities
+        super().__init__(
+            "planned snapshot crossed a transient world-model provenance handoff"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +734,78 @@ def _inventory(payloads: Mapping[str, Any]) -> InventoryObservation:
     if known and (occupied + free != slot_count or len(unique_slots) != occupied):
         raise ObservationSchemaError("known inventory items and slot counts disagree")
     return InventoryObservation(tuple(sorted(items, key=lambda item: item.slot)), slot_count, occupied, free, known)
+
+
+def _equipment(payloads: Mapping[str, Any]) -> EquipmentObservation:
+    outer = _payload(payloads, "inventory")
+    raw = _mapping(
+        outer.get("equipment"),
+        "payloads.inventory.equipment",
+        optional=True,
+    )
+    if not raw:
+        return EquipmentObservation()
+    slot_count = _integer(raw.get("slotCount", 14), "equipment.slotCount")
+    if not 0 < slot_count <= MAX_EQUIPMENT_ITEM_ROWS:
+        raise ObservationSchemaError(
+            f"equipment.slotCount must be between 1 and {MAX_EQUIPMENT_ITEM_ROWS}"
+        )
+    items_value = _bounded_list(
+        raw.get("items", []), "equipment.items", MAX_EQUIPMENT_ITEM_ROWS
+    )
+    items: list[InventoryItem] = []
+    for index, value in enumerate(items_value):
+        item = _mapping(value, f"equipment.items[{index}]")
+        slot = _integer(item.get("slot"), f"equipment.items[{index}].slot")
+        item_id = _integer(
+            item.get("itemId"), f"equipment.items[{index}].itemId"
+        )
+        quantity = _integer(
+            item.get("quantity"), f"equipment.items[{index}].quantity"
+        )
+        name = item.get("name")
+        if (
+            not 0 <= slot < slot_count
+            or item_id <= 0
+            or quantity <= 0
+            or (name is not None and not isinstance(name, str))
+        ):
+            raise ObservationSchemaError(
+                f"equipment.items[{index}] has invalid values"
+            )
+        items.append(InventoryItem(slot, item_id, quantity, name))
+    unique_slots = {item.slot for item in items}
+    if len(unique_slots) != len(items):
+        raise ObservationSchemaError("equipment contains duplicate slots")
+    occupied = _integer(
+        raw.get("occupiedSlots", raw.get("filledSlots", len(unique_slots))),
+        "equipment.occupiedSlots",
+    )
+    free = _integer(
+        raw.get("freeSlots", max(0, slot_count - occupied)),
+        "equipment.freeSlots",
+    )
+    known = _boolean(raw.get("known"), "equipment.known")
+    if min(occupied, free) < 0 or occupied + free > slot_count:
+        raise ObservationSchemaError("equipment slot counts are inconsistent")
+    if known and (
+        occupied + free != slot_count or len(unique_slots) != occupied
+    ):
+        raise ObservationSchemaError(
+            "known equipment items and slot counts disagree"
+        )
+    if not known and (items or occupied):
+        raise ObservationSchemaError(
+            "unknown equipment cannot contain item evidence"
+        )
+    return EquipmentObservation(
+        tuple(sorted(items, key=lambda item: item.slot)),
+        slot_count,
+        occupied,
+        free,
+        known,
+    )
+
 
 def _menu_state(
     payloads: Mapping[str, Any], transform: _CanvasTransform | None
@@ -2004,6 +2090,176 @@ def _validate_planned_response_contract(
         )
 
 
+def _is_complete_planned_tile_projection_payload(
+    payload: Mapping[str, Any],
+    requested_tiles: tuple[tuple[str, WorldPoint], ...],
+) -> bool:
+    """Validate the request-bound identity shape of a successful tile lane."""
+    rows = payload.get("tiles")
+    if (
+        payload.get("schema") != "tile_projection_response.v1"
+        or payload.get("status") not in {"PASS", "WARN"}
+        or not isinstance(rows, list)
+        or len(rows) != len(requested_tiles)
+    ):
+        return False
+    requested = dict(requested_tiles)
+    seen: set[str] = set()
+    row_statuses: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return False
+        label = row.get("label")
+        status = row.get("status")
+        if (
+            row.get("schema") != "tile_projection.v1"
+            or not isinstance(label, str)
+            or label in seen
+            or label not in requested
+            or status not in {"PASS", "WARN"}
+        ):
+            return False
+        point = requested[label]
+        if (
+            row.get("worldX") != point.x
+            or row.get("worldY") != point.y
+            or row.get("plane") != point.plane
+        ):
+            return False
+        seen.add(label)
+        row_statuses.append(status)
+    expected_status = (
+        "PASS" if all(status == "PASS" for status in row_statuses) else "WARN"
+    )
+    return seen == set(requested) and payload.get("status") == expected_status
+
+
+def _is_transient_planned_world_model_handoff(
+    root: Mapping[str, Any],
+    payloads: Mapping[str, Any],
+    observation: Observation,
+    *,
+    requested_tile_projections: tuple[tuple[str, WorldPoint], ...],
+) -> bool:
+    """Recognize only the endpoint's exact non-authoritative handoff shape.
+
+    A snapshot request can straddle a SensorFrame/world-model refresh.  The
+    endpoint then returns its still-coherent core as WARN and deliberately
+    omits the rejected dynamic census.  That response is useful retry evidence,
+    but it is never a planned observation and cannot satisfy the census lock.
+    """
+    raw_missing = root.get("missingCapabilities")
+    raw_warnings = root.get("warnings")
+    if (
+        not isinstance(raw_missing, list)
+        or any(not isinstance(value, str) for value in raw_missing)
+        or not isinstance(raw_warnings, list)
+        or any(not isinstance(value, str) for value in raw_warnings)
+    ):
+        return False
+
+    missing = frozenset(observation.missing_capabilities)
+    warnings = frozenset(observation.warnings)
+    world_missing = frozenset({"scene_object_census"})
+    world_warnings = frozenset({"world_model_provenance_mismatch"})
+    interaction_missing = frozenset({"interaction_hot"})
+    interaction_warnings = frozenset(
+        {"menu_evidence_provenance_mismatch_or_stale"}
+    )
+    tile_missing = frozenset({"tile_projection"})
+    tile_warnings = frozenset({"tile_projection_provenance_mismatch"})
+    combined = "interaction_hot" in missing
+    tile_handoff = "tile_projection" in missing
+    expected_missing = (
+        world_missing
+        | (interaction_missing if combined else frozenset())
+        | (tile_missing if tile_handoff else frozenset())
+    )
+    expected_warnings = (
+        world_warnings
+        | (interaction_warnings if combined else frozenset())
+        | (tile_warnings if tile_handoff else frozenset())
+    )
+
+    if (
+        observation.status != "WARN"
+        or root.get("status") != "WARN"
+        or observation.game_state != "LOGGED_IN"
+        or observation.location is None
+        or observation.tick < 0
+        or not observation.fresh
+        or not observation.cache_wall_clock_fresh
+        or not observation.source_coherent
+        or not observation.scene_playable
+        or not observation.timestamp_not_future
+        or observation.scene_census.metadata_present
+        or "scene_object_census" in payloads
+        or "worldModel" in root
+        or "worldModelQuality" in root
+        or "pipeline" in root
+        or (
+            tile_handoff
+            and (
+                not requested_tile_projections
+                or "tile_projection" in payloads
+                or "tileProjections" in root
+            )
+        )
+        or missing != expected_missing
+        or warnings != expected_warnings
+        or frozenset(raw_missing) != missing
+        or frozenset(raw_warnings) != warnings
+        or len(raw_missing) != len(missing)
+        or len(raw_warnings) != len(warnings)
+    ):
+        return False
+
+    tile_payload = payloads.get("tile_projection")
+    root_tile_payload = root.get("tileProjections")
+    if requested_tile_projections:
+        if tile_handoff:
+            if (
+                "tile_projection" in payloads
+                or "tileProjections" in root
+            ):
+                return False
+        elif not (
+            isinstance(tile_payload, Mapping)
+            and isinstance(root_tile_payload, Mapping)
+            and dict(tile_payload) == dict(root_tile_payload)
+            and _is_complete_planned_tile_projection_payload(
+                tile_payload,
+                requested_tile_projections,
+            )
+        ):
+            return False
+    elif (
+        tile_handoff
+        or "tile_projection" in payloads
+        or "tileProjections" in root
+    ):
+        return False
+
+    interaction = payloads.get("interaction_hot")
+    root_interaction = root.get("clientTickHot")
+    freshness = root.get("freshness")
+    expected_menu_fresh = not combined
+    return bool(
+        isinstance(interaction, Mapping)
+        and isinstance(root_interaction, Mapping)
+        and isinstance(freshness, Mapping)
+        and dict(interaction) == dict(root_interaction)
+        and interaction.get("schema") == "client_tick_hot.v1"
+        and interaction.get("sessionId") == observation.session_id
+        and interaction.get("clientProcessId") == observation.client_process_id
+        and observation.menu_source_tick is not None
+        and observation.menu_source_tick >= 0
+        and observation.menu_timestamp is not None
+        and observation.menu_fresh is expected_menu_fresh
+        and freshness.get("menuFresh") is expected_menu_fresh
+    )
+
+
 def parse_observation(
     value: Mapping[str, Any],
     tile_projections: Iterable[tuple[str, WorldPoint]] | None = None,
@@ -2140,6 +2396,7 @@ def parse_observation(
     )
     menus, menu_client_tick, menu_mouse_point, menu_open, menu_bounds = _menu_state(payloads, transform)
     inventory = _inventory(payloads)
+    equipment = _equipment(payloads)
     widgets = _widgets(payloads, transform)
     nearby_objects, object_evidence = _nearby_objects(
         payloads, transform, location, dict(tiles)
@@ -2159,14 +2416,7 @@ def parse_observation(
         parse_millis=(perf_counter() - parse_started) * 1000.0,
         index_millis=index_millis,
     )
-    if _planned_response_contract is not None:
-        _validate_planned_response_contract(
-            _planned_response_contract,
-            location,
-            scene_census,
-            pipeline,
-        )
-    return Observation(player=player, location=location, plane=location.plane if location else None,
+    observation = Observation(player=player, location=location, plane=location.plane if location else None,
                        inventory=inventory, nearby_objects=nearby_objects,
                        menus=menus, widgets=widgets,
                        canvas_bounds=transform.canvas_bounds if transform else None,
@@ -2194,7 +2444,25 @@ def parse_observation(
                        max_source_age_millis=max_source_age_millis,
                        scene_census=scene_census,
                        pipeline=pipeline,
+                       equipment=equipment,
                        _prebuilt_scene_index=scene_index)
+    if _planned_response_contract is not None:
+        if _is_transient_planned_world_model_handoff(
+            root,
+            payloads,
+            observation,
+            requested_tile_projections=tiles,
+        ):
+            raise ObservationWorldModelHandoffError(
+                observation.missing_capabilities
+            )
+        _validate_planned_response_contract(
+            _planned_response_contract,
+            location,
+            scene_census,
+            pipeline,
+        )
+    return observation
 
 class ObservationClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8893", *, auth_token: str | None = None,

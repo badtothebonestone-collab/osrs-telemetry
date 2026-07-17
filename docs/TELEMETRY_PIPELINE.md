@@ -21,9 +21,29 @@ anchor source, radius, purpose, and exact priority-key/ID set before granting
 coverage or absence authority. A mismatch fails closed instead of allowing
 cross-request evidence to certify a decision. Typed retryable
 `503 endpoint_busy` responses enter the neutral `ENDPOINT_BACKPRESSURE` wait,
-do not spend the observation-error budget, and stop after eight consecutive
-retries. Malformed endpoint JSON returns `400` without leaking endpoint
-admission for the next request.
+do not spend the observation-error budget, and permit up to eight busy-lane
+events before the next accepted planned Observation. The ninth terminates,
+subject to existing deadlines; interleaved provenance-handoff events do not
+reset that independent count. Malformed endpoint JSON returns `400` without leaking
+endpoint admission for the next request.
+
+A separate admitted-request race can cross from the captured SensorFrame to a
+newer request-time query tick or geometry frame. The endpoint preserves the
+coherent core as HTTP 200 `WARN`, omits the provenance-rejected census, and
+reports `world_model_provenance_mismatch`. Planned fetches accept no authority
+from that response. The required world omission may co-occur only with the
+exact interaction pair (`interaction_hot` missing, its provenance warning, and
+`menuFresh=false`) and/or the exact requested-tile pair (`tile_projection`
+missing plus `tile_projection_provenance_mismatch`, with both tile envelopes
+absent). Otherwise interaction evidence must be mirrored and fresh, while
+requested tile evidence must be complete, mirrored, schema-valid, and bound to
+the exact requested labels and locations. Up to eight handoff-lane events may
+occur before the next accepted planned Observation; the ninth terminates,
+subject to the ordinary runtime/verification deadlines. The lane charges no observation or
+additional action attempt, and a post-action retry continues the same pending
+verification without re-execution. Diagnostic `fetch()` retains a non-loaded
+`WARN`. Any partial census, silent requested-tile omission, extra warning or
+capability, contradictory envelope, stale core, or malformed shape is terminal.
 
 Live evidence recording is off the EngineFrame publication path. A bounded
 256-frame queue feeds one daemon writer, records its high-water mark and drops,
@@ -297,8 +317,9 @@ reliability fixes.
 - Explicit world anchors in instanced regions fail closed if they cannot map to
   the loaded scene; instance-aware anchor translation is future work.
 - Endpoint overlap intentionally returns retryable `503 endpoint_busy`; the
-  runtime waits without spending its observation-error budget and stops after
-  eight consecutive backpressure responses rather than accumulating work.
+  runtime waits without spending its observation-error budget. It permits eight
+  events in that independent lane before the next accepted planned Observation
+  and stops on the ninth rather than accumulating work.
 - Raw census hard cap remains 10,000 identities. A hit is explicit incomplete
   evidence and cannot authorize absence or activation.
 - Response return and definition-enrichment work is hard-capped at 64 rows;

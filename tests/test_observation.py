@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from osrs_bot.model import ScreenBounds, ScreenPoint, WorldPoint
+from osrs_bot.model import EquipmentObservation, ScreenBounds, ScreenPoint, WorldPoint
 from osrs_bot.observation import (
     CANONICAL_NEEDS,
     DEMONSTRATION_NEEDS,
@@ -25,6 +25,7 @@ from osrs_bot.observation import (
     ObservationRequestError,
     ObservationTransportError,
     ObservationSchemaError,
+    ObservationWorldModelHandoffError,
     _convex_screen_hull,
     build_snapshot_request,
     parse_observation,
@@ -136,6 +137,66 @@ def add_planned_response_contract(
     return payload
 
 
+def planned_world_model_handoff_payload(
+    *,
+    combined_interaction_handoff: bool = False,
+    combined_tile_handoff: bool = False,
+    successful_tile_projection: bool = False,
+) -> dict:
+    payload = load_fixture()
+    payload["status"] = "WARN"
+    payload["payloads"].pop("scene_object_census")
+    payload.pop("pipeline", None)
+    payload.pop("worldModel", None)
+    payload.pop("worldModelQuality", None)
+    payload["missingCapabilities"] = ["scene_object_census"]
+    payload["warnings"] = ["world_model_provenance_mismatch"]
+    interaction = copy.deepcopy(payload["payloads"]["interaction_hot"])
+    payload["clientTickHot"] = copy.deepcopy(interaction)
+    if combined_interaction_handoff:
+        payload["freshness"]["menuFresh"] = False
+        payload["missingCapabilities"].append("interaction_hot")
+        payload["warnings"].append(
+            "menu_evidence_provenance_mismatch_or_stale"
+        )
+    if successful_tile_projection:
+        frame = payload["sensorFrame"]
+        tile_projection = {
+            "schema": "tile_projection_response.v1",
+            "status": "PASS",
+            "sourceTick": frame["sourceTick"],
+            "capturedAtUtc": frame["completedAtUtc"],
+            "sessionId": frame["sessionId"],
+            "clientProcessId": frame["clientProcessId"],
+            "geometryFrameId": frame["geometryFrameId"],
+            "tiles": [
+                {
+                    "schema": "tile_projection.v1",
+                    "label": "route:next",
+                    "worldX": 3201,
+                    "worldY": 3200,
+                    "plane": 0,
+                    "clientPlane": 0,
+                    "status": "PASS",
+                    "geometryAvailable": False,
+                    "onScreen": False,
+                    "visible": False,
+                    "actionableByCanvas": False,
+                }
+            ],
+        }
+        payload["payloads"]["tile_projection"] = copy.deepcopy(
+            tile_projection
+        )
+        payload["tileProjections"] = copy.deepcopy(tile_projection)
+    if combined_tile_handoff:
+        payload["payloads"].pop("tile_projection", None)
+        payload.pop("tileProjections", None)
+        payload["missingCapabilities"].append("tile_projection")
+        payload["warnings"].append("tile_projection_provenance_mismatch")
+    return payload
+
+
 class FakeResponse:
     def __init__(self, body: bytes) -> None:
         self.body = body
@@ -156,6 +217,88 @@ class FakeResponse:
 
 
 class ObservationParsingTests(unittest.TestCase):
+    def test_equipment_is_typed_immutable_and_legacy_absence_is_unknown(self) -> None:
+        observation = parse_observation(load_fixture())
+
+        self.assertEqual(EquipmentObservation(), observation.equipment)
+        self.assertFalse(observation.equipment.known)
+        self.assertEqual(frozenset(), observation.equipment.item_ids)
+        self.assertEqual(0, observation.equipment.quantity(1265))
+        with self.assertRaises(FrozenInstanceError):
+            observation.equipment.known = True  # type: ignore[misc]
+
+    def test_equipment_is_parsed_from_the_inventory_core_fact(self) -> None:
+        payload = load_fixture()
+        payload["payloads"]["inventory"]["equipment"] = {
+            "slotCount": 14,
+            "known": True,
+            "freeSlots": 12,
+            "occupiedSlots": 2,
+            "items": [
+                {
+                    "slot": 3,
+                    "itemId": 1265,
+                    "quantity": 1,
+                    "name": "Bronze pickaxe",
+                },
+                {
+                    "slot": 5,
+                    "itemId": 1275,
+                    "quantity": 2,
+                    "name": "Rune pickaxe",
+                },
+            ],
+        }
+
+        equipment = parse_observation(payload).equipment
+
+        self.assertTrue(equipment.known)
+        self.assertEqual(14, equipment.slot_count)
+        self.assertEqual(2, equipment.occupied_slots)
+        self.assertEqual(12, equipment.free_slots)
+        self.assertEqual(frozenset({1265, 1275}), equipment.item_ids)
+        self.assertEqual(1, equipment.quantity(1265))
+        self.assertEqual(2, equipment.quantity(1275))
+
+    def test_malformed_equipment_evidence_is_rejected_fail_closed(self) -> None:
+        valid = {
+            "slotCount": 14,
+            "known": True,
+            "freeSlots": 13,
+            "occupiedSlots": 1,
+            "items": [{"slot": 3, "itemId": 1265, "quantity": 1}],
+        }
+        malformed_cases = {
+            "duplicate slots": {
+                **valid,
+                "freeSlots": 12,
+                "occupiedSlots": 2,
+                "items": [
+                    {"slot": 3, "itemId": 1265, "quantity": 1},
+                    {"slot": 3, "itemId": 1275, "quantity": 1},
+                ],
+            },
+            "invalid values": {
+                **valid,
+                "items": [{"slot": 3, "itemId": 0, "quantity": 1}],
+            },
+            "items and slot counts disagree": {
+                **valid,
+                "freeSlots": 12,
+                "occupiedSlots": 2,
+            },
+            "unknown equipment cannot contain item evidence": {
+                **valid,
+                "known": False,
+            },
+        }
+        for expected, equipment in malformed_cases.items():
+            with self.subTest(expected=expected):
+                payload = load_fixture()
+                payload["payloads"]["inventory"]["equipment"] = equipment
+                with self.assertRaisesRegex(ObservationSchemaError, expected):
+                    parse_observation(payload)
+
     def test_text_input_state_is_optional_typed_authoritative_evidence(self) -> None:
         legacy = load_fixture()
         self.assertIsNone(parse_observation(legacy).text_input_active)
@@ -1206,6 +1349,305 @@ class ObservationClientTests(unittest.TestCase):
         self.assertEqual("player", observation.scene_census.anchor_source)
         self.assertEqual(32, observation.scene_census.radius_tiles)
         self.assertEqual("unspecified", observation.pipeline.query_purpose)
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_types_exact_world_model_handoff_for_bounded_retry(
+        self,
+        mocked_open,
+    ) -> None:
+        payload = planned_world_model_handoff_payload()
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+
+        with self.assertRaises(ObservationWorldModelHandoffError) as caught:
+            ObservationClient().fetch_planned(ObservationRequest())
+
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(
+            "world_model_provenance_mismatch",
+            caught.exception.error_code,
+        )
+        self.assertEqual(
+            ("scene_object_census",),
+            caught.exception.missing_capabilities,
+        )
+
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+        diagnostic = ObservationClient().fetch()
+        self.assertEqual("WARN", diagnostic.status)
+        self.assertFalse(diagnostic.loaded_scene)
+        self.assertFalse(diagnostic.scene_census.metadata_present)
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_types_exact_combined_dynamic_handoff(
+        self,
+        mocked_open,
+    ) -> None:
+        payload = planned_world_model_handoff_payload(
+            combined_interaction_handoff=True
+        )
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+
+        with self.assertRaises(ObservationWorldModelHandoffError) as caught:
+            ObservationClient().fetch_planned(ObservationRequest())
+
+        self.assertEqual(
+            ("scene_object_census", "interaction_hot"),
+            caught.exception.missing_capabilities,
+        )
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_rejects_malformed_combined_interaction_handoff(
+        self,
+        mocked_open,
+    ) -> None:
+        cases = {
+            "wrong schema": lambda interaction: interaction.update(
+                schema="other.v1"
+            ),
+            "missing source tick": lambda interaction: interaction.pop(
+                "sourceTick"
+            ),
+            "missing capture timestamp": lambda interaction: interaction.pop(
+                "capturedAtUtc"
+            ),
+        }
+
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                payload = planned_world_model_handoff_payload(
+                    combined_interaction_handoff=True
+                )
+                interaction = payload["payloads"]["interaction_hot"]
+                mutate(interaction)
+                payload["clientTickHot"] = copy.deepcopy(interaction)
+                mocked_open.return_value = FakeResponse(
+                    json.dumps(payload).encode("utf-8")
+                )
+                with self.assertRaisesRegex(
+                    ObservationSchemaError,
+                    "missing scene census contract metadata",
+                ):
+                    ObservationClient().fetch_planned(ObservationRequest())
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_rejects_contradictory_interaction_handoff_pairing(
+        self,
+        mocked_open,
+    ) -> None:
+        cases = {
+            "fresh flag with missing pair": (
+                True,
+                lambda payload: payload["freshness"].update(menuFresh=True),
+            ),
+            "stale flag without missing pair": (
+                False,
+                lambda payload: payload["freshness"].update(menuFresh=False),
+            ),
+            "missing root mirror": (
+                False,
+                lambda payload: payload.pop("clientTickHot"),
+            ),
+            "mismatched root mirror": (
+                False,
+                lambda payload: payload["clientTickHot"].update(
+                    schema="other.v1"
+                ),
+            ),
+        }
+
+        for label, (combined, mutate) in cases.items():
+            with self.subTest(label=label):
+                payload = planned_world_model_handoff_payload(
+                    combined_interaction_handoff=combined
+                )
+                mutate(payload)
+                mocked_open.return_value = FakeResponse(
+                    json.dumps(payload).encode("utf-8")
+                )
+                with self.assertRaisesRegex(
+                    ObservationSchemaError,
+                    "missing scene census contract metadata",
+                ):
+                    ObservationClient().fetch_planned(ObservationRequest())
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_types_exact_combined_tile_and_world_handoff(
+        self,
+        mocked_open,
+    ) -> None:
+        payload = planned_world_model_handoff_payload(
+            combined_tile_handoff=True
+        )
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+        request = ObservationRequest(
+            tile_projections=(("route:next", WorldPoint(3201, 3200, 0)),)
+        )
+
+        with self.assertRaises(ObservationWorldModelHandoffError) as caught:
+            ObservationClient().fetch_planned(request)
+
+        self.assertEqual(
+            ("scene_object_census", "tile_projection"),
+            caught.exception.missing_capabilities,
+        )
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_types_world_handoff_with_successful_requested_tile(
+        self,
+        mocked_open,
+    ) -> None:
+        payload = planned_world_model_handoff_payload(
+            successful_tile_projection=True
+        )
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+        request = ObservationRequest(
+            tile_projections=(("route:next", WorldPoint(3201, 3200, 0)),)
+        )
+
+        with self.assertRaises(ObservationWorldModelHandoffError) as caught:
+            ObservationClient().fetch_planned(request)
+
+        self.assertEqual(
+            ("scene_object_census",),
+            caught.exception.missing_capabilities,
+        )
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_rejects_silent_or_mismatched_tile_envelopes(
+        self,
+        mocked_open,
+    ) -> None:
+        requested = ObservationRequest(
+            tile_projections=(("route:next", WorldPoint(3201, 3200, 0)),)
+        )
+        bad_schema = planned_world_model_handoff_payload(
+            successful_tile_projection=True
+        )
+        bad_schema["payloads"]["tile_projection"]["schema"] = "bad.v1"
+        bad_schema["tileProjections"]["schema"] = "bad.v1"
+        partial_rows = planned_world_model_handoff_payload(
+            successful_tile_projection=True
+        )
+        partial_rows["payloads"]["tile_projection"]["tiles"] = []
+        partial_rows["tileProjections"]["tiles"] = []
+        cases = {
+            "silent requested omission": (
+                planned_world_model_handoff_payload(),
+                requested,
+            ),
+            "unsolicited successful projection": (
+                planned_world_model_handoff_payload(
+                    successful_tile_projection=True
+                ),
+                ObservationRequest(),
+            ),
+            "mismatched root mirror": (
+                planned_world_model_handoff_payload(
+                    successful_tile_projection=True
+                ),
+                requested,
+            ),
+            "malformed mirrored schema": (bad_schema, requested),
+            "partial mirrored rows": (partial_rows, requested),
+        }
+        cases["mismatched root mirror"][0]["tileProjections"]["status"] = "WARN"
+
+        for label, (payload, request) in cases.items():
+            with self.subTest(label=label):
+                mocked_open.return_value = FakeResponse(
+                    json.dumps(payload).encode("utf-8")
+                )
+                with self.assertRaises(ObservationSchemaError):
+                    ObservationClient().fetch_planned(request)
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_rejects_unrequested_or_present_tile_handoff(
+        self,
+        mocked_open,
+    ) -> None:
+        cases = {
+            "unrequested": (
+                ObservationRequest(),
+                lambda payload: None,
+            ),
+            "payload present": (
+                ObservationRequest(
+                    tile_projections=(
+                        ("route:next", WorldPoint(3201, 3200, 0)),
+                    )
+                ),
+                lambda payload: payload["payloads"].update(
+                    tile_projection={}
+                ),
+            ),
+            "root envelope present": (
+                ObservationRequest(
+                    tile_projections=(
+                        ("route:next", WorldPoint(3201, 3200, 0)),
+                    )
+                ),
+                lambda payload: payload.update(tileProjections={}),
+            ),
+        }
+
+        for label, (request, mutate) in cases.items():
+            with self.subTest(label=label):
+                payload = planned_world_model_handoff_payload(
+                    combined_tile_handoff=True
+                )
+                mutate(payload)
+                mocked_open.return_value = FakeResponse(
+                    json.dumps(payload).encode("utf-8")
+                )
+                with self.assertRaisesRegex(
+                    ObservationSchemaError,
+                    "missing scene census contract metadata",
+                ):
+                    ObservationClient().fetch_planned(request)
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_fetch_planned_handoff_near_misses_remain_schema_failures(
+        self,
+        mocked_open,
+    ) -> None:
+        cases = {
+            "missing warning": lambda payload: payload.update(warnings=[]),
+            "extra warning": lambda payload: payload["warnings"].append(
+                "unrelated_warning"
+            ),
+            "extra capability": lambda payload: payload[
+                "missingCapabilities"
+            ].append("actor_census"),
+            "pass status": lambda payload: payload.update(status="PASS"),
+            "duplicate warning": lambda payload: payload["warnings"].append(
+                "world_model_provenance_mismatch"
+            ),
+            "contradictory envelope": lambda payload: payload.update(
+                worldModel={}
+            ),
+            "null contradictory envelope": lambda payload: payload.update(
+                worldModel=None
+            ),
+            "present partial census": lambda payload: payload["payloads"].update(
+                scene_object_census={
+                    "schema": "scene_object_census.v1",
+                    "objects": [],
+                }
+            ),
+        }
+
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                payload = planned_world_model_handoff_payload()
+                mutate(payload)
+                mocked_open.return_value = FakeResponse(
+                    json.dumps(payload).encode("utf-8")
+                )
+                with self.assertRaisesRegex(
+                    ObservationSchemaError,
+                    "missing scene census contract metadata",
+                ):
+                    ObservationClient().fetch_planned(ObservationRequest())
 
     @patch("osrs_bot.observation.urlopen")
     def test_fetch_planned_rejects_census_and_pipeline_shape_mismatch(

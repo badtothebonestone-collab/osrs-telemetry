@@ -17,7 +17,13 @@ from osrs_bot.application import (
     SUPPORTED_TASK_ID,
 )
 from osrs_bot.configuration import RuntimeConfig
-from osrs_bot.definition import LUMBRIDGE_WEST_TREES_V1
+from osrs_bot.definition import (
+    LUMBRIDGE_SWAMP_COPPER_V1,
+    LUMBRIDGE_WEST_TREES_V1,
+    StopConditionKind,
+    TaskCapability,
+    TaskType,
+)
 from osrs_bot.demonstration import InspectionResult
 from osrs_bot.model import (
     Action,
@@ -173,6 +179,7 @@ class _Factory:
         self.runtimes: list[TaskRuntime] = []
         self.controls: list[RuntimeControl] = []
         self.bindings = []
+        self.configurations: list[RuntimeConfig] = []
 
     def __call__(self, _client, binding, configuration, execute, control):
         if execute:
@@ -188,6 +195,7 @@ class _Factory:
         self.runtimes.append(runtime)
         self.controls.append(control)
         self.bindings.append(binding)
+        self.configurations.append(configuration)
         return runtime
 
 
@@ -360,14 +368,17 @@ class EngineApplicationTests(unittest.TestCase):
 
         self.assertEqual(1, len(tasks))
         self.assertEqual(SUPPORTED_TASK_ID, tasks[0].task_id)
-        self.assertEqual((DEFAULT_PROFILE.definition_id,), tasks[0].definition_ids)
-        self.assertEqual(1, len(definitions))
+        self.assertEqual(
+            ("lumbridge_west_trees_v1", "lumbridge_swamp_copper_v1"),
+            tasks[0].definition_ids,
+        )
+        self.assertEqual(2, len(definitions))
         self.assertEqual(DEFAULT_PROFILE.definition_id, definitions[0].definition_id)
         self.assertFalse(definitions[0].profile_selectable_resource)
         self.assertFalse(definitions[0].profile_selectable_bank)
         self.assertIsNot(first, second)
         first["fields"].append({"name": "unsafe"})
-        self.assertEqual(3, len(second["fields"]))
+        self.assertEqual(11, len(second["fields"]))
         self.assertFalse(second["profileMayOverrideEngineInvariants"])
         with self.assertRaises(ApplicationError):
             EngineApplication.list_definitions("unknown")
@@ -378,12 +389,155 @@ class EngineApplicationTests(unittest.TestCase):
         for values in (
             {},
             {**_profile_values(), "freshness": False},
-            {**_profile_values(), "cycleGoal": 2},
+            {**_profile_values(), "cycleGoal": 101},
             {**_profile_values(), "cycleGoal": True},
             {**_profile_values(), "definitionId": "unknown"},
         ):
             with self.subTest(values=values), self.assertRaises((TypeError, ValueError)):
                 EngineApplication.validate_profile(values)
+
+    def test_explicit_external_definition_binds_without_registry_installation(self) -> None:
+        definition = replace(
+            LUMBRIDGE_WEST_TREES_V1,
+            definition_id="operator_tree_route_v1",
+            display_name="Operator tree route",
+        )
+        values = {
+            **_profile_values(),
+            "definitionId": definition.definition_id,
+        }
+
+        contract = EngineApplication.profile_contract(definition=definition)
+        definition_field = next(
+            field
+            for field in contract["fields"]
+            if field["name"] == "definitionId"
+        )
+        self.assertEqual(definition.definition_id, definition_field["default"])
+        self.assertEqual(
+            [definition.definition_id], definition_field["allowedValues"]
+        )
+        no_cycle_definition = replace(
+            definition,
+            lifecycle=replace(
+                definition.lifecycle,
+                supported_stop_conditions=(
+                    definition.lifecycle.supported_stop_conditions
+                    - {StopConditionKind.CYCLES}
+                ),
+            ),
+        )
+        no_cycle_contract = EngineApplication.profile_contract(
+            definition=no_cycle_definition
+        )
+        cycle_field = next(
+            field
+            for field in no_cycle_contract["fields"]
+            if field["name"] == "cycleGoal"
+        )
+        self.assertIsNone(cycle_field["default"])
+        binding = EngineApplication.validate_profile(values, definition)
+        self.assertIs(definition, binding.definition)
+
+        factory = _Factory()
+        application = EngineApplication(
+            client=_LoopClient(),
+            runtime_factory=factory,
+        )
+        started = application.start(
+            profile_values=values,
+            definition=definition,
+        )
+        self.assertIs(definition, factory.bindings[0].definition)
+        application.request_safe_stop(started.active_run_id)
+        application.wait(started.active_run_id, 2.0)
+
+    def test_explicit_definition_fails_closed_on_identity_type_and_capabilities(self) -> None:
+        external = replace(
+            LUMBRIDGE_WEST_TREES_V1,
+            definition_id="operator_tree_route_v1",
+        )
+        with self.assertRaisesRegex(ValueError, "definition_id does not match"):
+            EngineApplication.validate_profile(_profile_values(), external)
+        with self.assertRaisesRegex(ValueError, "only gathering task definitions"):
+            EngineApplication.validate_profile(
+                _profile_values(),
+                replace(LUMBRIDGE_WEST_TREES_V1, task_type=TaskType.COMBAT),
+            )
+        with self.assertRaisesRegex(ValueError, "only gathering task definitions"):
+            EngineApplication.profile_contract(
+                definition=replace(
+                    LUMBRIDGE_WEST_TREES_V1,
+                    task_type=TaskType.QUEST,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported capabilities"):
+            EngineApplication.validate_profile(
+                _profile_values(),
+                replace(
+                    LUMBRIDGE_WEST_TREES_V1,
+                    capabilities=(
+                        LUMBRIDGE_WEST_TREES_V1.capabilities
+                        | {TaskCapability.NPC_INTERACTION_GEOMETRY}
+                    ),
+                ),
+            )
+        with self.assertRaisesRegex(ApplicationError, "does not match"):
+            EngineApplication.profile_contract(
+                definition_id=LUMBRIDGE_WEST_TREES_V1.definition_id,
+                definition=external,
+            )
+
+    def test_lifecycle_profiles_and_definitions_only_narrow_runtime_caps(self) -> None:
+        configured = RuntimeConfig(
+            max_observations=10,
+            max_actions=50,
+            max_runtime_seconds=100.0,
+            verification_timeout_seconds=10.0,
+        )
+        factory = _Factory()
+        application = EngineApplication(
+            configuration=configured,
+            client=_LoopClient(),
+            runtime_factory=factory,
+        )
+        long_profile = {
+            **_profile_values(),
+            "durationSeconds": 300.0,
+            "maxActions": 40,
+        }
+
+        started = application.start(profile_values=long_profile)
+        effective = factory.configurations[0]
+        self.assertEqual(100.0, effective.max_runtime_seconds)
+        self.assertEqual(10, effective.max_observations)
+        self.assertEqual(40, effective.max_actions)
+        self.assertEqual(10.0, effective.verification_timeout_seconds)
+        application.request_safe_stop(started.active_run_id)
+        application.wait(started.active_run_id, 2.0)
+
+        narrow_definition = replace(
+            LUMBRIDGE_WEST_TREES_V1,
+            lifecycle=replace(
+                LUMBRIDGE_WEST_TREES_V1.lifecycle,
+                maximum_duration_seconds=5.0,
+                maximum_actions=3,
+            ),
+        )
+        narrow_factory = _Factory()
+        narrow_application = EngineApplication(
+            configuration=configured,
+            client=_LoopClient(),
+            runtime_factory=narrow_factory,
+        )
+        narrow_started = narrow_application.start(definition=narrow_definition)
+        narrowed = narrow_factory.configurations[0]
+        self.assertEqual(5.0, narrowed.max_runtime_seconds)
+        self.assertEqual(10, narrowed.max_observations)
+        self.assertEqual(3, narrowed.max_actions)
+        self.assertEqual(5.0, narrowed.verification_timeout_seconds)
+        narrow_application.request_safe_stop(narrow_started.active_run_id)
+        narrow_application.wait(narrow_started.active_run_id, 2.0)
 
     def test_default_facade_composes_the_real_task_runtime_and_frame(self) -> None:
         application = EngineApplication(client=_TreeReadyClient())
@@ -768,11 +922,23 @@ class EngineApplicationTests(unittest.TestCase):
         self.assertTrue(review["valid"])
         self.assertEqual("not_compared", review["routeComparison"]["status"])
         self.assertTrue(review["routeComparison"]["reviewOnly"])
+        mining_review = application.review_demonstration(
+            Path("demo_runs") / "artifact",
+            definition_id=LUMBRIDGE_SWAMP_COPPER_V1.definition_id,
+        )
+        self.assertEqual(
+            LUMBRIDGE_SWAMP_COPPER_V1.definition_id,
+            mining_review["routeComparison"]["definitionId"],
+        )
         self.assertEqual("diagnostics", application.diagnostics())
         self.assertEqual("quick", application.run_quick_self_test())
         self.assertEqual("replay", application.run_golden_replay())
         self.assertEqual(
-            [Path("demo_runs") / "artifact", Path("demo_runs") / "artifact"],
+            [
+                Path("demo_runs") / "artifact",
+                Path("demo_runs") / "artifact",
+                Path("demo_runs") / "artifact",
+            ],
             inspected,
         )
         self.assertIn(("recover_session", "COM7"), services.calls)

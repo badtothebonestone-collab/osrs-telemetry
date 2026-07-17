@@ -2909,8 +2909,9 @@ class DemonstrationRecorderTests(unittest.TestCase):
         source = (ROOT / "run.cmd").read_text(encoding="utf-8").lower()
         self.assertIn('if /i "%mode%"=="record-demo" goto record_demo', source)
         self.assertIn('if /i "%mode%"=="inspect-demo" goto inspect_demo', source)
-        self.assertIn("python -m osrs_bot.demonstration record", source)
-        self.assertIn("python -m osrs_bot.demonstration inspect", source)
+        self.assertIn("from osrs_bot.demonstration import main", source)
+        self.assertIn("main(['record', *sys.argv[2:]])", source)
+        self.assertIn("main(['inspect', *sys.argv[2:]])", source)
         recorder_block = source.split(":record_demo", 1)[1].split(":inspect_demo", 1)[0]
         for prohibited in ("--execute", "--arduino-port", "inputcoordinator"):
             self.assertNotIn(prohibited, recorder_block)

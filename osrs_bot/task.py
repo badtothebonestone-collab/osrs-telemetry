@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from enum import Enum
 from heapq import nsmallest
 from math import hypot
@@ -25,6 +26,7 @@ from .definition import (
     FixedRoute,
     FixedRouteStep,
     RoutePointClassification,
+    TargetSelectionMode,
 )
 from .model import (
     Action,
@@ -72,9 +74,11 @@ from .task_contract import (
     TargetingDecisionEvidence,
     TimingDecisionEvidence,
     TargetContinuityEvidence,
+    TaskLifecycleSnapshot,
     TaskProgressSnapshot,
     TaskSnapshot,
     TaskStatus,
+    VerificationDisposition,
 )
 from .verification import (
     OutcomeKind,
@@ -83,15 +87,14 @@ from .verification import (
 )
 
 
-WOODCUT_BANK_TASK_ID = "woodcut_bank"
-WOODCUT_BANK_TASK_DISPLAY_NAME = "Woodcut ordinary Trees and bank one inventory"
+GATHER_BANK_TASK_ID = "gather_bank"
+GATHER_BANK_TASK_DISPLAY_NAME = "Gather resources, bank inventory, and return"
+# Compatibility names remain importable while all production composition uses
+# the generic task identity below.
+WOODCUT_BANK_TASK_ID = GATHER_BANK_TASK_ID
+WOODCUT_BANK_TASK_DISPLAY_NAME = GATHER_BANK_TASK_DISPLAY_NAME
 CAMERA_RECOVERY_HOLD_MILLIS = 250
-RESOURCE_NO_YIELD_MAX_RETRIES = 1
 CAMERA_NON_IMPROVING_CORRECTION_LIMIT = 2
-TARGET_INCOMPLETE_OMISSION_WAIT_FRAMES = 2
-MAX_TARGET_CANDIDATES = 64
-MAX_TARGET_REJECTION_EVIDENCE = 32
-TARGET_QUERY_RADIUS_TILES = 4
 TARGET_QUERY_MAX_OBJECTS = 16
 TARGET_QUERY_MAX_PROJECTION_OBJECTS = 8
 DISCOVERY_QUERY_MAX_OBJECTS = 64
@@ -110,27 +113,38 @@ CAMERA_FRAMING_CLASSIFICATION_RANK = {
 
 
 class TaskPhase(str, Enum):
-    FIND_TREE = "find_tree"
-    CHOP = "chop"
-    VERIFY_LOGS = "verify_logs"
+    # Legacy values are retained as a version-one diagnostic compatibility
+    # view; canonical member names describe the definition-driven FSM.
+    FIND_RESOURCE = "find_tree"
+    INTERACT_RESOURCE = "chop"
+    VERIFY_YIELD = "verify_logs"
     NAVIGATE_TO_BANK = "navigate_to_bank"
     OPEN_BANK = "open_bank"
-    DEPOSIT_LOGS = "deposit_logs"
+    DEPOSIT_ITEMS = "deposit_logs"
     VERIFY_DEPOSIT = "verify_deposit"
     CLOSE_BANK = "close_bank"
-    NAVIGATE_TO_TREES = "navigate_to_trees"
+    NAVIGATE_TO_RESOURCE = "navigate_to_trees"
     STAIR_DIALOGUE = "stair_dialogue"
     COMPLETE = "complete"
     BLOCKED = "blocked"
 
+    FIND_TREE = FIND_RESOURCE
+    CHOP = INTERACT_RESOURCE
+    VERIFY_LOGS = VERIFY_YIELD
+    DEPOSIT_LOGS = DEPOSIT_ITEMS
+    NAVIGATE_TO_TREES = NAVIGATE_TO_RESOURCE
+
 
 @dataclass
 class TaskProgress:
-    phase: TaskPhase = TaskPhase.FIND_TREE
+    phase: TaskPhase = TaskPhase.FIND_RESOURCE
     route_index: int = 0
     target_key: str | None = None
     pending: VerificationSpec | None = None
     cycles_completed: int = 0
+    items_gathered: int = 0
+    inventories_banked: int = 0
+    completion_reason: str | None = None
     failures: list[str] = field(default_factory=list)
     resume_phase: TaskPhase | None = None
     blocked_from_phase: TaskPhase | None = None
@@ -188,8 +202,8 @@ class TargetContinuityLock:
     incomplete_omission_frames: int = 0
     retained_reason: str | None = None
 
-class WoodcutBankTask:
-    """Explicit woodcut/bank FSM bound to one validated task/site profile."""
+class GatherBankTask:
+    """One explicit gathering FSM parameterized only by validated definitions."""
 
     def __init__(
         self,
@@ -200,7 +214,9 @@ class WoodcutBankTask:
         if not isinstance(binding, BoundProfile):
             raise TypeError("binding must be a validated BoundProfile")
         if len(binding.definition.resource.produced_item_ids) != 1:
-            raise ValueError("WoodcutBankTask requires exactly one produced item ID")
+            raise ValueError(
+                "GatherBankTask currently requires exactly one produced item ID"
+            )
         self.binding = binding
         self.definition = binding.definition
         if behavior is not None and not isinstance(behavior, BehaviorPolicy):
@@ -209,7 +225,13 @@ class WoodcutBankTask:
         self._produced_item_id = next(
             iter(binding.definition.resource.produced_item_ids)
         )
+        self._produced_item_ids = binding.definition.resource.produced_item_ids
         self.progress = TaskProgress()
+        self._run_started_at_utc: datetime | None = None
+        self._last_observation_timestamp: datetime | None = None
+        self._initial_observation_reconciled = False
+        self._reconciliation_status = "pending_fresh_observation"
+        self._stop_after_bank_close = False
         self._movement_verified = False
         self._route_settle_location: WorldPoint | None = None
         self._route_settle_since_tick: int | None = None
@@ -231,9 +253,11 @@ class WoodcutBankTask:
         self._pending_camera_zoom_step_id: str | None = None
         self._last_camera_response: CameraResponseSample | None = None
         self._restart_reconciled_without_cycle_credit = False
+        self._skip_initial_route_reconciliation = False
         self._next_resource_suppression: tuple[str, str] | None = None
         self._resource_camera_suppressions: dict[str, int] = {}
         self._resource_no_yield_retries = 0
+        self._bank_unavailable_frames = 0
         self._route_diagnostics_id: str | None = None
         self._last_route_selection: RouteTargetSelection | None = None
         self._last_route_progress: RouteProgress | None = None
@@ -298,7 +322,7 @@ class WoodcutBankTask:
                 priority_object_ids=(locked.object_id,) if locked.object_id > 0 else (),
                 priority_object_keys=(locked.key,),
                 center_world_location=locked.location,
-                radius_tiles=TARGET_QUERY_RADIUS_TILES,
+                radius_tiles=self.definition.target_policy.query_radius_tiles,
                 max_objects=TARGET_QUERY_MAX_OBJECTS,
                 max_projection_objects=TARGET_QUERY_MAX_PROJECTION_OBJECTS,
                 purpose=f"{locked.context}_target_verification",
@@ -322,7 +346,7 @@ class WoodcutBankTask:
             return ObservationRequest(
                 priority_object_ids=priority_ids,
                 center_world_location=self.definition.bank.anchor,
-                radius_tiles=TARGET_QUERY_RADIUS_TILES,
+                radius_tiles=self.definition.target_policy.query_radius_tiles,
                 max_objects=TARGET_QUERY_MAX_OBJECTS,
                 max_projection_objects=TARGET_QUERY_MAX_PROJECTION_OBJECTS,
                 purpose="bank_acquisition",
@@ -343,7 +367,9 @@ class WoodcutBankTask:
                     else self._last_observation_location
                 ),
                 radius_tiles=(
-                    TARGET_QUERY_RADIUS_TILES if exact_transition else 16
+                    self.definition.target_policy.query_radius_tiles
+                    if exact_transition
+                    else 16
                 ),
                 max_objects=(
                     TARGET_QUERY_MAX_OBJECTS
@@ -372,7 +398,11 @@ class WoodcutBankTask:
         return ObservationRequest(
             priority_object_ids=priority_ids,
             center_world_location=center,
-            radius_tiles=TARGET_QUERY_RADIUS_TILES if center is not None else None,
+            radius_tiles=(
+                self.definition.target_policy.query_radius_tiles
+                if center is not None
+                else None
+            ),
             max_objects=0,
             max_projection_objects=0,
             purpose="phase_state_verification",
@@ -429,18 +459,40 @@ class WoodcutBankTask:
         )
         route_step, route_progress = self._route_context_snapshot()
         cycle_progress = self._cycle_progress_snapshot()
+        metrics = self._metric_snapshots()
+        profile = self.binding.profile
         return TaskSnapshot(
-            task_id=WOODCUT_BANK_TASK_ID,
+            task_id=GATHER_BANK_TASK_ID,
             status=status,
             state=self.progress.phase.value,
             blocker=blocker,
             definition_id=self.definition.definition_id,
             profile_id=self.binding.profile.profile_id,
-            progress=route_progress or cycle_progress,
+            progress=route_progress or (metrics[0] if metrics else cycle_progress),
             route_step=route_step,
             route_progress=route_progress,
             cycle_progress=cycle_progress,
             target_continuity=self._target_continuity_snapshot(),
+            metrics=metrics,
+            lifecycle=TaskLifecycleSnapshot(
+                start_at_utc=(
+                    profile.start_at_utc.isoformat()
+                    if profile.start_at_utc is not None
+                    else None
+                ),
+                stop_at_utc=(
+                    profile.stop_at_utc.isoformat()
+                    if profile.stop_at_utc is not None
+                    else None
+                ),
+                run_started_at_utc=(
+                    self._run_started_at_utc.isoformat()
+                    if self._run_started_at_utc is not None
+                    else None
+                ),
+                reconciliation_status=self._reconciliation_status,
+                completion_reason=self.progress.completion_reason,
+            ),
         )
 
     def decide(self, observation: Observation) -> Decision:
@@ -463,6 +515,28 @@ class WoodcutBankTask:
         if observation.location.plane != observation.plane:
             return self._wait(observation, "player plane and location disagree")
         self._last_observation_location = observation.location
+        self._last_observation_timestamp = observation.timestamp
+
+        profile = self.binding.profile
+        if (
+            profile.start_at_utc is not None
+            and observation.timestamp < profile.start_at_utc
+        ):
+            return self._wait(
+                observation,
+                f"scheduled start is {profile.start_at_utc.isoformat()}",
+            )
+        if self._run_started_at_utc is None:
+            self._run_started_at_utc = observation.timestamp
+
+        # A reached stop condition is evaluated before unrelated equipment,
+        # inventory, or camera gates. Pending actions are resolved by the
+        # runtime before decide() is called, and an open bank still transitions
+        # through the explicit verified close path below.
+        lifecycle_decision = self._lifecycle_decision(observation)
+        if lifecycle_decision is not None:
+            return lifecycle_decision
+
         camera_environment_failure = self._camera_episode_environment_failure(
             observation
         )
@@ -485,6 +559,10 @@ class WoodcutBankTask:
         ):
             return self._wait(observation, "inventory is not observable")
 
+        reconciliation_decision = self._reconcile_initial_observation(observation)
+        if reconciliation_decision is not None:
+            return reconciliation_decision
+
         held_ids = {
             item.item_id for item in observation.inventory.items if item.quantity > 0
         }
@@ -497,9 +575,9 @@ class WoodcutBankTask:
             )
 
         if self.progress.phase == TaskPhase.FIND_TREE:
-            return self._find_tree(observation)
+            return self._find_resource(observation)
         if self.progress.phase == TaskPhase.CHOP:
-            return self._chop(observation)
+            return self._interact_resource(observation)
         if self.progress.phase in {TaskPhase.VERIFY_LOGS, TaskPhase.VERIFY_DEPOSIT}:
             return self._block(observation, "verification phase has no pending verification")
         if self.progress.phase == TaskPhase.NAVIGATE_TO_BANK:
@@ -507,7 +585,7 @@ class WoodcutBankTask:
         if self.progress.phase == TaskPhase.OPEN_BANK:
             return self._open_bank(observation)
         if self.progress.phase == TaskPhase.DEPOSIT_LOGS:
-            return self._deposit_logs(observation)
+            return self._deposit_items(observation)
         if self.progress.phase == TaskPhase.CLOSE_BANK:
             return self._close_bank(observation)
         if self.progress.phase == TaskPhase.NAVIGATE_TO_TREES:
@@ -516,7 +594,119 @@ class WoodcutBankTask:
             return self._choose_stair_direction(observation)
         return self._block(observation, "unknown task phase")
 
-    def apply_verification(self, result: VerificationResult) -> None:
+    def _lifecycle_decision(self, observation: Observation) -> Decision | None:
+        profile = self.binding.profile
+        reason: str | None = None
+        if profile.stop_at_utc is not None and observation.timestamp >= profile.stop_at_utc:
+            reason = "profile absolute stop time is complete"
+        elif (
+            profile.duration_seconds is not None
+            and self._run_started_at_utc is not None
+            and (observation.timestamp - self._run_started_at_utc).total_seconds()
+            >= profile.duration_seconds
+        ):
+            reason = "profile duration goal is complete"
+        elif (
+            profile.item_quantity_goal is not None
+            and self.progress.items_gathered >= profile.item_quantity_goal
+        ):
+            reason = "profile item quantity goal is complete"
+        elif (
+            profile.inventories_banked_goal is not None
+            and self.progress.inventories_banked
+            >= profile.inventories_banked_goal
+        ):
+            reason = "profile inventories-banked goal is complete"
+        elif (
+            profile.cycle_goal is not None
+            and self.progress.cycles_completed >= profile.cycle_goal
+        ):
+            reason = "profile cycle goal is complete"
+        elif profile.stop_when_inventory_full and observation.inventory.full:
+            reason = "profile inventory-full goal is complete"
+
+        if reason is None:
+            return None
+        self.progress.completion_reason = reason
+        if (
+            observation.widgets.bank_known
+            and observation.widgets.bank_open
+            and observation.plane == self.definition.bank.anchor.plane
+        ):
+            self._stop_after_bank_close = True
+            self.progress.phase = TaskPhase.CLOSE_BANK
+            return None
+        self.progress.phase = TaskPhase.COMPLETE
+        return self._wait(observation, reason)
+
+    def _equipment_decision(self, observation: Observation) -> Decision | None:
+        policy = self.definition.equipment
+        if not policy.required_any_of_item_ids:
+            return None
+        if not observation.equipment.known:
+            return self._wait(
+                observation,
+                "required equipment is not observable",
+            )
+        available = observation.equipment.item_ids
+        if policy.allow_inventory_fallback and observation.inventory.known:
+            available = available | observation.inventory.item_ids
+        if available.isdisjoint(policy.required_any_of_item_ids):
+            return self._block(
+                observation,
+                "none of the definition's required equipment items is available",
+            )
+        return None
+
+    def _reconcile_initial_observation(
+        self,
+        observation: Observation,
+    ) -> Decision | None:
+        if self._initial_observation_reconciled:
+            return None
+        self._initial_observation_reconciled = True
+        if self.binding.profile.reconcile_on_start:
+            self._reconciliation_status = "fresh_observation_reconciled"
+            work_area = self.definition.resource.work_area
+            if (
+                self._inventory_bank_threshold_reached(observation)
+                and observation.plane in work_area.allowed_planes
+                and observation.location is not None
+                and observation.location.distance_to(work_area.anchor)
+                <= work_area.radius
+            ):
+                # A full inventory present in the first fresh frame predates
+                # this task instance. Complete its safe bank/return path, but
+                # never award a new cycle for that historical progress.
+                self._restart_reconciled_without_cycle_credit = True
+            return None
+
+        work_area = self.definition.resource.work_area
+        clean_start = bool(
+            observation.plane in work_area.allowed_planes
+            and observation.location is not None
+            and observation.location.distance_to(work_area.anchor) <= work_area.radius
+            and not observation.inventory.full
+            and not observation.widgets.bank_open
+            and not observation.widgets.bank_pin_open
+        )
+        if not clean_start:
+            self._reconciliation_status = "disabled_start_state_rejected"
+            return self._block(
+                observation,
+                "restart reconciliation is disabled and the observed start state is not clean",
+            )
+        self._reconciliation_status = "disabled_clean_start_confirmed"
+        # A route can overlap the radial resource area. The disabled policy's
+        # clean-start acceptance must not then be reinterpreted as historical
+        # return-route progress during the same decision.
+        self._skip_initial_route_reconciliation = True
+        return None
+
+    def apply_verification(
+        self,
+        result: VerificationResult,
+    ) -> VerificationDisposition | None:
         """Apply the sole external verifier's result to the pending action."""
         pending = self.progress.pending
         if pending is None:
@@ -560,14 +750,14 @@ class WoodcutBankTask:
                         "unchanged pose proved the pitch limit"
                     )
                 self._pending_camera_step_id = None
-                return
+                return VerificationDisposition.RECOVERED
             if (
                 pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED
                 and self.progress.phase is TaskPhase.VERIFY_LOGS
                 and result.failure_kind
                 is VerificationFailureKind.ITEM_QUANTITY_UNCHANGED_AT_DEADLINE
                 and self._resource_no_yield_retries
-                < RESOURCE_NO_YIELD_MAX_RETRIES
+                < self.definition.recovery.max_resource_no_yield_retries
                 and isinstance(self.progress.target_key, str)
                 and bool(self.progress.target_key)
             ):
@@ -582,7 +772,7 @@ class WoodcutBankTask:
                     self._clear_target_lock(
                         "resource produced no yield and entered bounded suppression"
                     )
-                return
+                return VerificationDisposition.RECOVERED
             if pending.kind is VerificationKind.CAMERA_POSE_CHANGED:
                 self._pending_camera_step_id = None
                 self._pending_camera_hold_millis = None
@@ -591,13 +781,19 @@ class WoodcutBankTask:
             elif pending.kind is VerificationKind.CAMERA_ZOOM_CHANGED:
                 self._pending_camera_zoom_step_id = None
             self._set_blocked(f"verification failed: {result.reason}")
-            return
+            return VerificationDisposition.BLOCKED
 
         outcome = result.outcome.kind
 
         if pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED:
             if outcome is not OutcomeKind.ITEM_QUANTITY_INCREASED:
                 return self._block_verification_outcome(pending, outcome)
+            verified_delta = getattr(result.outcome, "item_quantity_delta", None)
+            self.progress.items_gathered += (
+                verified_delta
+                if isinstance(verified_delta, int) and verified_delta > 0
+                else 1
+            )
             self.progress.target_key = None
             self.progress.phase = TaskPhase.FIND_TREE
             self._resource_no_yield_retries = 0
@@ -697,11 +893,16 @@ class WoodcutBankTask:
         if pending.kind is VerificationKind.ITEM_QUANTITY_EQUALS:
             if outcome is not OutcomeKind.ITEM_QUANTITY_EQUALS:
                 return self._block_verification_outcome(pending, outcome)
+            self.progress.inventories_banked += 1
             self.progress.phase = TaskPhase.CLOSE_BANK
             return
         if pending.kind is VerificationKind.INTERFACE_CLOSED:
             if outcome is not OutcomeKind.INTERFACE_CLOSED:
                 return self._block_verification_outcome(pending, outcome)
+            if self._stop_after_bank_close:
+                self._stop_after_bank_close = False
+                self.progress.phase = TaskPhase.COMPLETE
+                return
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
             return
@@ -792,7 +993,17 @@ class WoodcutBankTask:
             f"unexpected {outcome.value} outcome for {pending.kind.value}"
         )
 
-    def _find_tree(self, observation: Observation) -> Decision:
+    def _inventory_bank_threshold_reached(
+        self,
+        observation: Observation,
+    ) -> bool:
+        return bool(
+            observation.inventory.known
+            and observation.inventory.free_slots
+            < self.definition.inventory.minimum_free_slots
+        )
+
+    def _find_resource(self, observation: Observation) -> Decision:
         if self._target_lock is not None:
             self._clear_target_lock(
                 "resource discovery began without an active target episode"
@@ -801,21 +1012,26 @@ class WoodcutBankTask:
         self._next_resource_suppression = None
         suppressed_key = suppression[0] if suppression is not None else None
         suppression_code = suppression[1] if suppression is not None else None
-        if self.progress.cycles_completed >= self.binding.profile.cycle_goal:
+        if (
+            self.binding.profile.cycle_goal is not None
+            and self.progress.cycles_completed >= self.binding.profile.cycle_goal
+        ):
             self.progress.phase = TaskPhase.COMPLETE
             return self._wait(observation, "profile cycle goal is complete")
         work_area = self.definition.resource.work_area
-        if observation.inventory.full:
+        allow_route_reconciliation = not self._skip_initial_route_reconciliation
+        self._skip_initial_route_reconciliation = False
+        if self._inventory_bank_threshold_reached(observation):
             if (
                 self.definition.inventory.require_produced_item_when_full
                 and observation.inventory.quantity(self._produced_item_id) == 0
             ):
                 return self._block(
                     observation,
-                    "inventory is full without the definition's produced item",
+                    "inventory reached the bank threshold without the definition's produced item",
                 )
             outside_work_area = bool(
-                observation.plane != work_area.anchor.plane
+                observation.plane not in work_area.allowed_planes
                 or observation.location.distance_to(work_area.anchor)
                 > work_area.radius
             )
@@ -825,7 +1041,11 @@ class WoodcutBankTask:
             # "inside" the radial resource area.  Prefer exact definition-
             # owned route evidence there; only preserve the normal freshly-
             # filled transition at step zero.
-            resume_index = self._bank_route_resume_index(observation)
+            resume_index = (
+                self._bank_route_resume_index(observation)
+                if allow_route_reconciliation
+                else None
+            )
             if resume_index == 0 and not outside_work_area:
                 resume_index = None
             self.progress.phase = TaskPhase.NAVIGATE_TO_BANK
@@ -842,8 +1062,15 @@ class WoodcutBankTask:
                     observation,
                     "reobserved full inventory on the validated bank route",
                 )
-            return self._wait(observation, "inventory is full; fixed bank route selected")
-        return_resume_index = self._return_route_resume_index(observation)
+            return self._wait(
+                observation,
+                "inventory reached the bank threshold; fixed bank route selected",
+            )
+        return_resume_index = (
+            self._return_route_resume_index(observation)
+            if allow_route_reconciliation
+            else None
+        )
         bank = self.definition.bank
         inside_bank_area = bool(
             observation.plane == bank.anchor.plane
@@ -869,7 +1096,7 @@ class WoodcutBankTask:
                 "reobserved empty inventory on the validated return route",
             )
         if (
-            observation.plane != work_area.anchor.plane
+            observation.plane not in work_area.allowed_planes
             or observation.location.distance_to(work_area.anchor) > work_area.radius
         ):
             resume_index = return_resume_index
@@ -942,7 +1169,11 @@ class WoodcutBankTask:
                 )
             return self._block(observation, "player is outside the supported work area")
 
-        candidates, rejected = self._classify_trees(observation)
+        equipment_decision = self._equipment_decision(observation)
+        if equipment_decision is not None:
+            return equipment_decision
+
+        candidates, rejected = self._classify_resources(observation)
         if suppressed_key is not None:
             assert suppression_code is not None
             suppressed = tuple(
@@ -1033,7 +1264,7 @@ class WoodcutBankTask:
     def _bank_route_resume_index(
         self, observation: Observation
     ) -> int | None:
-        if not observation.inventory.full:
+        if not self._inventory_bank_threshold_reached(observation):
             return None
         return self._polyline_route_resume_index(
             self.definition.route_to_bank,
@@ -1073,20 +1304,27 @@ class WoodcutBankTask:
             return None
         return progress.segment_index
 
-    def _chop(self, observation: Observation) -> Decision:
-        if observation.inventory.full:
+    def _interact_resource(self, observation: Observation) -> Decision:
+        if self._inventory_bank_threshold_reached(observation):
             self.progress.target_key = None
             self.progress.phase = TaskPhase.NAVIGATE_TO_BANK
             self.progress.route_index = 0
             if self._target_lock is not None:
                 self._clear_target_lock("inventory filled before target activation")
-            return self._wait(observation, "inventory filled before the chop")
+            return self._wait(
+                observation,
+                "inventory reached the configured bank threshold before the resource interaction",
+            )
+
+        equipment_decision = self._equipment_decision(observation)
+        if equipment_decision is not None:
+            return equipment_decision
 
         target = observation.object_by_key(self.progress.target_key)
         if target is None and self._target_lock is not None:
             return self._handle_locked_target_omission(observation)
         target_rejections = (
-            self._tree_identity_rejection_codes(target)
+            self._resource_identity_rejection_codes(target)
             if target is not None
             else ()
         )
@@ -1171,9 +1409,9 @@ class WoodcutBankTask:
         selector_rows: dict[str, NearbyObject] = {}
         for object_id in sorted(self.definition.resource.selector.object_ids):
             for candidate in observation.objects_by_id(object_id):
-                if not self._tree_identity_rejection_codes(candidate):
+                if not self._resource_identity_rejection_codes(candidate):
                     selector_rows[candidate.key] = candidate
-        aim_occluded = target.key in self._tree_aim_occluded_keys(
+        aim_occluded = target.key in self._resource_aim_occluded_keys(
             tuple(selector_rows[key] for key in sorted(selector_rows))
         )
         if geometry_rejections or aim_occluded:
@@ -2379,7 +2617,7 @@ class WoodcutBankTask:
                 self.progress.phase is TaskPhase.CHOP
                 and self.progress.target_key == target.key
             ):
-                candidates, rejected = self._classify_trees(observation)
+                candidates, rejected = self._classify_resources(observation)
                 alternatives = tuple(
                     candidate
                     for candidate in candidates
@@ -3012,7 +3250,7 @@ class WoodcutBankTask:
         target: WorldPoint,
         camera_yaw: int,
     ) -> str | None:
-        error = WoodcutBankTask._camera_yaw_error(source, target, camera_yaw)
+        error = GatherBankTask._camera_yaw_error(source, target, camera_yaw)
         if error in {None, 0}:
             return None
         return "right" if error > 0 else "left"
@@ -3331,6 +3569,7 @@ class WoodcutBankTask:
         if observation.widgets.bank_pin_open:
             return self._block(observation, "bank PIN handling is out of scope")
         if observation.widgets.bank_open:
+            self._bank_unavailable_frames = 0
             if not observation.widgets.bank_readable:
                 return self._wait(observation, "bank is open but not readable")
             self.progress.phase = TaskPhase.DEPOSIT_LOGS
@@ -3359,15 +3598,29 @@ class WoodcutBankTask:
 
         targets, rejected = self._classify_bank_objects(observation)
         if not targets:
+            budget = self.definition.recovery.max_bank_unavailable_frames
+            if self._bank_unavailable_frames < budget:
+                self._bank_unavailable_frames += 1
+                return self._wait(
+                    observation,
+                    "configured bank is temporarily unavailable; "
+                    f"bounded re-observation {self._bank_unavailable_frames}/{budget}",
+                    evidence=self._object_decision_evidence(
+                        observation,
+                        action=selector.action,
+                        rejected=rejected,
+                    ),
+                )
             return self._block(
                 observation,
-                "exact configured bank is unavailable",
+                "exact configured bank remained unavailable after the bounded recovery budget",
                 evidence=self._object_decision_evidence(
                     observation,
                     action=selector.action,
                     rejected=rejected,
                 ),
             )
+        self._bank_unavailable_frames = 0
         target = targets[0]
         if self._target_lock is not None and self._target_lock.context == "bank":
             locked = observation.object_by_key(self._target_lock.key)
@@ -3463,7 +3716,7 @@ class WoodcutBankTask:
         self._reset_camera_recovery()
         return decision
 
-    def _deposit_logs(self, observation: Observation) -> Decision:
+    def _deposit_items(self, observation: Observation) -> Decision:
         bank_plane = self.definition.bank.anchor.plane
         inventory_rule = self.definition.inventory
         if not observation.widgets.bank_known:
@@ -3592,6 +3845,13 @@ class WoodcutBankTask:
                 observation, "bank may only be closed on its configured plane"
             )
         if not observation.widgets.bank_open:
+            if self._stop_after_bank_close:
+                self._stop_after_bank_close = False
+                self.progress.phase = TaskPhase.COMPLETE
+                return self._wait(
+                    observation,
+                    self.progress.completion_reason or "profile goal is complete",
+                )
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
             return self._wait(observation, "bank is already closed")
@@ -4399,11 +4659,15 @@ class WoodcutBankTask:
                 self.progress.phase = TaskPhase.FIND_TREE
                 return
             self.progress.cycles_completed += 1
-            self.progress.phase = (
-                TaskPhase.COMPLETE
-                if self.progress.cycles_completed >= self.binding.profile.cycle_goal
-                else TaskPhase.FIND_TREE
+            cycle_complete = bool(
+                self.binding.profile.cycle_goal is not None
+                and self.progress.cycles_completed >= self.binding.profile.cycle_goal
             )
+            self.progress.phase = (
+                TaskPhase.COMPLETE if cycle_complete else TaskPhase.FIND_TREE
+            )
+            if cycle_complete:
+                self.progress.completion_reason = "profile cycle goal is complete"
 
     def _contextual_progress_phase(self) -> TaskPhase | None:
         return (
@@ -4440,11 +4704,62 @@ class WoodcutBankTask:
         )
 
     def _cycle_progress_snapshot(self) -> TaskProgressSnapshot:
+        total = self.binding.profile.cycle_goal
+        if total is None:
+            total = max(
+                self.progress.cycles_completed,
+                self.binding.profile.inventories_banked_goal or 1,
+            )
         return TaskProgressSnapshot(
             "cycles",
             self.progress.cycles_completed,
-            self.binding.profile.cycle_goal,
+            total,
         )
+
+    def _metric_snapshots(self) -> tuple[TaskProgressSnapshot, ...]:
+        profile = self.binding.profile
+        metrics: list[TaskProgressSnapshot] = []
+        for label, current, total in (
+            ("cycles", self.progress.cycles_completed, profile.cycle_goal),
+            (
+                "items_gathered",
+                self.progress.items_gathered,
+                profile.item_quantity_goal,
+            ),
+            (
+                "inventories_banked",
+                self.progress.inventories_banked,
+                profile.inventories_banked_goal,
+            ),
+        ):
+            if total is not None:
+                metrics.append(
+                    TaskProgressSnapshot(label, min(current, total), total)
+                )
+        if profile.duration_seconds is not None:
+            elapsed = 0
+            if (
+                self._run_started_at_utc is not None
+                and self._last_observation_timestamp is not None
+            ):
+                elapsed = max(
+                    0,
+                    int(
+                        (
+                            self._last_observation_timestamp
+                            - self._run_started_at_utc
+                        ).total_seconds()
+                    ),
+                )
+            total_seconds = max(1, int(profile.duration_seconds))
+            metrics.append(
+                TaskProgressSnapshot(
+                    "duration_seconds",
+                    min(elapsed, total_seconds),
+                    total_seconds,
+                )
+            )
+        return tuple(metrics)
 
     def _target_continuity_snapshot(self) -> TargetContinuityEvidence:
         lock = self._target_lock
@@ -4587,14 +4902,20 @@ class WoodcutBankTask:
             lock.retained_reason = reason
             return "authoritative_absence", reason, "authoritative_target_absence"
 
+        omission_budget = (
+            min(
+                self.definition.target_policy.incomplete_omission_wait_frames,
+                self.definition.recovery.max_target_incomplete_frames,
+            )
+        )
         lock.incomplete_omission_frames = min(
             lock.incomplete_omission_frames + 1,
-            TARGET_INCOMPLETE_OMISSION_WAIT_FRAMES + 1,
+            omission_budget + 1,
         )
         explicit_incomplete = self._census_is_explicitly_incomplete(census)
         if (
             lock.incomplete_omission_frames
-            > TARGET_INCOMPLETE_OMISSION_WAIT_FRAMES
+            > omission_budget
         ):
             reason = (
                 "locked target remains retained after the bounded incomplete-frame "
@@ -4605,14 +4926,14 @@ class WoodcutBankTask:
             reason = (
                 "locked target omitted by an explicitly incomplete census; retained "
                 f"for continuity frame {lock.incomplete_omission_frames}/"
-                f"{TARGET_INCOMPLETE_OMISSION_WAIT_FRAMES}"
+                f"{omission_budget}"
             )
             code = "incomplete_census_target_omitted"
         else:
             reason = (
                 "locked target omitted while census authority is unknown; retained "
                 f"for continuity frame {lock.incomplete_omission_frames}/"
-                f"{TARGET_INCOMPLETE_OMISSION_WAIT_FRAMES}"
+                f"{omission_budget}"
             )
             code = "unknown_census_target_omitted"
         lock.retained_reason = reason
@@ -4748,7 +5069,7 @@ class WoodcutBankTask:
         eligible_evidence = tuple(target_evidence(target) for target in eligible)
         selected_evidence = target_evidence(selected) if selected is not None else None
         ordered_rejected = nsmallest(
-            MAX_TARGET_REJECTION_EVIDENCE,
+            self.definition.target_policy.max_rejection_evidence,
             rejected,
             key=lambda item: item[0].key,
         )
@@ -4807,7 +5128,7 @@ class WoodcutBankTask:
             rejected=(RejectedCandidateEvidence(target, codes),)
         )
 
-    def _classify_trees(
+    def _classify_resources(
         self, observation: Observation
     ) -> tuple[
         tuple[NearbyObject, ...],
@@ -4831,9 +5152,9 @@ class WoodcutBankTask:
         acquirable: list[NearbyObject] = []
         rejected: list[tuple[NearbyObject, tuple[str, ...]]] = []
         for target in indexed_candidates:
-            codes = self._tree_identity_rejection_codes(target)
+            codes = self._resource_identity_rejection_codes(target)
             if codes:
-                rejected.append((target, self._tree_rejection_codes(target)))
+                rejected.append((target, self._resource_rejection_codes(target)))
             else:
                 acquirable.append(target)
 
@@ -4843,7 +5164,7 @@ class WoodcutBankTask:
         rejected_keys = set(indexed_by_key)
         remaining_evidence = max(
             0,
-            MAX_TARGET_REJECTION_EVIDENCE - len(rejected),
+            self.definition.target_policy.max_rejection_evidence - len(rejected),
         )
         irrelevant: list[NearbyObject] = []
         if remaining_evidence:
@@ -4857,11 +5178,11 @@ class WoodcutBankTask:
                 key=lambda target: target.key,
             )
             rejected.extend(
-                (target, self._tree_rejection_codes(target))
+                (target, self._resource_rejection_codes(target))
                 for target in irrelevant
             )
 
-        occluded_keys = self._tree_aim_occluded_keys(tuple(acquirable))
+        occluded_keys = self._resource_aim_occluded_keys(tuple(acquirable))
         eligible: list[NearbyObject] = []
         for target in acquirable:
             if (
@@ -4873,7 +5194,7 @@ class WoodcutBankTask:
                 rejected.append((target, ("aim_point_occluded",)))
 
         ranked = nsmallest(
-            MAX_TARGET_CANDIDATES,
+            self.definition.target_policy.max_candidates,
             eligible,
             key=lambda target: self._resource_selection_rank(
                 observation,
@@ -4896,7 +5217,7 @@ class WoodcutBankTask:
             "ranked_candidates": len(ranked),
             "rejection_evidence": min(
                 len(rejected),
-                MAX_TARGET_REJECTION_EVIDENCE,
+                self.definition.target_policy.max_rejection_evidence,
             ),
         }
         return tuple(ranked), tuple(rejected)
@@ -4909,6 +5230,11 @@ class WoodcutBankTask:
         """Prefer exact resources that need no camera action before distance."""
 
         distance = observation.location.distance_to(target.location)
+        if (
+            self.definition.target_policy.selection_mode
+            is TargetSelectionMode.NEAREST
+        ):
+            return (0, 0, distance, distance, target.key)
         if not self._has_geometry(target) or target.location is None:
             return (2, 5, float("inf"), distance, target.key)
         if observation.viewport_bounds is None:
@@ -4972,7 +5298,7 @@ class WoodcutBankTask:
         )
         indexed_keys = {target.key for target in indexed}
         diagnostic_rows = nsmallest(
-            MAX_TARGET_REJECTION_EVIDENCE,
+            self.definition.target_policy.max_rejection_evidence,
             (
                 target
                 for target in observation.nearby_objects
@@ -5027,7 +5353,7 @@ class WoodcutBankTask:
             for target in observation.objects_by_id(object_id):
                 indexed_by_key[target.key] = target
         diagnostic_rows = nsmallest(
-            MAX_TARGET_REJECTION_EVIDENCE,
+            self.definition.target_policy.max_rejection_evidence,
             (
                 target
                 for target in observation.nearby_objects
@@ -5115,16 +5441,16 @@ class WoodcutBankTask:
             and self._has_geometry(target)
         )
 
-    def _is_actionable_tree(self, target: NearbyObject) -> bool:
-        return not self._tree_rejection_codes(target)
+    def _is_actionable_resource(self, target: NearbyObject) -> bool:
+        return not self._resource_rejection_codes(target)
 
-    def _tree_rejection_codes(self, target: NearbyObject) -> tuple[str, ...]:
+    def _resource_rejection_codes(self, target: NearbyObject) -> tuple[str, ...]:
         return (
-            *self._tree_identity_rejection_codes(target),
+            *self._resource_identity_rejection_codes(target),
             *self._geometry_rejection_codes(target),
         )
 
-    def _tree_identity_rejection_codes(
+    def _resource_identity_rejection_codes(
         self, target: NearbyObject
     ) -> tuple[str, ...]:
         selector = self.definition.resource.selector
@@ -5139,7 +5465,7 @@ class WoodcutBankTask:
         if target.location is None:
             codes.append("location_unavailable")
         else:
-            if target.location.plane != work_area.anchor.plane:
+            if target.location.plane not in work_area.allowed_planes:
                 codes.append("wrong_plane")
             elif target.location.distance_to(work_area.anchor) > work_area.radius:
                 codes.append("outside_work_area")
@@ -5148,7 +5474,7 @@ class WoodcutBankTask:
         return tuple(codes)
 
     @staticmethod
-    def _tree_aim_is_unambiguous(
+    def _resource_aim_is_unambiguous(
         target: NearbyObject, actionable: list[NearbyObject]
     ) -> bool:
         # Polygon-backed targets are resolved against fresh, inset geometry in
@@ -5159,12 +5485,12 @@ class WoodcutBankTask:
         point = target.geometry.screen_point
         if point is None:
             return False
-        return target.key not in WoodcutBankTask._tree_aim_occluded_keys(
+        return target.key not in GatherBankTask._resource_aim_occluded_keys(
             tuple(actionable)
         )
 
     @staticmethod
-    def _tree_aim_occluded_keys(
+    def _resource_aim_occluded_keys(
         actionable: tuple[NearbyObject, ...],
     ) -> set[str]:
         """Index candidate bounds into bounded screen cells for point queries."""
@@ -5301,3 +5627,8 @@ class WoodcutBankTask:
             ),
             evidence or DecisionEvidence(),
         )
+
+
+# Source-compatible import for integrations and retained proof tests. It is an
+# alias, not a second implementation or runtime path.
+WoodcutBankTask = GatherBankTask

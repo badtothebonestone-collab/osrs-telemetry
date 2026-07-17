@@ -30,6 +30,7 @@ from osrs_bot.model import (
     Action,
     ActionKind,
     BANK_INTERFACE_NAME,
+    EquipmentObservation,
     InventoryItem,
     InventoryObservation,
     Observation,
@@ -62,9 +63,11 @@ from osrs_bot.task_contract import (
     TargetEvidence,
     TargetingDecisionEvidence,
     TaskProgressSnapshot,
+    TaskLifecycleSnapshot,
     TaskSnapshot,
     TaskStatus,
     TimingDecisionEvidence,
+    VerificationDisposition,
 )
 from osrs_bot.verification import (
     CameraPoseResult,
@@ -479,6 +482,12 @@ class EngineFrameTests(unittest.TestCase):
             route_step="castle_path_3",
             route_progress=route_progress,
             cycle_progress=cycle_progress,
+            metrics=(TaskProgressSnapshot("items_gathered", 2, 10),),
+            lifecycle=TaskLifecycleSnapshot(
+                start_at_utc="2026-07-16T20:00:00+00:00",
+                run_started_at_utc="2026-07-16T20:00:01+00:00",
+                reconciliation_status="fresh_observation_reconciled",
+            ),
             target_continuity=TargetContinuityEvidence(
                 locked_target_key="tree:selected",
                 locked_tick=96,
@@ -500,7 +509,12 @@ class EngineFrameTests(unittest.TestCase):
         verification = VerificationResult(
             VerificationStatus.PASS,
             "item_quantity_increased",
-            Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 101),
+            Outcome(
+                OutcomeKind.ITEM_QUANTITY_INCREASED,
+                101,
+                item_id=1511,
+                item_quantity_delta=2,
+            ),
         )
         publisher = EngineFramePublisher()
 
@@ -530,6 +544,11 @@ class EngineFrameTests(unittest.TestCase):
         self.assertEqual("castle_path_3", payload["task"]["routeStep"])
         self.assertEqual(3, payload["task"]["routeProgress"]["current"])
         self.assertEqual(0, payload["task"]["cycleProgress"]["current"])
+        self.assertEqual(2, payload["task"]["metrics"][0]["current"])
+        self.assertEqual(
+            "fresh_observation_reconciled",
+            payload["task"]["lifecycle"]["reconciliationStatus"],
+        )
         self.assertEqual(
             {
                 "lockedTargetKey": "tree:selected",
@@ -592,6 +611,8 @@ class EngineFrameTests(unittest.TestCase):
         )
         self.assertEqual(2, payload["selectedTarget"]["distance"])
         self.assertEqual("item_quantity_increased", payload["lastVerification"]["outcome"]["kind"])
+        self.assertEqual(1511, payload["lastVerification"]["outcome"]["itemId"])
+        self.assertEqual(2, payload["lastVerification"]["outcome"]["itemQuantityDelta"])
         self.assertIsNone(payload["lastVerification"]["failureKind"])
         self.assertIn("cameraYaw", payload["observation"])
         self.assertIsNone(payload["observation"]["textInputActive"])
@@ -651,6 +672,13 @@ class EngineFrameTests(unittest.TestCase):
             free_slots=27,
             known=True,
         )
+        equipment = EquipmentObservation(
+            items=(InventoryItem(3, 1265, 1, "Bronze pickaxe"),),
+            slot_count=14,
+            occupied_slots=1,
+            free_slots=13,
+            known=True,
+        )
         observation = Observation(
             player=PlayerObservation(),
             location=location,
@@ -677,6 +705,7 @@ class EngineFrameTests(unittest.TestCase):
             source_coherent=True,
             camera_zoom=512,
             text_input_active=True,
+            equipment=equipment,
         )
 
         reference = ObservationReference.from_observation(
@@ -701,6 +730,7 @@ class EngineFrameTests(unittest.TestCase):
         self.assertEqual(512, reference.camera_zoom)
         self.assertEqual("too_close", reference.camera_zoom_classification)
         self.assertIs(inventory, reference.inventory)
+        self.assertIs(equipment, reference.equipment)
         self.assertEqual(
             {"x": 3195, "y": 3248, "plane": 0},
             payload["playerLocation"],
@@ -723,6 +753,7 @@ class EngineFrameTests(unittest.TestCase):
             },
             payload["inventory"]["items"][0],
         )
+        self.assertEqual(1265, payload["equipment"]["items"][0]["itemId"])
         self.assertNotIn("count", payload["sceneCensus"])
         self.assertEqual(
             {"schema": "observation_pipeline_evidence.v1"},
@@ -870,6 +901,7 @@ class EngineFrameTests(unittest.TestCase):
             stage=EngineStage.VERIFIED,
             task=TaskSnapshot("woodcut_bank", TaskStatus.RUNNING, "find_tree"),
             last_verification=failure,
+            verification_disposition=VerificationDisposition.BLOCKED,
         )
 
         payload = frame.to_dict()["lastVerification"]
@@ -878,6 +910,7 @@ class EngineFrameTests(unittest.TestCase):
             payload["failureKind"],
         )
         self.assertIsNone(payload["outcome"])
+        self.assertEqual("blocked", payload["disposition"])
 
     def test_verified_camera_pose_result_survives_as_numeric_diagnostics(self) -> None:
         result = VerificationResult(
